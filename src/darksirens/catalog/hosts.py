@@ -8,8 +8,6 @@ there is no string registry or survey-native column interpretation here.
 
 from __future__ import annotations
 
-from typing import Any
-
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
