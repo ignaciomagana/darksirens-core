@@ -344,7 +344,6 @@ def _selection_completion_curves_impl(
     if params.z_depth is not None:
         depth_mask = zgrid <= params.z_depth
         dN_miss = jnp.where(depth_mask, dN_miss, state.dN_exp)
-        C = jnp.where(depth_mask, C, 0.0)
 
     N_miss = jnp.trapezoid(dN_miss, zgrid)
     dN_exp_pos = jnp.where(state.dN_exp > 0.0, state.dN_exp, 1.0)
@@ -373,11 +372,12 @@ def selection_completion_curves(
 ) -> CompletionCurves:
     """Ordinary non-LSS missing-host budget from an explicit selection model.
 
-    The selection curve is radial and therefore identical for every catalog row.
-    ``z_depth`` retains the ordinary catalog semantics: above a finite depth
-    ``C=0`` and the missing density is the full expected count density.  The
-    expected-count amplitude is unchanged from :mod:`darksirens.catalog.completeness`,
-    including its ``n0 * H0^-3`` scaling.
+    The raw radial selection curve is identical for every catalog row.  With a
+    finite ``z_depth`` the consumed missing density relaxes to the full expected
+    count density above the depth, so ``C_eff`` is zero there; the returned raw
+    ``C`` diagnostic remains the unmodified selection curve, matching the frozen
+    legacy state API.  The expected-count amplitude is unchanged from
+    :mod:`darksirens.catalog.completeness`, including its ``n0 * H0^-3`` scaling.
     """
 
     return _selection_completion_curves_impl(cosmo, params, catalog, model)

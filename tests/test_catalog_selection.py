@@ -172,12 +172,16 @@ def test_selection_completion_preserves_expected_count_amplitude_and_depth():
     cat, params = _catalog(z_depth=0.25)
     curves = selection_completion_curves(COSMO, params, cat, GAUSS)
     state = build_completion_state(COSMO, params, cat)
+    raw = np.asarray(selection_curve(zgrid, COSMO, GAUSS))
     above = np.asarray(zgrid) > 0.25
-    assert np.all(np.asarray(curves.C)[:, above] == 0.0)
+    # The state API keeps the raw selection curve; only its consumed budget is
+    # relaxed beyond the depth, where C_eff must be exactly zero.
     for row in range(cat.zgals.shape[0]):
+        np.testing.assert_array_equal(np.asarray(curves.C[row]), raw)
         np.testing.assert_array_equal(
             np.asarray(curves.dN_miss[row])[above], np.asarray(state.dN_exp)[above]
         )
+        assert np.all(np.asarray(curves.C_eff[row])[above] == 0.0)
 
     # The firewall is on C_sel, not on the volumetric missing-count amplitude.
     low = selection_completion_curves(_cosmo(50.0), PARAMS, cat, GAUSS)
