@@ -94,19 +94,37 @@ def test_empty_row_is_exactly_impossible():
     state = build_catalog_kernel_state(COSMO, params, cat)
     z = jnp.asarray([0.1, 0.3])
     row = jnp.asarray([2, 2], dtype=jnp.int32)
-    assert np.all(np.isneginf(np.asarray(eval_log_catalog_prior_state_vmap(z, row, state, cat))))
-    assert np.all(np.isneginf(np.asarray(log_catalog_prior_vmap(z, row, COSMO, params, cat))))
+    assert np.all(
+        np.isneginf(np.asarray(eval_log_catalog_prior_state_vmap(z, row, state, cat)))
+    )
+    assert np.all(
+        np.isneginf(np.asarray(log_catalog_prior_vmap(z, row, COSMO, params, cat)))
+    )
 
 
-def test_state_and_direct_scalar_kernel_agree():
+def test_state_and_direct_scalar_kernel_agree_before_underflow_edge():
     cat = _catalog()
     params = CatalogParameters(delta=0.6, sigma_kde=0.02)
     state = build_catalog_kernel_state(COSMO, params, cat)
-    z = jnp.asarray([0.03, 0.09, 0.19, 0.32, 0.55, 1.1])
+    z = jnp.asarray([0.03, 0.09, 0.19, 0.32, 0.55, 0.60])
     row = jnp.asarray([0, 0, 0, 1, 0, 1], dtype=jnp.int32)
     direct = np.asarray(log_catalog_prior_vmap(z, row, COSMO, params, cat))
     cached = np.asarray(eval_log_catalog_prior_state_vmap(z, row, state, cat))
     np.testing.assert_allclose(cached, direct, rtol=1e-12, atol=0.0)
+
+
+def test_state_evaluator_preserves_legacy_far_tail_underflow():
+    """The mature cached path is one-pass and floors remote tails at -inf."""
+
+    cat = _catalog()
+    params = CatalogParameters(delta=0.6, sigma_kde=0.02)
+    state = build_catalog_kernel_state(COSMO, params, cat)
+    z = jnp.asarray([1.10])
+    row = jnp.asarray([1], dtype=jnp.int32)
+    cached = np.asarray(eval_log_catalog_prior_state_vmap(z, row, state, cat))
+    direct = np.asarray(log_catalog_prior_vmap(z, row, COSMO, params, cat))
+    assert np.isneginf(cached[0])
+    assert np.isfinite(direct[0])
 
 
 def test_base_weight_scale_cancels_from_catalog_shape():
