@@ -73,6 +73,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_catalog_hierarchical.py
 
+      - name: Phase 5D1 marked-host tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_catalog_hosts.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -174,5 +178,24 @@ jobs:
         run: |
           python candidate/tools/compare_catalog_likelihood_probe.py \
             /tmp/likelihood-legacy.json /tmp/likelihood-candidate.json \
+            --golden candidate/tests/reference/legacy/unified_k1_golden.json \
+            --rtol 1e-12
+
+      - name: Evaluate pinned legacy marked-host fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_catalog_marks.py \
+            --implementation legacy --out /tmp/marks-legacy.json
+
+      - name: Evaluate reconstructed marked-host fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_catalog_marks.py \
+            --implementation candidate --out /tmp/marks-candidate.json
+
+      - name: Require Phase 5D1 marked-host parity
+        run: |
+          python candidate/tools/compare_catalog_likelihood_probe.py \
+            /tmp/marks-legacy.json /tmp/marks-candidate.json \
             --golden candidate/tests/reference/legacy/unified_k1_golden.json \
             --rtol 1e-12
