@@ -120,14 +120,14 @@ def test_chieff_reference_requires_named_reference_prior(tmp_path):
 def test_component_basis_requires_component_model(tmp_path):
     pe = tmp_path / "pe_component.h5"
     write_pe(pe, basis="component")
-    with pytest.raises(RuntimeError, match="spin_basis"):
+    with pytest.raises(RuntimeError, match="ADVISORY"):
         load_gw_store(pe)
     store = load_gw_store(pe, fit_columns=COMPONENT_FIT)
     assert store.fit_columns == COMPONENT_FIT
 
     sel = tmp_path / "sel_component.h5"
     write_sel(sel, basis="component", swap=False)
-    with pytest.raises(RuntimeError, match="spin_basis"):
+    with pytest.raises(RuntimeError, match="ADVISORY"):
         load_selection_store(sel)
     store = load_selection_store(sel, fit_columns=COMPONENT_FIT)
     assert store.fit_columns == COMPONENT_FIT
