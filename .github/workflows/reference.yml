@@ -1,0 +1,22 @@
+name: reference-integrity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frozen-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate frozen legacy bundle
+        run: python tools/validate_reference.py
+      - name: Self-test comparator against CPU reference
+        run: >-
+          python tools/compare_reference.py
+          tests/reference/legacy/unified_k1_golden.json
+          --backend cpu --owner all --exact
