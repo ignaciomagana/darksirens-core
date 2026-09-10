@@ -1,0 +1,79 @@
+name: legacy-reference-replay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tests/reference/legacy/**'
+      - 'tools/validate_reference.py'
+      - 'tools/compare_reference.py'
+      - 'tools/replay_legacy_reference.py'
+      - '.github/workflows/legacy-reference-replay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JAX_PLATFORMS: cpu
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+
+jobs:
+  replay-pinned-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out reconstruction repository
+        uses: actions/checkout@v4
+
+      - name: Check out pinned legacy implementation separately
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install legacy validated CPU stack
+        run: >-
+          python -m pip install
+          'jax[cpu]==0.4.34'
+          'numpy==1.26.4'
+          'scipy==1.12.0'
+          'matplotlib==3.9.2'
+          'healpy==1.17.3'
+          'h5py==3.12.1'
+          'astropy==6.1.4'
+          'tqdm==4.66.5'
+          'dynesty==2.1.4'
+          'seaborn==0.12.2'
+          'numpyro==0.17.0'
+          'pytest==8.3.4'
+
+      - name: Validate immutable reference files
+        run: python tools/validate_reference.py
+
+      - name: Evaluate pinned legacy code in its own import root
+        run: >-
+          python tools/replay_legacy_reference.py
+          --legacy-root legacy
+          --out /tmp/legacy-current.json
+
+      - name: Verify pinned-checkout replay envelope
+        run: >-
+          python tools/compare_reference.py /tmp/legacy-current.json
+          --backend cpu --owner all --profile legacy-replay
+
+      - name: Verify ordinary core cells still meet canonical tolerance
+        run: >-
+          python tools/compare_reference.py /tmp/legacy-current.json
+          --backend cpu --owner core --profile canonical
+
+      - name: Verify weak-lensing cell still meets canonical tolerance
+        run: >-
+          python tools/compare_reference.py /tmp/legacy-current.json
+          --backend cpu --owner lensing --profile canonical
