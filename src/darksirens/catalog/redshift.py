@@ -68,10 +68,18 @@ def log_galaxy_measure_grid(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
 ) -> jnp.ndarray:
-    """Return ``log[dV_c/dz * (1+z)^delta]`` on the shared redshift grid."""
+    """Return the frozen legacy ``log[dV_c/dz * (1+z)^delta]`` grid.
+
+    Keep the operation order exactly as legacy: form the linear galaxy measure
+    first and take its logarithm afterwards.  Rewriting this as
+    ``log(dV) + delta*log1p(z)`` is analytically identical but shifts the last
+    few floating-point bits, which is amplified by near-complete ``1-Nmiss/Nexp``
+    differences in the completeness model.
+    """
 
     dV = dV_of_z(zgrid, cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa)
-    return jnp.log(jnp.maximum(dV, 1.0e-300)) + params.delta * jnp.log1p(zgrid)
+    g = dV * (1.0 + zgrid) ** params.delta
+    return jnp.log(jnp.maximum(g, 1.0e-300))
 
 
 def _row_real_mask(zs, ws, ngal):
