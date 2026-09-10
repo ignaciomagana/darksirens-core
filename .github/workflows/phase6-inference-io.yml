@@ -55,6 +55,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_result_artifact.py
 
+      - name: Phase 6B checkpoint-plan tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_checkpoint_plan.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -81,8 +85,13 @@ jobs:
               "numpyro",
               "tinyns",
           )
+          paths = list(Path("src/darksirens/io").rglob("*.py"))
+          paths.extend([
+              Path("src/darksirens/inference/__init__.py"),
+              Path("src/darksirens/inference/checkpointing.py"),
+          ])
           bad = []
-          for path in Path("src/darksirens/io").rglob("*.py"):
+          for path in paths:
               tree = ast.parse(path.read_text())
               for node in ast.walk(tree):
                   names = []
@@ -94,15 +103,15 @@ jobs:
                       if any(name == x or name.startswith(x + ".") for x in forbidden):
                           bad.append((str(path), name))
           assert not bad, bad
-          print("portable IO has no JAX/CLI/survey/LSS/lensing/sampler dependency")
+          print("portable inference/IO has no JAX/CLI/survey/LSS/lensing/sampler dependency")
           PY
           python - <<'PY'
           import sys
           import darksirens.io.results
-          assert "jax" not in sys.modules
-          assert "jaxlib" not in sys.modules
-          assert "darksirens.cli" not in sys.modules
-          print("darksirens.io.results import is JAX/CLI free")
+          import darksirens.inference.checkpointing
+          bad = ("jax", "jaxlib", "dynesty", "numpyro", "tinyns", "darksirens.cli")
+          assert not [name for name in bad if name in sys.modules]
+          print("Phase 6A/6B light imports are backend/JAX/CLI free")
           PY
 
       - name: Evaluate pinned legacy result-artifact behavior
@@ -127,6 +136,30 @@ jobs:
           if legacy != candidate:
               raise SystemExit(f"result-artifact parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6A legacy/new result-artifact behavior is exact")
+          PY
+
+      - name: Evaluate pinned legacy checkpoint-plan behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_checkpoint_plan.py \
+            --implementation legacy --out /tmp/checkpoint-plan-legacy.json
+
+      - name: Evaluate reconstructed checkpoint-plan behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_checkpoint_plan.py \
+            --implementation candidate --out /tmp/checkpoint-plan-candidate.json
+
+      - name: Require exact Phase 6B checkpoint-plan parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/checkpoint-plan-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/checkpoint-plan-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(f"checkpoint-plan parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          print("Phase 6B legacy/new checkpoint-plan behavior is exact")
           PY
 
       - name: Install pinned legacy parity dependencies
