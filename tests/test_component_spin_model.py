@@ -16,7 +16,6 @@ import jax.numpy as jnp
 
 from darksirens.population.component_spin import (
     COMPONENT_SPIN_COLUMNS,
-    ComponentSpinModel,
     default_component_spin,
 )
 

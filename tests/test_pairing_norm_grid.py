@@ -52,7 +52,6 @@ from dataclasses import replace as _dc_replace
 import darksirens.population.utils as U
 from darksirens.population.utils import (
     PAIRING_PANEL_NQ,
-    get_q_grid,
     sfilter_low,
     normalization_grid_settings,
     size_pairing_grid_to_support,

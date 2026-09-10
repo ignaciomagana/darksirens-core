@@ -21,7 +21,6 @@ from darksirens.population import (
 from darksirens.population.base import PopulationModel
 from darksirens.population.grammar import (
     GAMMA_FIDUCIAL,
-    ModelNameError,
     parse_model_name,
 )
 from darksirens.population.registry import MODEL_NAME_LATEX, get_model
