@@ -1,0 +1,110 @@
+name: phase3-population
+
+on:
+  push:
+    branches: [rebuild/phase3-population]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  population:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: candidate/pyproject.toml
+
+      - name: Install validated CPU numerics and GP extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
+            "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" "ruff==0.15.20" \
+            "equinox==0.11.10" "tinygp==0.3.0"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src tools --select F,E9
+          python -m compileall -q tests
+
+      - name: Phase 2 regression tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_foundation_imports.py \
+            tests/test_jax_runtime.py \
+            tests/test_gw_store_contract.py
+
+      - name: Population registry and grammar tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q tests/test_population_registry_golden.py
+          python -m pytest -q tests/test_population_grammar.py
+          python -m pytest -q tests/test_population_prior_contract.py
+
+      - name: Population normalization, support and component-spin tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q tests/test_component_spin_model.py
+          python -m pytest -q tests/test_pairing_norm_grid.py
+          python -m pytest -q tests/test_population_model_support.py
+          python -m pytest -q tests/test_pop_gradient_nan_safety.py
+
+      - name: GP population tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_gppop_population.py \
+            tests/test_gp_q_normalization.py
+
+      - name: Full reconstructed test suite
+        working-directory: candidate
+        run: python -m pytest -q
+
+      - name: Probe pinned legacy population models
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_population.py \
+            --api legacy --output /tmp/population-legacy.json
+
+      - name: Probe reconstructed population models
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_population.py \
+            --api new --output /tmp/population-new.json
+
+      - name: Compare population outputs against pinned legacy
+        run: |
+          python candidate/tools/compare_cosmology_probe.py \
+            /tmp/population-legacy.json /tmp/population-new.json --rtol 1e-12
+
+      - name: Verify optional dependency boundary
+        working-directory: /tmp
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens.population
+          assert "tinygp" not in sys.modules
+          print("population import remains tinygp-lazy")
+          PY
