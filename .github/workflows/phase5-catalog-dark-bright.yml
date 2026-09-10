@@ -77,6 +77,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_catalog_hosts.py
 
+      - name: Phase 5D2 catalog-selection tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_catalog_selection.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -99,7 +103,9 @@ jobs:
               "healpy",
           )
           bad = []
-          for path in Path("src/darksirens/catalog").rglob("*.py"):
+          paths = list(Path("src/darksirens/catalog").rglob("*.py"))
+          paths.append(Path("src/darksirens/selection/catalog.py"))
+          for path in paths:
               tree = ast.parse(path.read_text())
               for node in ast.walk(tree):
                   names = []
@@ -111,7 +117,7 @@ jobs:
                       if any(name == x or name.startswith(x + ".") for x in forbidden):
                           bad.append((str(path), name))
           assert not bad, bad
-          print("catalog runtime has no survey/LSS/lensing/CLI/HEALPix dependency")
+          print("catalog/selection runtime has no survey/LSS/lensing/CLI/HEALPix dependency")
           PY
           python - <<'PY'
           import sys
@@ -119,7 +125,8 @@ jobs:
           assert "jax" not in sys.modules
           assert "darksirens.cosmology.distances" not in sys.modules
           assert "darksirens.catalog.completeness" not in sys.modules
-          print("light catalog import leaves JAX, cosmology tables, and completeness tables unloaded")
+          assert "darksirens.selection.catalog" not in sys.modules
+          print("light catalog import leaves JAX, cosmology tables, completeness, and selection runtime unloaded")
           PY
 
       - name: Install pinned legacy parity dependencies
@@ -199,3 +206,20 @@ jobs:
             /tmp/marks-legacy.json /tmp/marks-candidate.json \
             --golden candidate/tests/reference/legacy/unified_k1_golden.json \
             --rtol 1e-12
+
+      - name: Evaluate pinned legacy catalog-selection fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_catalog_selection.py \
+            --implementation legacy --out /tmp/selection-legacy.json
+
+      - name: Evaluate reconstructed catalog-selection fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_catalog_selection.py \
+            --implementation candidate --out /tmp/selection-candidate.json
+
+      - name: Require Phase 5D2 catalog-selection parity
+        run: |
+          python candidate/tools/compare_catalog_completeness_probe.py \
+            /tmp/selection-legacy.json /tmp/selection-candidate.json --rtol 1e-12
