@@ -1,0 +1,124 @@
+name: phase4-bootstrap
+
+on:
+  push:
+    branches: [rebuild/phase4-spectral-likelihood]
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+      - name: Port Phase 4 low-level core slice
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path('.')
+          legacy = root / 'legacy'
+          src = root / 'src/darksirens'
+          (src / 'selection').mkdir(parents=True, exist_ok=True)
+          (src / 'likelihood').mkdir(parents=True, exist_ok=True)
+
+          # Small shared numerical primitive needed by selection reductions.
+          (src / '_numerics.py').write_text('''"""Small JAX numerical primitives shared by core likelihood modules."""\n\nimport jax.numpy as jnp\nfrom jax import jit\nfrom jax.scipy.special import logsumexp\n\n\n@jit\ndef logdiffexp(x, y):\n    """Stable log(exp(x) - exp(y)) for y <= x."""\n    return jnp.where(y <= x, x + jnp.log1p(-jnp.exp(y - x)), -jnp.inf)\n\n\ndef logsumexp_neginf_safe(terms, axis=None):\n    """NaN-gradient-safe logsumexp for arrays that may be entirely -inf."""\n    neg_inf = jnp.isneginf(terms)\n    safe = jnp.where(neg_inf, -1e30, terms)\n    live = jnp.any(~neg_inf, axis=axis)\n    return jnp.where(live, logsumexp(safe, axis=axis), -jnp.inf)\n''')
+
+          # Runtime likelihood event type lives with GW data, not in a global core.types bag.
+          types_path = src / 'gw/types.py'
+          text = types_path.read_text()
+          if 'class GWEvent(NamedTuple):' not in text:
+              text = text.replace('from typing import Any, Mapping', 'from typing import Any, Mapping, NamedTuple')
+              text += '''\n\nclass GWEvent(NamedTuple):\n    """JAX-compatible runtime PE/injection sample container."""\n\n    m1det: Any\n    m2det: Any\n    dL: Any\n    chieff: Any\n    prior_wt: Any\n    pixels: Any\n    q: Any\n    valid: Any\n    nx: Any = None\n    ny: Any = None\n    nz: Any = None\n    spin: Any = None\n\n    @property\n    def chirp_mass(self):\n        return (self.m1det * self.m2det) ** (3 / 5) / (self.m1det + self.m2det) ** (1 / 5)\n'''
+              types_path.write_text(text)
+
+          # Port the validated runtime constructor/padder verbatim except ownership import.
+          runtime = (legacy / 'darksirens/likelihood/events.py').read_text()
+          runtime = runtime.replace('from darksirens.core.types import GWEvent', 'from .types import GWEvent')
+          (src / 'gw/runtime.py').write_text(runtime)
+
+          # Port the validated GW selection estimator; only dependency ownership changes.
+          sel = (legacy / 'darksirens/likelihood/selection.py').read_text()
+          sel = sel.replace('from darksirens.utils.utils import logsumexp_neginf_safe', 'from darksirens._numerics import logsumexp_neginf_safe')
+          sel = sel.replace('from darksirens.core.types import GWEvent, EMCatalog', 'from darksirens.gw.types import GWEvent\nfrom typing import Any')
+          sel = sel.replace('from darksirens.likelihood.events import pad_gw_event_to_multiple', 'from darksirens.gw.runtime import pad_gw_event_to_multiple')
+          sel = sel.replace('from darksirens.core.constants import DEFAULT_MAX_LIKELIHOOD_VARIANCE', 'DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0')
+          sel = sel.replace('EMCatalog', 'Any')
+          (src / 'selection/gw.py').write_text(sel)
+          (src / 'selection/__init__.py').write_text('''"""Detection-selection corrections for GW population inference."""\n\nfrom .gw import (\n    DEFAULT_MAX_LIKELIHOOD_VARIANCE,\n    compute_selection_term,\n    log_evidence_and_mc_variance,\n    selection_log_correction,\n    selection_reduce_from_ldw_provider,\n)\n\n__all__ = [\n    "DEFAULT_MAX_LIKELIHOOD_VARIANCE",\n    "compute_selection_term",\n    "log_evidence_and_mc_variance",\n    "selection_log_correction",\n    "selection_reduce_from_ldw_provider",\n]\n''')
+
+          # Canonical sample-weight/Jacobian math was misplaced under legacy inference.utils.
+          # Preserve its low-level call signature for parity while dropping concrete catalog/survey types.
+          weights = (legacy / 'darksirens/inference/utils.py').read_text()
+          weights = weights.replace(
+              'from darksirens.utils.cosmology import z_of_dL, z_of_dL_precomputed, ddL_of_z, ddL_of_z_precomputed',
+              'from darksirens.cosmology.distances import z_of_dL, z_of_dL_precomputed, ddL_of_z, ddL_of_z_precomputed'
+          )
+          weights = weights.replace('from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog', 'from darksirens.cosmology.parameters import CosmologyParameters as CosmoParams\nfrom typing import Any\nSurveyParams = Any\nEMCatalog = Any')
+          (src / 'likelihood/weights.py').write_text(weights)
+          (src / 'likelihood/__init__.py').write_text('''"""Core hierarchical-likelihood primitives."""\n\nfrom .weights import (\n    M1DET_Q_DL_COORDS,\n    log_jacobian_dL_to_z,\n    log_jacobian_m1src_q_z_to_m1det_q_dL,\n    log_sample_weight,\n    log_target_density_m1det_q_dL,\n)\n\n__all__ = [\n    "M1DET_Q_DL_COORDS",\n    "log_jacobian_dL_to_z",\n    "log_jacobian_m1src_q_z_to_m1det_q_dL",\n    "log_sample_weight",\n    "log_target_density_m1det_q_dL",\n]\n''')
+
+          # Export runtime event helpers from the GW namespace.
+          gw_init = src / 'gw/__init__.py'
+          gi = gw_init.read_text()
+          if 'make_gw_event' not in gi:
+              gi += '\nfrom .runtime import make_gw_event, pad_gw_event_to_multiple\nfrom .types import GWEvent\n'
+              gw_init.write_text(gi)
+
+          tests = root / 'tests'
+
+          # Coordinates: same physics assertions, reconstructed ownership; no catalog/survey object needed.
+          t = (legacy / 'tests/test_likelihood_coordinates.py').read_text()
+          t = t.replace('from darksirens.inference.utils import (', 'from darksirens.likelihood.weights import (')
+          t = t.replace('from darksirens.core.types import CosmoParams, SurveyParams, EMCatalog', 'from darksirens.cosmology.parameters import CosmologyParameters as CosmoParams')
+          t = t.replace('from darksirens.utils.cosmology import z_of_dL, ddL_of_z', 'from darksirens.cosmology.distances import z_of_dL, ddL_of_z')
+          t = t.replace('from darksirens.utils.cosmology import dL_grid_bounds', 'from darksirens.cosmology.distances import dL_grid_bounds')
+          t = re.sub(r'def _dummy_survey\(\):.*?\n\n\ndef _dummy_catalog\(\):.*?\n\n\ndef _analytic_log_pop', 'def _dummy_survey():\n    return None\n\n\ndef _dummy_catalog():\n    return None\n\n\ndef _analytic_log_pop', t, flags=re.S)
+          (tests / 'test_likelihood_coordinates.py').write_text(t)
+
+          # Selection tests: replace only module ownership; catalog objects are opaque and can be None.
+          t = (legacy / 'tests/test_selection_batching.py').read_text()
+          t = t.replace('from darksirens.likelihood.events import make_gw_event', 'from darksirens.gw.runtime import make_gw_event')
+          t = t.replace('from darksirens.likelihood.selection import compute_selection_term', 'from darksirens.selection.gw import compute_selection_term')
+          t = t.replace('from darksirens.likelihood.events import pad_gw_event_to_multiple', 'from darksirens.gw.runtime import pad_gw_event_to_multiple')
+          t = t.replace('from darksirens.core.types import EMCatalog\n', '')
+          t = re.sub(r'    catalog = EMCatalog\(.*?\n    \)\n', '    catalog = None\n', t, flags=re.S)
+          (tests / 'test_selection_batching.py').write_text(t)
+
+          for name in ['test_selection_correction_coefficient.py', 'test_selection_variance_guard.py', 'test_selection_soft_guard.py']:
+              t = (legacy / 'tests' / name).read_text()
+              t = t.replace('darksirens.likelihood.selection', 'darksirens.selection.gw')
+              (tests / name).write_text(t)
+
+          t = (legacy / 'tests/test_selection_gradient_safety.py').read_text()
+          t = t.split('# ---------------------------------------------------------------------------\n# Cluster / lensed-singleton estimators')[0]
+          t = t.replace('darksirens.likelihood.selection', 'darksirens.selection.gw')
+          t = t.replace('from darksirens.utils.utils import logsumexp_neginf_safe', 'from darksirens._numerics import logsumexp_neginf_safe')
+          (tests / 'test_selection_gradient_safety.py').write_text(t)
+
+          t = (legacy / 'tests/test_spin_block_plumbing.py').read_text()
+          t = t.replace('from darksirens.likelihood.events import make_gw_event, pad_gw_event_to_multiple', 'from darksirens.gw.runtime import make_gw_event, pad_gw_event_to_multiple')
+          t = t.replace('from darksirens.likelihood.selection import compute_selection_term', 'from darksirens.selection.gw import compute_selection_term')
+          t = t.replace('from darksirens.core.types import CosmoParams', 'from darksirens.cosmology.parameters import CosmologyParameters as CosmoParams')
+          t = t.replace('from darksirens.inference.utils import log_sample_weight', 'from darksirens.likelihood.weights import log_sample_weight')
+          (tests / 'test_spin_block_plumbing.py').write_text(t)
+          PY
+
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src tests
+          git commit -m 'Port Phase 4 likelihood weights and GW selection primitives'
+          git push origin HEAD:rebuild/phase4-spectral-likelihood
