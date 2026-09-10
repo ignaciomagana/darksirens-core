@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compare candidate fixed-coordinate outputs against the frozen legacy bank.
+"""Compare fixed-coordinate outputs against the frozen legacy golden bank.
 
 Candidate JSON uses the same backend -> cell -> [three values] shape as the
-reference. It may contain all cells or only the cells owned by the requested
-package.
+reference. The default ``canonical`` profile is the acceptance target for the
+reconstructed implementation. ``legacy-replay`` exists only to verify the
+known numerical state of the pinned legacy checkout.
 """
 
 from __future__ import annotations
@@ -30,9 +31,15 @@ def parse_args() -> argparse.Namespace:
         help="compare only cells assigned to one reconstructed package",
     )
     p.add_argument(
+        "--profile",
+        choices=("canonical", "legacy-replay"),
+        default="canonical",
+        help="canonical reconstructed target or pinned-checkout replay envelope",
+    )
+    p.add_argument(
         "--exact",
         action="store_true",
-        help="require exact float equality instead of the canonical rtol gate",
+        help="require exact float equality; valid only with the canonical profile",
     )
     return p.parse_args()
 
@@ -45,8 +52,22 @@ def relerr(got: float, expected: float) -> float:
     return abs(got - expected) / abs(expected)
 
 
+def tolerance_for(manifest: dict, backend: str, cell: str, profile: str) -> float:
+    canonical = float(manifest["comparison"]["canonical_rtol"])
+    if profile == "canonical":
+        return canonical
+
+    drift = manifest["known_pinned_checkout_drift"]
+    if backend == drift["backend"] and cell in set(drift["cells"]):
+        return float(drift["legacy_replay_rtol"])
+    return canonical
+
+
 def main() -> None:
     args = parse_args()
+    if args.exact and args.profile != "canonical":
+        raise SystemExit("--exact is only valid with --profile canonical")
+
     manifest = json.loads(MANIFEST.read_text())
     reference = json.loads(GOLDEN.read_text())
     candidate = json.loads(args.candidate.read_text())
@@ -70,11 +91,11 @@ def main() -> None:
     ]
     expected_bank = reference[args.backend]
     got_bank = candidate[args.backend]
-
-    rtol = float(manifest["comparison"]["canonical_rtol"])
     atol = float(manifest["comparison"]["atol"])
+
     failures: list[str] = []
     max_rel = 0.0
+    max_allowed = 0.0
 
     for name in selected:
         if name not in got_bank:
@@ -86,6 +107,8 @@ def main() -> None:
             failures.append(f"{name}: expected three values, got {got_values!r}")
             continue
 
+        rtol = tolerance_for(manifest, args.backend, name, args.profile)
+        max_allowed = max(max_allowed, rtol)
         for i, (got, exp) in enumerate(zip(got_values, exp_values)):
             if not isinstance(got, (int, float)) or not math.isfinite(got):
                 failures.append(f"{name}[{i}]: non-finite/non-numeric {got!r}")
@@ -101,19 +124,22 @@ def main() -> None:
             if not ok:
                 failures.append(
                     f"{name}[{i}]: got={got:.17g} expected={exp:.17g} "
-                    f"relerr={err:.3e}"
+                    f"relerr={err:.3e} allowed_rtol={rtol:.3e}"
                 )
 
     if failures:
         print(
-            f"FAIL backend={args.backend} owner={args.owner} "
+            f"FAIL backend={args.backend} owner={args.owner} profile={args.profile} "
             f"cells={len(selected)} max_relerr={max_rel:.3e}"
         )
         for failure in failures:
             print(f"  {failure}")
         raise SystemExit(1)
 
-    mode = "exact" if args.exact else f"rtol={rtol:g}, atol={atol:g}"
+    if args.exact:
+        mode = "exact"
+    else:
+        mode = f"profile={args.profile}, max_rtol={max_allowed:g}, atol={atol:g}"
     print(
         f"PASS backend={args.backend} owner={args.owner} cells={len(selected)} "
         f"mode={mode} max_relerr={max_rel:.3e}"
