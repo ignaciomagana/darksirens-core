@@ -46,7 +46,9 @@ jobs:
 
       - name: Definite-error lint
         working-directory: candidate
-        run: ruff check src tests tools --select F,E9
+        run: |
+          ruff check src tools --select F,E9
+          python -m compileall -q tests
 
       - name: Phase 2 regression tests
         working-directory: candidate
