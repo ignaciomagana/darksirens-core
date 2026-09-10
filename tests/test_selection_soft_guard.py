@@ -1,20 +1,20 @@
 """The sparse-selection Neff guard: hard wall for nested samplers, smooth wall
-for gradient-based sampling (NumPyro NUTS).
+for gradient-based sampling (NumPyro NUTS), resolved per sampler.
 
 The hard -inf at Neff <= 5 N_obs sat 1.5 posterior-sigma from the H1-profile
 posterior mean and divergence-flagged 100% of NUTS transitions; the soft
 guard replaces it with a steep smooth penalty that is negligible where the
 hard guard passes and strongly repulsive where it fails, keeping the
 likelihood differentiable everywhere.
-
-Sampler/factory wiring is intentionally tested in its later owner phase.  This
-file pins only the selection-correction mathematics owned by Phase 4.
 """
+from types import SimpleNamespace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from darksirens.selection.gw import selection_log_correction
+from darksirens.likelihood.factory import _resolve_redshift_prior_materialization
 
 
 N_EVENTS = 120
@@ -87,3 +87,15 @@ def test_soft_guard_dominates_unbounded_reward():
         deep = float(selection_log_correction(
             jnp.asarray(log_mu), jnp.asarray(0.5 * THRESHOLD), N_EVENTS, soft_guard=True))
         assert deep < above - 1e3, (log_mu, above, deep)
+
+
+def test_barrier_resolver_disables_for_numpyro():
+    # lax.optimization_barrier has no differentiation rule; NUTS on the
+    # catalog (dark/bright) paths died with NotImplementedError until the
+    # auto mode dropped the barrier for numpyro.
+    opts = SimpleNamespace(redshift_prior_barrier="auto", sampler="numpyro")
+    assert _resolve_redshift_prior_materialization(opts) is False
+    opts = SimpleNamespace(redshift_prior_barrier="auto", sampler="dynesty")
+    assert _resolve_redshift_prior_materialization(opts) is True
+    opts = SimpleNamespace(redshift_prior_barrier="on", sampler="numpyro")
+    assert _resolve_redshift_prior_materialization(opts) is True
