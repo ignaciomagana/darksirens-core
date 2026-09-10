@@ -38,12 +38,18 @@ jobs:
       - name: Install validated CPU numerics
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "jax[cpu]==0.4.34" "numpy==1.26.4" "astropy==6.1.4" "pytest==8.3.4"
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "h5py==3.12.1" \
+            "astropy==6.1.4" "pytest==8.3.4"
           python -m pip install --no-deps -e candidate
 
       - name: Candidate unit tests
         working-directory: candidate
-        run: python -m pytest -q tests/test_foundation_imports.py tests/test_jax_runtime.py
+        run: |
+          python -m pytest -q \
+            tests/test_foundation_imports.py \
+            tests/test_jax_runtime.py \
+            tests/test_gw_store_contract.py
 
       - name: Probe pinned legacy cosmology
         run: |
@@ -60,6 +66,24 @@ jobs:
         run: |
           python candidate/tools/compare_cosmology_probe.py \
             /tmp/cosmology-legacy.json /tmp/cosmology-new.json --rtol 1e-12
+
+      - name: Build deterministic GW store fixtures
+        run: python candidate/tools/make_gw_fixtures.py /tmp/gw-fixtures
+
+      - name: Probe pinned legacy GW loaders
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_gw_io.py \
+            --api legacy --fixtures /tmp/gw-fixtures --output /tmp/gw-legacy.json
+
+      - name: Probe reconstructed GW loaders
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_gw_io.py \
+            --api new --fixtures /tmp/gw-fixtures --output /tmp/gw-new.json
+
+      - name: Compare GW loader outputs exactly
+        run: |
+          python candidate/tools/compare_cosmology_probe.py \
+            /tmp/gw-legacy.json /tmp/gw-new.json --rtol 0
 
       - name: Verify package root remains light after installation
         working-directory: /tmp
