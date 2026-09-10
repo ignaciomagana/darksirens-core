@@ -1,0 +1,110 @@
+name: phase4-spectral-likelihood
+
+on:
+  push:
+    branches: [rebuild/phase4-spectral-likelihood]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spectral-likelihood:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: candidate/pyproject.toml
+
+      - name: Install validated CPU numerics and GP extra
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
+            "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" "ruff==0.15.20" \
+            "equinox==0.11.10" "tinygp==0.3.0"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src tests tools --select F,E9
+          python -m compileall -q src tests tools
+
+      - name: Phase 4 coordinate and runtime tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_likelihood_coordinates.py \
+            tests/test_spin_block_plumbing.py
+
+      - name: Phase 4 GW selection tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_selection_batching.py \
+            tests/test_selection_correction_coefficient.py \
+            tests/test_selection_variance_guard.py \
+            tests/test_selection_soft_guard.py \
+            tests/test_selection_gradient_safety.py
+
+      - name: Full reconstructed regression suite
+        working-directory: candidate
+        run: python -m pytest -q
+
+      - name: Verify Phase 4 dependency boundary
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          forbidden = (
+              "darksirens.catalog",
+              "darksirens.redshift",
+              "darksirens.lss",
+              "darksirens.lensing",
+              "darksirens.cli",
+          )
+          paths = [
+              Path("src/darksirens/likelihood"),
+              Path("src/darksirens/selection"),
+              Path("src/darksirens/gw/runtime.py"),
+          ]
+          bad = []
+          files = []
+          for p in paths:
+              files.extend(p.rglob("*.py") if p.is_dir() else [p])
+          for path in files:
+              tree = ast.parse(path.read_text())
+              for node in ast.walk(tree):
+                  names = []
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      names = [node.module]
+                  for name in names:
+                      if any(name == x or name.startswith(x + ".") for x in forbidden):
+                          bad.append((str(path), name))
+          assert not bad, bad
+          print("Phase 4 core modules have no catalog/LSS/lensing/CLI imports")
+          PY
