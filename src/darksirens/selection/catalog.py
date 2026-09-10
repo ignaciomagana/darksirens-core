@@ -28,8 +28,8 @@ from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.distances import (
     Om0Planck,
+    bound_distance_table,
     distance_modulus,
-    threads_distance_table,
     w0Fiducial,
     waFiducial,
 )
@@ -317,16 +317,25 @@ def _selection_curve_impl(z, cosmo: CosmologyParameters, model):
     )
 
 
-@threads_distance_table()
 def selection_curve(
     z,
     cosmo: CosmologyParameters,
     model,
     distance_table=None,
 ):
-    """Evaluate a standardized selection model with the distance table threaded."""
+    """Evaluate a standardized selection model with legacy JIT semantics.
 
-    return _selection_curve_impl(z, cosmo, model)
+    The mature selection functions are plain, JIT-compatible functions: the
+    enclosing likelihood supplies the compilation boundary.  Keeping this
+    wrapper plain is numerically load-bearing for strict parity because fusing
+    the incomplete-gamma/normal-CDF algebra into a new inner JIT changes tail
+    values at the last few ulps.  ``distance_table`` can still be threaded
+    explicitly, or inherited from an enclosing :func:`threads_distance_table`
+    context, without adding a new compilation boundary here.
+    """
+
+    with bound_distance_table(distance_table):
+        return _selection_curve_impl(z, cosmo, model)
 
 
 def _selection_completion_curves_impl(
@@ -362,7 +371,6 @@ def _selection_completion_curves_impl(
     )
 
 
-@threads_distance_table()
 def selection_completion_curves(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -378,9 +386,15 @@ def selection_completion_curves(
     ``C`` diagnostic remains the unmodified selection curve, matching the frozen
     legacy state API.  The expected-count amplitude is unchanged from
     :mod:`darksirens.catalog.completeness`, including its ``n0 * H0^-3`` scaling.
+
+    Like the mature ``completion_curves`` entry point, this wrapper intentionally
+    remains plain and JIT-compatible rather than introducing a second inner JIT.
+    An enclosing likelihood owns the compilation boundary; ``distance_table`` is
+    bound only when supplied explicitly.
     """
 
-    return _selection_completion_curves_impl(cosmo, params, catalog, model)
+    with bound_distance_table(distance_table):
+        return _selection_completion_curves_impl(cosmo, params, catalog, model)
 
 
 __all__ = [
