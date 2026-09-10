@@ -79,6 +79,24 @@ def encode(x):
     return x if math.isfinite(x) else repr(x)
 
 
+def consumes_spin_block(model) -> bool:
+    """Feature-detect component-spin models across legacy/new object layouts."""
+    components = []
+
+    direct = getattr(model, "spin_component", None)
+    if direct is not None:
+        components.append(direct)
+
+    mixture = getattr(model, "mixture", None)
+    if mixture is not None:
+        direct_mixture = getattr(mixture, "spin_component", None)
+        if direct_mixture is not None:
+            components.append(direct_mixture)
+        components.extend(getattr(mixture, "spin_components", ()))
+
+    return any(getattr(component, "consumes_spin_block", False) for component in components)
+
+
 out = {"models": {}}
 prev = normalization_grid_settings().pairing_m1_grid
 configure_normalization_grids(pairing_m1_grid=None)
@@ -90,7 +108,7 @@ try:
             theta = np.asarray(get_fixed_population_params(name), dtype=np.float64)
             model = get_model(name)
         theta_j = jnp.asarray(theta, dtype=jnp.float64)
-        if getattr(model.spin_component, "consumes_spin_block", False):
+        if consumes_spin_block(model):
             values = model.log_p_pop(m1, q, z, chi, theta_j, spin=spin)
         else:
             values = model.log_p_pop(m1, q, z, chi, theta_j)
