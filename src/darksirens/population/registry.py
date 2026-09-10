@@ -255,11 +255,11 @@ CURATED: dict[str, Curated] = {
 #
 #: Version tag of the corrected set; stamped into settings by the CLI so a run
 #: records WHICH fiducial vector it fixed the population at.  The names live in
-#: the dependency-free :mod:`darksirens.core.constants` so the CLIs can build
+#: the dependency-free :mod:`darksirens.population.fiducials` module so callers can build
 #: their ``--population_fiducials`` option without importing this registry (and
 #: the seconds of model/JAX imports behind it); they are re-exported here and
 #: from ``darksirens.population``, which stay the canonical spellings.
-from darksirens.core.constants import (  # noqa: E402,F401
+from .fiducials import (  # noqa: E402,F401
     FIDUCIAL_SET_IN_PRIOR,
     FIDUCIAL_SET_LEGACY,
     FIDUCIAL_SETS,

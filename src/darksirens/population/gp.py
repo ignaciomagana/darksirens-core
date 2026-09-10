@@ -60,7 +60,7 @@ from typing import Sequence
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 
-from darksirens.redshift.grid import zMax
+from darksirens.cosmology._grid import zMax
 
 from .base import ParamSpec, pack_specs
 from .utils import (
