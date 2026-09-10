@@ -16,6 +16,7 @@ jobs:
     env:
       JAX_PLATFORMS: cpu
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      DARKSIRENS_ZMAX: "5.0"
     steps:
       - name: Check out candidate
         uses: actions/checkout@v4
@@ -67,6 +68,15 @@ jobs:
             tests/test_selection_soft_guard.py \
             tests/test_selection_gradient_safety.py
 
+      - name: Phase 4 spectral likelihood tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_event_mc_variance.py \
+            tests/test_pe_event_reduction.py \
+            tests/test_spectral_volume_prior.py \
+            tests/test_spectral_likelihood.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -108,3 +118,26 @@ jobs:
           assert not bad, bad
           print("Phase 4 core modules have no catalog/LSS/lensing/CLI imports")
           PY
+
+      - name: Install pinned legacy parity dependencies
+        run: |
+          python -m pip install \
+            "matplotlib==3.9.2" "healpy==1.17.3" "tqdm==4.66.5" \
+            "dynesty==2.1.4" "seaborn==0.12.2" "numpyro==0.17.0"
+
+      - name: Evaluate pinned legacy spectral fixture in separate process
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_spectral_likelihood.py \
+            --implementation legacy --out /tmp/spectral-legacy.json
+
+      - name: Evaluate reconstructed spectral fixture in separate process
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_spectral_likelihood.py \
+            --implementation candidate --out /tmp/spectral-candidate.json
+
+      - name: Require fixed-theta legacy/new spectral parity
+        run: |
+          python candidate/tools/compare_spectral_probe.py \
+            /tmp/spectral-legacy.json /tmp/spectral-candidate.json --rtol 1e-12
