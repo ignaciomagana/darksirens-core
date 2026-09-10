@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "darksirens"
+version = "0.1.0.dev0"
+description = "Hierarchical population and cosmological inference with gravitational-wave sirens"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Ignacio Magana"}]
+dependencies = [
+  "jax>=0.4.34",
+  "jaxlib>=0.4.34",
+  "numpy>=1.26,<3",
+  "h5py>=3.10",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3",
+  "astropy>=6.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
