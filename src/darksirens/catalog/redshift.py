@@ -32,11 +32,16 @@ from .types import CatalogParameters, GalaxyCatalog
 jax.config.update("jax_enable_x64", True)
 
 _ZMAX: float = float(np.asarray(zgrid)[-1])
+_HALF_LOG_2PI: float = float(0.5 * np.log(2.0 * np.pi))
 SIGMA_EFF_FLOOR: float = 1.0e-4
 _GL_NODES: int = 24
 _gl_x, _gl_w = np.polynomial.legendre.leggauss(_GL_NODES)
 _GL_X = jnp.asarray(0.5 * (_gl_x + 1.0))
 _GL_W = jnp.asarray(0.5 * _gl_w)
+
+# The mature legacy state sanitizes padding to -1e30 and treats anything below
+# this cut as padding when constructing the fused one-pass evaluator leaves.
+_KERNEL_SENTINEL_CUT: float = -1.0e29
 
 # Same automatic row-chunk boundary as the mature legacy implementation.  It
 # changes only the mapping schedule; each row executes identical arithmetic.
@@ -54,6 +59,9 @@ class CatalogKernelState(NamedTuple):
     log_depth_mass: Any
     z_depth: Any
     row_empty: Any
+    log_kw_eff: Any
+    log_kw_eff_rowmax: Any
+    inv_sig_eff: Any
 
 
 def log_galaxy_measure_grid(
@@ -207,6 +215,30 @@ def _map_rows(row_fn, args: tuple):
     return post(out)
 
 
+def _fused_log_kw_eff(log_kw_safe, sig_eff):
+    """Legacy fused ``log_kw - log(sigma) - log(sqrt(2*pi))`` leaf."""
+
+    live = log_kw_safe > _KERNEL_SENTINEL_CUT
+    return jnp.where(
+        live,
+        log_kw_safe - jnp.log(sig_eff) - _HALF_LOG_2PI,
+        -1.0e30,
+    )
+
+
+def _inv_sig_eff(log_kw_eff, sig_eff):
+    """Legacy reciprocal-sigma leaf, zero on padding slots."""
+
+    return jnp.where(log_kw_eff > _KERNEL_SENTINEL_CUT, 1.0 / sig_eff, 0.0)
+
+
+def _log_kw_eff_rowmax(log_kw_eff):
+    """Legacy build-time one-pass offset; empty rows use zero."""
+
+    rowmax = jnp.max(log_kw_eff, axis=1)
+    return jnp.where(rowmax > _KERNEL_SENTINEL_CUT, rowmax, 0.0)
+
+
 def build_catalog_kernel_state(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -230,6 +262,7 @@ def build_catalog_kernel_state(
     )
     row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1.0e30)
+    log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
     return CatalogKernelState(
         log_g_grid=log_g_grid,
         log_kw=log_kw_safe,
@@ -238,6 +271,9 @@ def build_catalog_kernel_state(
         log_depth_mass=log_depth_mass,
         z_depth=params.z_depth,
         row_empty=row_empty,
+        log_kw_eff=log_kw_eff,
+        log_kw_eff_rowmax=_log_kw_eff_rowmax(log_kw_eff),
+        inv_sig_eff=_inv_sig_eff(log_kw_eff, sig_eff),
     )
 
 
@@ -247,13 +283,25 @@ def eval_log_catalog_prior_state(
     state: CatalogKernelState,
     catalog: GalaxyCatalog,
 ):
-    """Evaluate a prebuilt catalog kernel at one redshift/sample row."""
+    """Evaluate the legacy one-pass prebuilt catalog kernel at one sample.
+
+    The mature legacy hot path uses a build-time row offset and a linear-domain
+    exponential sum, rather than sample-local ``logsumexp``.  This deliberately
+    reproduces the backend underflow edge: sufficiently remote Gaussian tails
+    become exact zero and therefore return ``-inf``.  Phase-5 parity keeps that
+    numerical contract instead of inventing a support threshold.
+    """
 
     row = jnp.asarray(row, dtype=jnp.int32)
     zs = catalog.zgals[row]
-    sig = state.sig_eff[row]
-    terms = state.log_kw[row] + norm.logpdf(z, zs, sig)
-    log_mix = logsumexp(terms)
+    u = (z - zs) * state.inv_sig_eff[row]
+    m = state.log_kw_eff_rowmax[row]
+    s = jnp.sum(jnp.exp(state.log_kw_eff[row] - m - 0.5 * u * u))
+    log_mix = m + jnp.where(
+        s > 0.0,
+        jnp.log(jnp.where(s > 0.0, s, 1.0)),
+        -jnp.inf,
+    )
     log_mix = jnp.where(state.row_empty[row], -jnp.inf, log_mix)
     out = log_interp_zgrid(z, state.log_g_grid) + log_mix
     if state.z_depth is not None:
