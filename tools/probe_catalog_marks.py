@@ -47,23 +47,43 @@ def _mark_table():
 
 
 def _arrays():
-    zgals = np.tile(np.array([0.06, 0.16], dtype=np.float64), (NPIX, 1))
-    dzgals = np.full((NPIX, 2), 0.02, dtype=np.float64)
-    wgals = np.ones((NPIX, 2), dtype=np.float64)
-    ngals = np.full(NPIX, 2, dtype=np.int32)
+    """Reproduce the frozen factory's flat full-catalog UNION path.
+
+    The Phase-1 ``marks`` golden starts from 12 full-sky rows, but
+    ``prepare_catalog_views`` gathers one shared PE-union-selection table before
+    the marked prior is built.  The only visited global pixels are 2 and 7, so
+    the runtime catalog/mark rows are ``full[[2, 7]]`` and sample pixels are the
+    corresponding compact row ids.  Using all 12 rows here changes
+    ``mu_miss=E_obs[h|z]`` when eta != 0 and therefore probes a different marked
+    state even though eta=0 is unchanged.
+    """
+
+    full_zgals = np.tile(np.array([0.06, 0.16], dtype=np.float64), (NPIX, 1))
+    full_dzgals = np.full((NPIX, 2), 0.02, dtype=np.float64)
+    full_wgals = np.ones((NPIX, 2), dtype=np.float64)
+    full_ngals = np.full(NPIX, 2, dtype=np.int32)
+    full_marks = _mark_table()
+
+    pe_global = np.array([7, 7], dtype=np.int32)
+    sel_global = np.array([2, 7, 2, 7, 2, 7, 2, 7], dtype=np.int32)
+    union = np.unique(np.concatenate([pe_global, sel_global])).astype(np.int32)
+    pe_rows = np.searchsorted(union, pe_global).astype(np.int32)
+    sel_rows = np.searchsorted(union, sel_global).astype(np.int32)
+
     return {
-        "zgals": zgals,
-        "dzgals": dzgals,
-        "wgals": wgals,
-        "ngals": ngals,
-        "marks": _mark_table(),
+        "union_pixels": union,
+        "zgals": full_zgals[union],
+        "dzgals": full_dzgals[union],
+        "wgals": full_wgals[union],
+        "ngals": full_ngals[union],
+        "marks": full_marks[union],
         "pe": {
             "m1det": np.array([36.0, 38.0]),
             "m2det": np.array([28.8, 30.4]),
             "dL": np.array([460.0, 500.0]),
             "chieff": np.array([0.0, 0.02]),
             "prior_wt": np.ones(NSAMP),
-            "pixels": np.array([7, 7], dtype=np.int32),
+            "pixels": pe_rows,
         },
         "sel": {
             "m1det": np.linspace(34.0, 40.0, N_SEL),
@@ -71,7 +91,7 @@ def _arrays():
             "dL": np.linspace(430.0, 530.0, N_SEL),
             "chieff": np.zeros(N_SEL),
             "prior_wt": np.ones(N_SEL),
-            "pixels": np.array([2, 7, 2, 7, 2, 7, 2, 7], dtype=np.int32),
+            "pixels": sel_rows,
         },
     }
 
@@ -124,6 +144,7 @@ def _candidate():
         dzgals=jnp.asarray(data["dzgals"]),
         wgals=jnp.asarray(data["wgals"]),
         ngals=jnp.asarray(data["ngals"]),
+        unique_pixels=jnp.asarray(data["union_pixels"], dtype=jnp.int32),
     )
     marks = CenteredHostMarks(
         ("logmstar",), jnp.asarray(data["marks"])[..., None]
@@ -196,10 +217,10 @@ def _legacy():
         dzgals=jnp.asarray(data["dzgals"]),
         wgals=jnp.asarray(data["wgals"]),
         ngals=jnp.asarray(data["ngals"]),
-        delta_g_pix_z=jnp.zeros((NPIX, int(prior_zgrid.shape[0]))),
+        delta_g_pix_z=jnp.zeros((len(data["union_pixels"]), int(prior_zgrid.shape[0]))),
         dN_obs_kde=None,
         pixel_to_cache_idx=None,
-        unique_pixels=None,
+        unique_pixels=jnp.asarray(data["union_pixels"], dtype=jnp.int32),
         mark_logmstar=jnp.asarray(data["marks"]),
     )
     survey = SurveyParams(
@@ -362,6 +383,7 @@ def main():
             "n_draw": N_DRAW,
             "max_likelihood_variance": MAX_VARIANCE,
             "apix": APIX,
+            "union_pixels": [2, 7],
             "mark_names": ["logmstar"],
             "mark_abs_max": MARK_ABS_MAX,
             "eta_bound": ETA_BOUND,
