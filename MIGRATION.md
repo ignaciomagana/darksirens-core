@@ -16,11 +16,16 @@ implementation migration began.
 | `darksirens/utils/interp2d.py` | `cosmology/_interpolation.py` | move/private | parity gated |
 | `darksirens/utils/cosmology.py` | `cosmology/distances.py`, `volume.py` | split | parity gated |
 | `darksirens/redshift/grid.py` | `cosmology/_grid.py` | move/private | parity gated |
-| `CosmoParams` from `core/types.py` | `cosmology/parameters.py` | move/rename | implemented |
-| `darksirens/gw/store_contract.py` | `gw/store.py` | move/simplify docs | parity pending |
-| `GWStore`, `SelectionStore` from `gw/utils.py` | `gw/types.py` | move | parity pending |
-| standard loaders from `gw/utils.py` | `gw/samples.py` | split/clean dependencies | parity pending |
-| `gw/samples.py` facade | `gw/__init__.py` + `gw/samples.py` | fold | implemented |
+| `CosmoParams` from `core/types.py` | `cosmology/parameters.py` | move/rename | parity gated |
+| `darksirens/gw/store_contract.py` | `gw/store.py` | move/simplify docs | exact parity |
+| `GWStore`, `SelectionStore` from `gw/utils.py` | `gw/types.py` | move | exact parity |
+| standard loaders from `gw/utils.py` | `gw/samples.py` | split/clean dependencies | exact parity |
+| `gw/samples.py` facade | `gw/__init__.py` + `gw/samples.py` | fold | exact parity |
+
+The deterministic separate-process probes at the Phase-2 validation gate report
+zero numerical difference for cosmology and zero difference for the serialized
+GW store outputs on the shared fixtures. The store comparison is exact
+(`rtol=0`).
 
 ## Deliberately not migrated in Phase 2
 
