@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--exact",
         action="store_true",
-        help="require exact float equality instead of the legacy rtol gate",
+        help="require exact float equality instead of the canonical rtol gate",
     )
     return p.parse_args()
 
@@ -71,7 +71,7 @@ def main() -> None:
     expected_bank = reference[args.backend]
     got_bank = candidate[args.backend]
 
-    rtol = float(manifest["comparison"]["rtol"])
+    rtol = float(manifest["comparison"]["canonical_rtol"])
     atol = float(manifest["comparison"]["atol"])
     failures: list[str] = []
     max_rel = 0.0
