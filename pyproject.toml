@@ -21,6 +21,9 @@ test = [
   "pytest>=8.3",
   "astropy>=6.1",
 ]
+gp = [
+  "tinygp",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
