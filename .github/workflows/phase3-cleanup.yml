@@ -35,34 +35,11 @@ jobs:
           start = text.index(marker1)
           end = text.index(marker2, start)
           pairing.write_text(text[:start] + text[end:])
-
-          workflow = Path('.github/workflows/phase3-population.yml')
-          text = workflow.read_text()
-          text = text.replace(
-              '          python -m pytest -q tests/test_population_grammar.py \\\n'
-              '            -k "not mixture_weight_prior_is_uniform_on_the_simplex"\n',
-              '          python -m pytest -q tests/test_population_grammar.py\n',
-          )
-          text = text.replace(
-              '          python -m pytest -q tests/test_pairing_norm_grid.py -k "not both_clis"\n',
-              '          python -m pytest -q tests/test_pairing_norm_grid.py\n',
-          )
-          # A final plain pytest run proves there are no hidden cross-phase failures.
-          needle = '      - name: Probe pinned legacy population models\n'
-          full_suite = (
-              '      - name: Full reconstructed test suite\n'
-              '        working-directory: candidate\n'
-              '        run: python -m pytest -q\n\n'
-          )
-          if full_suite not in text:
-              text = text.replace(needle, full_suite + needle)
-          workflow.write_text(text)
           PY
 
           git rm phase3_population_dependency_report.txt
-          git rm .github/workflows/phase3-cleanup.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add tests/test_population_grammar.py tests/test_pairing_norm_grid.py .github/workflows/phase3-population.yml
-          git commit -m 'Finalize Phase 3 population validation surface'
+          git add tests/test_population_grammar.py tests/test_pairing_norm_grid.py
+          git commit -m 'Remove cross-phase Phase 3 test scaffolding'
           git push origin HEAD:rebuild/phase3-population
