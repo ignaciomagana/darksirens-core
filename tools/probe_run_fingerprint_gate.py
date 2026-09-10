@@ -16,7 +16,6 @@ from darksirens.inference.run_fingerprint import (
     FINGERPRINT_BASENAME,
     FINGERPRINT_BASENAME_STEM,
     FINGERPRINT_SCHEMA_VERSION,
-    ResumeFingerprintError,
     check_resume_fingerprint,
     gate_and_stamp_resume_fingerprint,
     resume_provenance_attrs,
@@ -93,7 +92,6 @@ def _probe() -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
 
-        # Atomic save and publication.
         fresh_dir = root / "fresh"
         fresh_dir.mkdir()
         fresh = _fingerprint()
@@ -101,10 +99,11 @@ def _probe() -> dict:
         out["save"] = {
             "basename": os.path.basename(path),
             "roundtrip": json.loads(Path(path).read_text()) == fresh,
-            "tmp_absent": not any(name.endswith(".tmp") for name in os.listdir(fresh_dir)),
+            "tmp_absent": not any(
+                name.endswith(".tmp") for name in os.listdir(fresh_dir)
+            ),
         }
 
-        # Any BaseException must remove the temporary and preserve the old file.
         class Bomb:
             def __str__(self):
                 raise KeyboardInterrupt("probe fault")
@@ -116,11 +115,14 @@ def _probe() -> dict:
             interrupted = True
         out["atomic_fault"] = {
             "interrupted": interrupted,
-            "old_digest": json.loads((fresh_dir / FINGERPRINT_BASENAME).read_text())["digest"],
-            "tmp_absent": not any(name.endswith(".tmp") for name in os.listdir(fresh_dir)),
+            "old_digest": json.loads(
+                (fresh_dir / FINGERPRINT_BASENAME).read_text()
+            )["digest"],
+            "tmp_absent": not any(
+                name.endswith(".tmp") for name in os.listdir(fresh_dir)
+            ),
         }
 
-        # Exact match and advisory code drift.
         match_dir = root / "match"
         match_dir.mkdir()
         save_run_fingerprint(str(match_dir), _fingerprint(code_sha="old"))
@@ -130,22 +132,15 @@ def _probe() -> dict:
             ),
             root,
         )
-        out["exact_match"] = {
-            "digest": value["digest"],
-            "warnings": caught,
-        }
+        out["exact_match"] = {"digest": value["digest"], "warnings": caught}
         value, caught = _warning(
             lambda: check_resume_fingerprint(
                 str(match_dir), _fingerprint(code_sha="new")
             ),
             root,
         )
-        out["code_drift"] = {
-            "digest": value["digest"],
-            "warnings": caught,
-        }
+        out["code_drift"] = {"digest": value["digest"], "warnings": caught}
 
-        # Missing and corrupt fail closed, but force returns None with a warning.
         missing_dir = root / "missing"
         missing_dir.mkdir()
         out["missing_error"] = _error(
@@ -173,7 +168,6 @@ def _probe() -> dict:
         )
         out["corrupt_force"] = {"returned": value, "warnings": caught}
 
-        # Genuine semantic mismatch.
         mismatch_dir = root / "mismatch"
         mismatch_dir.mkdir()
         stored = _fingerprint(17)
@@ -193,7 +187,6 @@ def _probe() -> dict:
             "warnings": caught,
         }
 
-        # Schema mismatch must be named explicitly.
         schema_dir = root / "schema"
         schema_dir.mkdir()
         schema_stored = _fingerprint(17, schema=FINGERPRINT_SCHEMA_VERSION - 1)
@@ -212,7 +205,6 @@ def _probe() -> dict:
             "warnings": caught,
         }
 
-        # Shared gate: fresh run.
         gate_fresh = root / "gate-fresh"
         gate_fresh.mkdir()
         opts = SimpleNamespace(resume_force=False, resume_from_resolved=None)
@@ -227,7 +219,6 @@ def _probe() -> dict:
             "attrs": resume_provenance_attrs(opts),
         }
 
-        # Forced pre-fingerprint legacy directory becomes canonical for later requeues.
         gate_legacy = root / "gate-legacy"
         gate_legacy.mkdir()
         opts = SimpleNamespace(
@@ -253,7 +244,6 @@ def _probe() -> dict:
             ],
         }
 
-        # Forced genuine mismatch preserves creator fingerprint and stamps sibling.
         gate_mismatch = root / "gate-mismatch"
         gate_mismatch.mkdir()
         save_run_fingerprint(str(gate_mismatch), stored)
@@ -283,7 +273,6 @@ def _probe() -> dict:
             ],
         }
 
-        # Error callback contract.
         callback_dir = root / "callback"
         callback_dir.mkdir()
         save_run_fingerprint(str(callback_dir), stored)
