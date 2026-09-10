@@ -62,15 +62,14 @@ jobs:
         working-directory: candidate
         run: |
           python -m pytest -q tests/test_population_registry_golden.py
-          python -m pytest -q tests/test_population_grammar.py \
-            -k "not mixture_weight_prior_is_uniform_on_the_simplex"
+          python -m pytest -q tests/test_population_grammar.py
           python -m pytest -q tests/test_population_prior_contract.py
 
       - name: Population normalization, support and component-spin tests
         working-directory: candidate
         run: |
           python -m pytest -q tests/test_component_spin_model.py
-          python -m pytest -q tests/test_pairing_norm_grid.py -k "not both_clis"
+          python -m pytest -q tests/test_pairing_norm_grid.py
           python -m pytest -q tests/test_population_model_support.py
           python -m pytest -q tests/test_pop_gradient_nan_safety.py
 
@@ -80,6 +79,10 @@ jobs:
           python -m pytest -q \
             tests/test_gppop_population.py \
             tests/test_gp_q_normalization.py
+
+      - name: Full reconstructed test suite
+        working-directory: candidate
+        run: python -m pytest -q
 
       - name: Probe pinned legacy population models
         run: |
