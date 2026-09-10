@@ -56,6 +56,7 @@ if args.implementation == "legacy":
     from darksirens.redshift.completion import (
         _S_EXP,
         _precompute_grids,
+        _row_C,
         build_pixel_kde_cache,
         completion_curves,
     )
@@ -104,9 +105,12 @@ if args.implementation == "legacy":
     def curves(cosmo, params):
         return completion_curves(cosmo, params, catalog)
 
+    def get_log_g(grid):
+        return grid.log_g
+
     def get_C(curve, grid):
-        denom = jnp.where(grid.dN_exp > 0.0, grid.dN_exp, 1.0)
-        return jnp.clip(1.0 - curve.dN_miss / denom[None, :], 0.0, 1.0)
+        rows = jnp.arange(ZGALS.shape[0], dtype=jnp.int32)
+        return jax.vmap(lambda row: _row_C(row, grid, catalog)[0])(rows)
 
 else:
     from darksirens.catalog.completeness import (
@@ -148,6 +152,9 @@ else:
 
     def curves(cosmo, params):
         return completion_curves(cosmo, params, catalog, cache)
+
+    def get_log_g(grid):
+        return grid.log_g_grid
 
     def get_C(curve, grid):
         return curve.C
@@ -192,7 +199,7 @@ for point in POINTS:
     records.append(
         {
             "point": point,
-            "log_g": np.asarray(grid.log_g_grid),
+            "log_g": np.asarray(get_log_g(grid)),
             "dN_exp": np.asarray(grid.dN_exp),
             "dN_exp_smooth": np.asarray(grid.dN_exp_smooth),
             "C": np.asarray(C),
