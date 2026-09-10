@@ -102,9 +102,11 @@ def test_pe_event_blocking_is_numerically_identical():
         _cosmo(), pop, _samples(3, 5), _selection(), 3, 5, 1000.0,
         pe_event_block=2, **kwargs,
     )
-    np.testing.assert_allclose(np.asarray(a.event_log_evidence), np.asarray(b.event_log_evidence), rtol=1e-13, atol=0)
-    np.testing.assert_allclose(np.asarray(a.event_mc_variance), np.asarray(b.event_mc_variance), rtol=1e-13, atol=0)
-    np.testing.assert_allclose(float(a.log_likelihood), float(b.log_likelihood), rtol=1e-13, atol=0)
+    # Reference PE-block parity is rtol=1e-12, atol=0 because a static block
+    # shape can change only final-reduction association by a few ULP.
+    np.testing.assert_allclose(np.asarray(a.event_log_evidence), np.asarray(b.event_log_evidence), rtol=1e-12, atol=0)
+    np.testing.assert_allclose(np.asarray(a.event_mc_variance), np.asarray(b.event_mc_variance), rtol=1e-12, atol=0)
+    np.testing.assert_allclose(float(a.log_likelihood), float(b.log_likelihood), rtol=1e-12, atol=0)
 
 
 def test_total_variance_guard_rejects_one_hot_pe():
