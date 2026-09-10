@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "repository": "ignaciomagana/darksirens",
+    "commit": "c042527238bd71421b792936bc48c3b815b90d6d",
+    "golden_path": "tests/golden/unified_k1_golden.json",
+    "golden_blob_sha": "560e44adb712763893111a3607f6d7ca8b168b7a",
+    "source_test_path": "tests/test_unified_k1_golden.py",
+    "source_test_blob_sha": "0f4e3301db2b4a73c574791a871d53fd56f0cad2"
+  },
+  "comparison": {
+    "rtol": 1e-12,
+    "atol": 0.0,
+    "same_backend_exact_expected": true,
+    "coordinate_fractions": [0.5, 0.35, 0.65]
+  },
+  "recorded_backends": [
+    "cpu",
+    "gpu:NVIDIA H100 NVL"
+  ],
+  "cells": {
+    "bright": {"owner": "core", "meaning": "bright-siren counterpart prior"},
+    "complete_volume": {"owner": "core", "meaning": "complete catalog with volume fallback for empty pixels"},
+    "complete_zero": {"owner": "core", "meaning": "complete catalog with zero-probability empty pixels"},
+    "empty_row_routing": {"owner": "core", "meaning": "empty-catalog-row optimized routing with identical physics"},
+    "ensemble_marg": {"owner": "lss", "meaning": "Q_LSS ensemble marginalization"},
+    "field_k1": {"owner": "core", "meaning": "field catalog sky weighting"},
+    "marks": {"owner": "core", "meaning": "generic marked-host weighting"},
+    "plain_compact": {"owner": "core", "meaning": "ordinary dark siren with compact catalog caller view"},
+    "plain_full": {"owner": "core", "meaning": "ordinary dark siren with full catalog arrays"},
+    "qdet": {"owner": "lss", "meaning": "deterministic Q_LSS completion"},
+    "sel_batch": {"owner": "core", "meaning": "GW selection batching"},
+    "sky_dipole": {"owner": "core", "meaning": "anisotropic dipole source-rate model"},
+    "spectral": {"owner": "core", "meaning": "spectral-siren volume-redshift model"},
+    "use_lss": {"owner": "lss", "meaning": "live galaxy overdensity field"},
+    "wl_lognormal": {"owner": "lensing", "meaning": "weak-lensing lognormal magnification"}
+  }
+}
