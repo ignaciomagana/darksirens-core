@@ -148,8 +148,26 @@ else:
         return eval_log_catalog_prior_state_vmap(z, row, state, catalog)
 
 
+def _json_scalar(value):
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    x = float(value)
+    if np.isnan(x):
+        return "nan"
+    if np.isposinf(x):
+        return "inf"
+    if np.isneginf(x):
+        return "-inf"
+    return x
+
+
 def as_list(value):
-    return np.asarray(value).tolist()
+    arr = np.asarray(value)
+    if arr.ndim == 0:
+        return _json_scalar(arr.item())
+    return np.vectorize(_json_scalar, otypes=[object])(arr).tolist()
 
 
 records = []
