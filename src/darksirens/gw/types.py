@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import numpy as np
 
@@ -31,3 +31,24 @@ class SelectionStore:
     n_injections: int
     ndraw: int
     prior_wt: np.ndarray
+
+
+class GWEvent(NamedTuple):
+    """JAX-compatible runtime PE/injection sample container."""
+
+    m1det: Any
+    m2det: Any
+    dL: Any
+    chieff: Any
+    prior_wt: Any
+    pixels: Any
+    q: Any
+    valid: Any
+    nx: Any = None
+    ny: Any = None
+    nz: Any = None
+    spin: Any = None
+
+    @property
+    def chirp_mass(self):
+        return (self.m1det * self.m2det) ** (3 / 5) / (self.m1det + self.m2det) ** (1 / 5)

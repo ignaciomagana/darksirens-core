@@ -20,3 +20,6 @@ __all__ = [
     "load_gw_samples",
     "load_selection_samples",
 ]
+
+from .runtime import make_gw_event, pad_gw_event_to_multiple
+from .types import GWEvent
