@@ -1,0 +1,54 @@
+name: phase3-patch
+
+on:
+  push:
+    branches: [rebuild/phase3-population]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+      - name: Patch population ownership once
+        run: |
+          set -euo pipefail
+          if test -f .phase3_patched; then
+            echo 'Phase 3 ownership patch already applied.'
+            exit 0
+          fi
+          test -f .phase3_bootstrapped
+          python - <<'PY'
+          from pathlib import Path
+
+          gp = Path('src/darksirens/population/gp.py')
+          text = gp.read_text().replace(
+              'from darksirens.redshift.grid import zMax',
+              'from darksirens.cosmology._grid import zMax',
+          )
+          gp.write_text(text)
+
+          reg = Path('src/darksirens/population/registry.py')
+          text = reg.read_text().replace(
+              'from darksirens.core.constants import (  # noqa: E402,F401',
+              'from .fiducials import (  # noqa: E402,F401',
+          )
+          text = text.replace(
+              'the dependency-free :mod:`darksirens.core.constants` so the CLIs can build',
+              'the dependency-free :mod:`darksirens.population.fiducials` module so callers can build',
+          )
+          reg.write_text(text)
+
+          Path('src/darksirens/population/fiducials.py').write_text('''"""Versioned fixed-population fiducial-set names."""\n\nFIDUCIAL_SET_LEGACY = "legacy"\nFIDUCIAL_SET_IN_PRIOR = "in_prior_v2"\nFIDUCIAL_SETS = (FIDUCIAL_SET_LEGACY, FIDUCIAL_SET_IN_PRIOR)\n\n__all__ = [\n    "FIDUCIAL_SET_LEGACY",\n    "FIDUCIAL_SET_IN_PRIOR",\n    "FIDUCIAL_SETS",\n]\n''')
+          PY
+          touch .phase3_patched
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/darksirens/population .phase3_patched
+          git commit -m 'Move population dependencies to core-owned namespaces'
+          git push origin HEAD:rebuild/phase3-population
