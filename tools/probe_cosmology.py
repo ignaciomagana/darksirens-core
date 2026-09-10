@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import runpy
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -16,11 +19,21 @@ jax.config.update("jax_default_matmul_precision", "highest")
 parser = argparse.ArgumentParser()
 parser.add_argument("--api", choices=("legacy", "new"), required=True)
 parser.add_argument("--output", required=True)
+parser.add_argument("--legacy-root")
 args = parser.parse_args()
 
 if args.api == "legacy":
     from darksirens.utils import cosmology as c
-    from darksirens.redshift import grid as rg
+
+    legacy_root = args.legacy_root or os.environ.get("DARKSIRENS_LEGACY_ROOT")
+    if not legacy_root:
+        raise SystemExit("--legacy-root is required for the legacy grid probe")
+    ns = runpy.run_path(os.path.join(legacy_root, "darksirens", "redshift", "grid.py"))
+    rg = SimpleNamespace(
+        zgrid=ns["zgrid"],
+        zgrid_upper_index=ns["zgrid_upper_index"],
+        log_interp_zgrid=ns["log_interp_zgrid"],
+    )
 else:
     from darksirens.cosmology import distances as c
     from darksirens.cosmology import _grid as rg
@@ -70,7 +83,6 @@ for H0, Om0, w0, wa in cosmologies:
         }
     )
 
-# Probe the shared redshift grid away from nodes and around boundaries.
 probe_z = jnp.asarray([-0.1, 0.0, 1e-8, 0.01, 0.12345, 1.0, float(rg.zgrid[-1]), 10.0])
 log_grid = jnp.log(jnp.maximum(rg.zgrid, jnp.finfo(rg.zgrid.dtype).tiny) ** 2 + 1e-300)
 out["prior_grid_probe"] = {
