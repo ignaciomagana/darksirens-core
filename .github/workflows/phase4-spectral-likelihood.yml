@@ -81,15 +81,18 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q
 
-      - name: Verify Phase 4 dependency boundary
+      - name: Verify core dependency boundary
         working-directory: candidate
         run: |
           python - <<'PY'
           import ast
           from pathlib import Path
 
+          # Catalog is a first-class core dependency from Phase 5 onward.  Keep
+          # the historical boundary against the legacy redshift layer and the
+          # optional LSS/lensing/CLI stacks without forbidding later core-owned
+          # catalog modules from composing with the spectral runtime.
           forbidden = (
-              "darksirens.catalog",
               "darksirens.redshift",
               "darksirens.lss",
               "darksirens.lensing",
@@ -116,7 +119,7 @@ jobs:
                       if any(name == x or name.startswith(x + ".") for x in forbidden):
                           bad.append((str(path), name))
           assert not bad, bad
-          print("Phase 4 core modules have no catalog/LSS/lensing/CLI imports")
+          print("Core likelihood/selection modules have no legacy-redshift/LSS/lensing/CLI imports")
           PY
 
       - name: Install pinned legacy parity dependencies
