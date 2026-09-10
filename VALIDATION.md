@@ -24,6 +24,7 @@ SciPy: 1.12.0
 h5py: 3.12.1
 Astropy: 6.1.4
 pytest: 8.3.4
+ruff: 0.15.20
 backend: CPU
 x64: enabled for scientific parity probes
 ```
@@ -37,12 +38,13 @@ legacy-replay profile.
 
 ## Phase 2 — foundation and GW input contracts
 
-Validated on branch `rebuild/phase2-foundation` by workflow run
-`34430850725`, job `102725855899`.
+Final scientific validation on branch `rebuild/phase2-foundation` used workflow
+run `34431185197`, job `102726848203`.
 
 Results:
 
 ```text
+ruff definite-error gate: PASS
 candidate unit tests: 14 passed
 cosmology legacy/new probe: PASS
 cosmology max_abs: 0.000e+00
@@ -75,6 +77,9 @@ Candidate unit tests additionally pin malformed length rejection, invalid sky
 and mass ordering, `p_pe == 0` vs `pdraw == 0`, `ndraw` consistency,
 component-model negotiation, required `spin_reference_amax`, and unswapped
 chi_eff draw-density folding.
+
+The final code audit also ensures XLA allocator defaults are applied before JAX
+is imported by the GW loader module; explicit user environment values still win.
 
 ## Acceptance rule
 
