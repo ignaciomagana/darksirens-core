@@ -62,6 +62,13 @@ jobs:
             tests/test_catalog_redshift_kernel.py \
             tests/test_catalog_distance_table.py
 
+      - name: Phase 5B ordinary completeness tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_catalog_completeness.py \
+            tests/test_catalog_completeness_hlo.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -103,7 +110,8 @@ jobs:
           import darksirens.catalog
           assert "jax" not in sys.modules
           assert "darksirens.cosmology.distances" not in sys.modules
-          print("light catalog import leaves JAX and cosmology tables unloaded")
+          assert "darksirens.catalog.completeness" not in sys.modules
+          print("light catalog import leaves JAX, cosmology tables, and completeness tables unloaded")
           PY
 
       - name: Install pinned legacy parity dependencies
@@ -128,3 +136,20 @@ jobs:
         run: |
           python candidate/tools/compare_catalog_kernel_probe.py \
             /tmp/catalog-legacy.json /tmp/catalog-candidate.json --rtol 1e-12
+
+      - name: Evaluate pinned legacy completeness fixture in separate process
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_catalog_completeness.py \
+            --implementation legacy --out /tmp/completeness-legacy.json
+
+      - name: Evaluate reconstructed completeness fixture in separate process
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_catalog_completeness.py \
+            --implementation candidate --out /tmp/completeness-candidate.json
+
+      - name: Require legacy/new ordinary-completeness parity
+        run: |
+          python candidate/tools/compare_catalog_completeness_probe.py \
+            /tmp/completeness-legacy.json /tmp/completeness-candidate.json --rtol 1e-12
