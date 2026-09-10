@@ -6,24 +6,25 @@ LVK products remain an upstream concern (normally handled by ``gwcat``).
 
 from __future__ import annotations
 
-from typing import Any
+import os
 
 import h5py
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 from darksirens._jax import DEFAULT_XLA_ALLOCATOR, DEFAULT_XLA_PREALLOCATE
-from . import store as store_contract
-from .types import GWStore, SelectionStore
 
-import os
-
+# XLA reads allocator settings during backend initialization, so these defaults
+# must be set before importing JAX. Explicit user settings still win.
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", DEFAULT_XLA_PREALLOCATE)
 os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", DEFAULT_XLA_ALLOCATOR)
 
+import jax
+import jax.numpy as jnp
+
+from . import store as store_contract
+from .types import GWStore, SelectionStore
+
 _CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
-PE_VARIANCE_NOTICE_FRACTION = 0.20
 
 
 def _decode_hdf5_attr(value):
