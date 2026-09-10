@@ -66,7 +66,7 @@ jobs:
             tests/test_population_grammar.py \
             tests/test_component_spin_model.py \
             tests/test_pairing_norm_grid.py \
-            tests/test_population_support_contracts.py \
+            tests/test_population_model_support.py \
             tests/test_pop_gradient_nan_safety.py
 
       - name: GP population tests
