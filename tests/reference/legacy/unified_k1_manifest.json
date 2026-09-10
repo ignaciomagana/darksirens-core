@@ -1,18 +1,47 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "reference": {
     "repository": "ignaciomagana/darksirens",
     "commit": "c042527238bd71421b792936bc48c3b815b90d6d",
     "golden_path": "tests/golden/unified_k1_golden.json",
     "golden_blob_sha": "560e44adb712763893111a3607f6d7ca8b168b7a",
     "source_test_path": "tests/test_unified_k1_golden.py",
-    "source_test_blob_sha": "0f4e3301db2b4a73c574791a871d53fd56f0cad2"
+    "source_test_blob_sha": "0f4e3301db2b4a73c574791a871d53fd56f0cad2",
+    "testing_doc_path": "docs/source/guide/testing.md",
+    "testing_doc_blob_sha": "c7e80968e5764f0541fd23b7affb7a3398f65756"
+  },
+  "validated_cpu_stack": {
+    "python": "3.11",
+    "recorded_fast_gate_python": "3.11.10",
+    "jax": "0.4.34",
+    "jaxlib": null,
+    "jaxlib_note": "legacy CI installs jax[cpu]==0.4.34; the exact jaxlib version was not independently recorded in the legacy validation text",
+    "numpy": "1.26.4",
+    "scipy": "1.12.0",
+    "matplotlib": "3.9.2",
+    "healpy": "1.17.3",
+    "h5py": "3.12.1",
+    "astropy": "6.1.4",
+    "tqdm": "4.66.5",
+    "dynesty": "2.1.4",
+    "seaborn": "0.12.2",
+    "numpyro": "0.17.0",
+    "pytest": "8.3.4"
   },
   "comparison": {
-    "rtol": 1e-12,
+    "canonical_rtol": 1e-12,
     "atol": 0.0,
-    "same_backend_exact_expected": true,
+    "same_backend_exact_expected_when_operation_order_is_preserved": true,
     "coordinate_fractions": [0.5, 0.35, 0.65]
+  },
+  "known_pinned_checkout_drift": {
+    "backend": "cpu",
+    "documented_on": "2026-09-03",
+    "cells": ["ensemble_marg", "qdet", "use_lss"],
+    "documented_max_relative_difference": 2.3e-12,
+    "documented_max_absolute_difference": 3e-13,
+    "legacy_replay_rtol": 3e-12,
+    "note": "This is a replay allowance for the pinned legacy checkout only. Reconstructed implementations target the canonical golden bank at canonical_rtol."
   },
   "recorded_backends": [
     "cpu",
