@@ -13,6 +13,7 @@ dependencies = [
   "jax>=0.4.34",
   "jaxlib>=0.4.34",
   "numpy>=1.26,<3",
+  "h5py>=3.10",
 ]
 
 [project.optional-dependencies]
