@@ -59,6 +59,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_checkpoint_plan.py
 
+      - name: Phase 6C1 fingerprint-gate tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_run_fingerprint_gate.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -80,6 +84,8 @@ jobs:
               "darksirens_lss",
               "darksirens.lensing",
               "darksirens_lensing",
+              "darksirens.redshift",
+              "darksirens.sky",
               "healpy",
               "dynesty",
               "numpyro",
@@ -89,6 +95,7 @@ jobs:
           paths.extend([
               Path("src/darksirens/inference/__init__.py"),
               Path("src/darksirens/inference/checkpointing.py"),
+              Path("src/darksirens/inference/run_fingerprint.py"),
           ])
           bad = []
           for path in paths:
@@ -103,15 +110,20 @@ jobs:
                       if any(name == x or name.startswith(x + ".") for x in forbidden):
                           bad.append((str(path), name))
           assert not bad, bad
-          print("portable inference/IO has no JAX/CLI/survey/LSS/lensing/sampler dependency")
+          print("portable inference/IO has no hidden runtime/plugin/sampler dependency")
           PY
           python - <<'PY'
           import sys
           import darksirens.io.results
           import darksirens.inference.checkpointing
-          bad = ("jax", "jaxlib", "dynesty", "numpyro", "tinyns", "darksirens.cli")
+          import darksirens.inference.run_fingerprint
+          bad = (
+              "jax", "jaxlib", "dynesty", "numpyro", "tinyns", "healpy",
+              "darksirens.cli", "darksirens.redshift", "darksirens.sky",
+              "darksirens.surveys", "darksirens.lss", "darksirens.lensing",
+          )
           assert not [name for name in bad if name in sys.modules]
-          print("Phase 6A/6B light imports are backend/JAX/CLI free")
+          print("Phase 6A/6B/6C1 light imports are runtime/plugin/backend free")
           PY
 
       - name: Evaluate pinned legacy result-artifact behavior
@@ -160,6 +172,30 @@ jobs:
           if legacy != candidate:
               raise SystemExit(f"checkpoint-plan parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6B legacy/new checkpoint-plan behavior is exact")
+          PY
+
+      - name: Evaluate pinned legacy fingerprint-gate behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_run_fingerprint_gate.py \
+            --implementation legacy --out /tmp/fingerprint-gate-legacy.json
+
+      - name: Evaluate reconstructed fingerprint-gate behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_run_fingerprint_gate.py \
+            --implementation candidate --out /tmp/fingerprint-gate-candidate.json
+
+      - name: Require exact Phase 6C1 fingerprint-gate parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/fingerprint-gate-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/fingerprint-gate-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(f"fingerprint-gate parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          print("Phase 6C1 legacy/new fingerprint-gate behavior is exact")
           PY
 
       - name: Install pinned legacy parity dependencies
