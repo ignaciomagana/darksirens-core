@@ -1,0 +1,111 @@
+name: phase6j-dead-point-persistence
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dead-point-persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" "h5py==3.12.1" "pytest==8.3.4" "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/io/results.py tests/test_dead_point_persistence.py tools/probe_dead_point_persistence.py --select F,E9
+          python -m compileall -q src/darksirens/io/results.py tests/test_dead_point_persistence.py tools/probe_dead_point_persistence.py
+
+      - name: Focused Phase 6J tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_dead_point_persistence.py
+
+      - name: Verify portable dependency and light import
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("src/darksirens/io/results.py")
+          tree = ast.parse(path.read_text())
+          forbidden = (
+              "jax", "jaxlib", "dynesty", "numpyro", "tinyns", "healpy",
+              "darksirens.cli", "darksirens.surveys", "darksirens_surveys",
+              "darksirens.lss", "darksirens_lss", "darksirens.lensing",
+              "darksirens_lensing", "darksirens.redshift", "darksirens.sky",
+          )
+          bad = []
+          for node in ast.walk(tree):
+              names = []
+              if isinstance(node, ast.Import):
+                  names = [a.name for a in node.names]
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  names = [node.module]
+              for name in names:
+                  if any(name == x or name.startswith(x + ".") for x in forbidden):
+                      bad.append(name)
+          assert not bad, bad
+          print("6J writer keeps portable IO dependency boundary")
+          PY
+          python - <<'PY'
+          import sys
+          from darksirens.io.results import write_dead_point_datasets
+          assert callable(write_dead_point_datasets)
+          forbidden = ("jax", "jaxlib", "dynesty", "numpyro", "tinyns", "healpy")
+          assert not [name for name in forbidden if name in sys.modules]
+          print("6J import loads no sampler/JAX/HEALPix backend")
+          PY
+
+      - name: Evaluate pinned legacy dead-point persistence
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_dead_point_persistence.py --implementation legacy --out /tmp/persist-legacy.json
+
+      - name: Evaluate reconstructed dead-point persistence
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_dead_point_persistence.py --implementation candidate --out /tmp/persist-candidate.json
+
+      - name: Require exact Phase 6J parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/persist-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/persist-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(
+                  "dead-point persistence parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6J legacy/new dead-point persistence behavior is exact")
+          PY

@@ -1,0 +1,112 @@
+name: phase6o-dynesty-adapter
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dynesty-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependency-minimal test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==1.26.4" "pytest==8.3.4" "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/dynesty_adapter.py tests/test_dynesty_adapter.py tools/probe_dynesty_adapter.py --select F,E9
+          python -m compileall -q src/darksirens/inference/dynesty_adapter.py tests/test_dynesty_adapter.py tools/probe_dynesty_adapter.py
+
+      - name: Verify backend and checkpoint imports stay lazy
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          import sys
+          from pathlib import Path
+
+          path = Path("src/darksirens/inference/dynesty_adapter.py")
+          tree = ast.parse(path.read_text())
+          top_imports = []
+          for node in tree.body:
+              if isinstance(node, ast.Import):
+                  top_imports.extend(alias.name for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  top_imports.append(node.module)
+          forbidden = [
+              name for name in top_imports
+              if name == "jax" or name.startswith("jax.")
+              or name == "dynesty" or name.startswith("dynesty.")
+              or name == "darksirens.inference.checkpointing"
+              or name == "darksirens.inference.dynesty_transform"
+          ]
+          assert not forbidden, forbidden
+
+          import darksirens.inference.dynesty_adapter as adapter
+          assert callable(adapter.run_dynesty)
+          assert "jax" not in sys.modules
+          assert "dynesty" not in sys.modules
+          assert "h5py" not in sys.modules
+          print("6O adapter keeps JAX, Dynesty, transform dispatch, and checkpoint I/O lazy")
+          PY
+
+      - name: Focused Phase 6O tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_dynesty_adapter.py
+
+      - name: Evaluate frozen legacy Dynesty execution behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_dynesty_adapter.py \
+            --implementation legacy \
+            --legacy-root "$GITHUB_WORKSPACE/legacy" \
+            --out /tmp/dynesty-adapter-legacy.json
+
+      - name: Evaluate reconstructed Dynesty execution behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_dynesty_adapter.py \
+            --implementation candidate \
+            --out /tmp/dynesty-adapter-candidate.json
+
+      - name: Require exact Phase 6O parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/dynesty-adapter-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/dynesty-adapter-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "Dynesty execution parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6O frozen/new Dynesty execution behavior is exact")
+          PY

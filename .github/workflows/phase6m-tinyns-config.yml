@@ -1,0 +1,111 @@
+name: phase6m-tinyns-config
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tinyns-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependency-minimal test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pytest==8.3.4" "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/tinyns_config.py tests/test_tinyns_config.py tools/probe_tinyns_config.py --select F,E9
+          python -m compileall -q src/darksirens/inference/tinyns_config.py tests/test_tinyns_config.py tools/probe_tinyns_config.py
+
+      - name: Verify configuration stays backend and CLI independent
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          import sys
+          from pathlib import Path
+
+          path = Path("src/darksirens/inference/tinyns_config.py")
+          tree = ast.parse(path.read_text())
+          imports = []
+          for node in tree.body:
+              if isinstance(node, ast.Import):
+                  imports.extend(alias.name for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  imports.append(node.module)
+          forbidden = [
+              name for name in imports
+              if name == "jax" or name.startswith("jax.")
+              or name == "tinyns" or name.startswith("tinyns.")
+              or name == "darksirens.cli" or name.startswith("darksirens.cli.")
+          ]
+          assert not forbidden, forbidden
+
+          import darksirens.inference.tinyns_config as config
+          assert callable(config.build_tinyns_config)
+          assert "jax" not in sys.modules
+          assert "tinyns" not in sys.modules
+          assert "darksirens.cli.common" not in sys.modules
+          print("6M config imports no JAX, TinyNS, or CLI module")
+          PY
+
+      - name: Focused Phase 6M tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_tinyns_config.py
+
+      - name: Evaluate pinned legacy TinyNS configuration behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_tinyns_config.py \
+            --implementation legacy \
+            --legacy-root "$GITHUB_WORKSPACE/legacy" \
+            --out /tmp/tinyns-config-legacy.json
+
+      - name: Evaluate reconstructed TinyNS configuration behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_tinyns_config.py \
+            --implementation candidate \
+            --out /tmp/tinyns-config-candidate.json
+
+      - name: Require exact Phase 6M parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/tinyns-config-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/tinyns-config-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "TinyNS configuration parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6M legacy/new TinyNS configuration behavior is exact")
+          PY

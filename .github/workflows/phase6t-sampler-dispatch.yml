@@ -1,0 +1,105 @@
+name: phase6t-sampler-dispatch
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sampler-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependency-minimal dispatcher test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "jax==0.4.38" \
+            "jaxlib==0.4.38" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/sampling.py tests/test_sampler_dispatch.py tools/probe_sampler_dispatch.py --select F,E9
+          python -m compileall -q src/darksirens/inference/sampling.py tests/test_sampler_dispatch.py tools/probe_sampler_dispatch.py
+
+      - name: Verify dispatcher import stays backend-light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          from darksirens.inference.sampling import run_sampler
+
+          assert callable(run_sampler)
+          forbidden = (
+              "jax",
+              "jax.numpy",
+              "numpyro",
+              "dynesty",
+              "tinyns",
+              "h5py",
+          )
+          loaded = [name for name in forbidden if name in sys.modules]
+          assert not loaded, loaded
+          print("6T dispatcher import loads no sampler/JAX/HDF5 backend")
+          PY
+
+      - name: Focused Phase 6T tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_sampler_dispatch.py
+
+      - name: Evaluate frozen legacy dispatcher behavior
+        run: |
+          python candidate/tools/probe_sampler_dispatch.py \
+            --implementation legacy \
+            --legacy-root "$GITHUB_WORKSPACE/legacy" \
+            --out /tmp/sampler-dispatch-legacy.json
+
+      - name: Evaluate reconstructed dispatcher behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_sampler_dispatch.py \
+            --implementation candidate \
+            --out /tmp/sampler-dispatch-candidate.json
+
+      - name: Require exact Phase 6T parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/sampler-dispatch-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/sampler-dispatch-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "Sampler-dispatch parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6T frozen/new top-level sampler dispatch is exact")
+          PY

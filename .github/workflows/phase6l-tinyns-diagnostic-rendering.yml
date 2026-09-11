@@ -1,0 +1,100 @@
+name: phase6l-tinyns-diagnostic-rendering
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tinyns-diagnostic-rendering:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal dependencies without TinyNS or JAX
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==1.26.4" "pytest==8.3.4" "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/tinyns_output.py tests/test_tinyns_diagnostic_rendering.py tools/probe_tinyns_diagnostic_rendering.py --select F,E9
+          python -m compileall -q src/darksirens/inference/tinyns_output.py tests/test_tinyns_diagnostic_rendering.py tools/probe_tinyns_diagnostic_rendering.py
+
+      - name: Verify renderer keeps the light-import boundary
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          import sys
+          from pathlib import Path
+
+          path = Path("src/darksirens/inference/tinyns_output.py")
+          tree = ast.parse(path.read_text())
+          top_imports = []
+          for node in tree.body:
+              if isinstance(node, ast.Import):
+                  top_imports.extend(a.name for a in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  top_imports.append(node.module)
+          assert not [name for name in top_imports if name == "jax" or name.startswith("jax.")]
+          assert not [name for name in top_imports if name == "tinyns" or name.startswith("tinyns.")]
+
+          from darksirens.inference.tinyns_output import print_tinyns_diagnostics
+          assert callable(print_tinyns_diagnostics)
+          assert "jax" not in sys.modules
+          assert "tinyns" not in sys.modules
+          print("6L renderer imports neither JAX nor TinyNS")
+          PY
+
+      - name: Focused Phase 6L tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_tinyns_diagnostic_rendering.py
+
+      - name: Evaluate pinned legacy diagnostic rendering
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_tinyns_diagnostic_rendering.py --implementation legacy --out /tmp/tinyns-render-legacy.json
+
+      - name: Evaluate reconstructed diagnostic rendering
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_tinyns_diagnostic_rendering.py --implementation candidate --out /tmp/tinyns-render-candidate.json
+
+      - name: Require exact Phase 6L parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/tinyns-render-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/tinyns-render-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(
+                  "TinyNS diagnostic-rendering parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6L legacy/new TinyNS diagnostic rendering is exact")
+          PY

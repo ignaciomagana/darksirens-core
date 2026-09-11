@@ -1,0 +1,98 @@
+name: phase6r-numpyro-initialization
+
+on:
+  push:
+    branches: [rebuild/phase6-inference-io]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  numpyro-initialization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependency-minimal JAX test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "jax==0.4.38" \
+            "jaxlib==0.4.38" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/numpyro_init.py tests/test_numpyro_init.py tools/probe_numpyro_init.py --select F,E9
+          python -m compileall -q src/darksirens/inference/numpyro_init.py tests/test_numpyro_init.py tools/probe_numpyro_init.py
+
+      - name: Verify JAX and NumPyro stay lazy on module import
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens.inference.numpyro_init as init
+
+          assert callable(init.prepare_numpyro_initialization)
+          assert "jax" not in sys.modules
+          assert "jax.numpy" not in sys.modules
+          assert "numpyro" not in sys.modules
+          print("6R module import loads neither JAX nor NumPyro")
+          PY
+
+      - name: Focused Phase 6R tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_numpyro_init.py
+
+      - name: Evaluate frozen legacy initialization/preflight behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_numpyro_init.py \
+            --implementation legacy \
+            --legacy-root "$GITHUB_WORKSPACE/legacy" \
+            --out /tmp/numpyro-init-legacy.json
+
+      - name: Evaluate reconstructed initialization/preflight behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_numpyro_init.py \
+            --implementation candidate \
+            --out /tmp/numpyro-init-candidate.json
+
+      - name: Require exact Phase 6R parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/numpyro-init-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/numpyro-init-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "NumPyro initialization parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 6R frozen/new NumPyro initialization behavior is exact")
+          PY
