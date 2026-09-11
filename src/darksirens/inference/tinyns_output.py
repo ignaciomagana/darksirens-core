@@ -1,8 +1,8 @@
-"""Portable normalization of TinyNS runtime diagnostics.
+"""Portable normalization and rendering of TinyNS runtime diagnostics.
 
 TinyNS itself is an optional sampler backend.  This module only consumes an
-already-produced result object and converts the small diagnostic surface into a
-JSON-safe dictionary; importing it must not import TinyNS or JAX.
+already-produced result object or normalized diagnostics dictionary.  Importing
+it must not import TinyNS or JAX.
 """
 
 from __future__ import annotations
@@ -96,4 +96,54 @@ def normalize_tinyns_diagnostics(result) -> dict:
     return data
 
 
-__all__ = ["normalize_tinyns_diagnostics"]
+def print_tinyns_diagnostics(diag: dict) -> None:
+    """Render the frozen human-readable TinyNS diagnostic summary."""
+    if not diag:
+        return
+
+    def g(*keys):
+        for key in keys:
+            if diag.get(key) is not None:
+                return diag[key]
+        return None
+
+    def fmt(value):
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if isinstance(value, float):
+            return f"{value:.6g}"
+        return str(value)
+
+    lines = ["TinyNS Diagnostics", "------------------"]
+    if g("success") is not None:
+        lines.append(f"success: {str(g('success')).lower()}")
+    if g("message") is not None:
+        lines.append(f"message: {g('message')}")
+    if g("logz") is not None:
+        err = f" ± {fmt(g('logzerr'))}" if g("logzerr") is not None else ""
+        lines.append(f"logZ: {fmt(g('logz'))}{err}")
+    diagnostic_lines = (
+        ("niter", "niter"),
+        ("ncall", "ncall"),
+        ("wall time", "seconds"),
+        ("niter/sec", "niter_per_sec"),
+        ("ncall/sec", "ncall_per_sec"),
+        ("calls/iter", "calls_per_iter"),
+        ("final dlogz", "final_delta_logz"),
+        ("live weight fraction", "live_weight_fraction"),
+        ("posterior ESS", "posterior_ess"),
+        ("replacement mean batches", "replacement_mean_batches"),
+        ("replacement max batches", "replacement_max_batches"),
+        ("replacement failures", "replacement_failures"),
+        ("replacement rescue used", "replacement_rescue_used"),
+        ("insertion rank mean z", "insertion_rank_mean_z"),
+        ("insertion rank std ratio", "insertion_rank_std_ratio"),
+    )
+    for label, key in diagnostic_lines:
+        if g(key) is not None:
+            suffix = " s" if key == "seconds" else ""
+            lines.append(f"{label}: {fmt(g(key))}{suffix}")
+    print("\n".join(lines), flush=True)
+
+
+__all__ = ["normalize_tinyns_diagnostics", "print_tinyns_diagnostics"]
