@@ -88,6 +88,26 @@ def _probe(make):
         "values": compiled_values,
     }
 
+    row_runs = []
+
+    def row_only(u):
+        if u.ndim != 1:
+            raise ValueError("row-only transform")
+        row_runs.append(1)
+        return u * 2.0
+
+    row_only.prefer_jit = True
+    rowwise, rowwise_msg = _build(make, row_only, 3, n_probe=41)
+    row_before = len(row_runs)
+    row_value = _pack(rowwise(np.full(3, 0.25)))
+    out["rowwise_reference_fallback"] = {
+        "dispatch": rowwise.dispatch,
+        "message": rowwise_msg,
+        "body_runs_before_call": row_before,
+        "body_runs_after_call": len(row_runs),
+        "value": row_value,
+    }
+
     def drifting(u):
         if isinstance(u, jax.core.Tracer):
             return u * 3.0

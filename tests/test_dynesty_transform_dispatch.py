@@ -59,6 +59,31 @@ def test_prefer_jit_exact_transform_is_compiled(capsys):
     assert len(body_runs) == before
 
 
+def test_prefer_jit_row_only_transform_uses_32_point_reference_fallback(capsys):
+    calls = []
+
+    def transform(u):
+        # The frozen dispatcher first tries one batched eager call. A callable
+        # that only accepts one proposal at a time must fall back to at most 32
+        # rowwise references before deciding whether the jit is exact.
+        if u.ndim != 1:
+            raise ValueError("row-only transform")
+        calls.append(1)
+        return u * 2.0
+
+    transform.prefer_jit = True
+    wrapped = _make_dynesty_ptform(transform, 3, n_probe=41)
+    assert wrapped.dispatch == "jit"
+    assert "matched the eager one on all 32 probe draws" in capsys.readouterr().out
+    # 32 eager row references plus the one trace-time Python body execution.
+    assert len(calls) == 33
+    before = len(calls)
+    np.testing.assert_array_equal(
+        wrapped(np.full(3, 0.25)), np.full(3, 0.5)
+    )
+    assert len(calls) == before
+
+
 def test_prefer_jit_value_drift_falls_back_to_eager(capsys):
     def transform(u):
         if isinstance(u, jax.core.Tracer):
