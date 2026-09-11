@@ -1,14 +1,9 @@
-"""Phase 6O tests for the lazy Dynesty execution adapter."""
-
-from types import SimpleNamespace
+"""Phase 6O/6P tests for the lazy Dynesty execution adapter."""
 
 import numpy as np
 import pytest
 
-from darksirens.inference.dynesty_adapter import (
-    _normalized_dynesty_weights,
-    run_dynesty,
-)
+from darksirens.inference.dynesty_adapter import _normalized_dynesty_weights
 
 
 def test_weight_normalization_matches_frozen_formula():
@@ -27,9 +22,3 @@ def test_no_finite_weights_fail_eagerly():
 def test_non_normalizable_weights_fail_eagerly():
     with pytest.raises(RuntimeError, match="could not be normalized"):
         _normalized_dynesty_weights([0.0, np.inf])
-
-
-def test_plotting_diagnostics_are_explicitly_deferred_before_backend_import():
-    opts = SimpleNamespace(dynesty_diagnostics=True)
-    with pytest.raises(NotImplementedError, match="plotting diagnostics"):
-        run_dynesty(lambda x: 0.0, lambda u: u, ["x"], opts)

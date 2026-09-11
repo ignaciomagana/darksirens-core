@@ -1,10 +1,10 @@
 """Lazy Dynesty execution adapter.
 
-This module reconstructs only the sampling execution core.  Generic zero-free
+This module reconstructs only the sampling execution core. Generic zero-free
 handling and finite-logL preflight stay in backend-independent dispatch;
-periodic plotting diagnostics are a separate concern.  Dynesty, JAX, checkpoint
-I/O, and transform-dispatch dependencies are imported only when execution needs
-them.
+periodic plotting diagnostics live in their own optional helper. Dynesty, JAX,
+checkpoint I/O, transform dispatch, and plotting dependencies are imported only
+when execution needs them.
 """
 
 from __future__ import annotations
@@ -44,6 +44,15 @@ def install_dynesty_checkpointing(sampler):
     return _install(sampler)
 
 
+def start_dynesty_diagnostics(sampler, labels, opts):
+    """Load the optional 6P plotting side effect only when requested."""
+    from darksirens.inference.dynesty_diagnostics import (
+        start_dynesty_diagnostics as _start,
+    )
+
+    return _start(sampler, labels, opts)
+
+
 def _normalized_dynesty_weights(logw):
     """Reconstruct the frozen robust normalization of Dynesty log weights."""
     logw = np.asarray(logw, dtype=float)
@@ -58,18 +67,7 @@ def _normalized_dynesty_weights(logw):
 
 
 def run_dynesty(likelihood, prior_transform, labels, opts):
-    """Execute the frozen Dynesty sampling core and standardize its result.
-
-    Periodic Dynesty plotting diagnostics are intentionally not owned by this
-    adapter yet; callers requesting them must wait for the separate diagnostics
-    seam rather than silently running without the requested output.
-    """
-    if bool(getattr(opts, "dynesty_diagnostics", False)):
-        raise NotImplementedError(
-            "periodic Dynesty plotting diagnostics are not wired into the "
-            "execution adapter yet"
-        )
-
+    """Execute the frozen Dynesty sampling core and standardize its result."""
     import jax.numpy as jnp
     from dynesty import NestedSampler
     from dynesty.utils import resample_equal
@@ -166,6 +164,10 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             flush=True,
         )
 
+    diagnostics = None
+    if bool(getattr(opts, "dynesty_diagnostics", False)):
+        diagnostics = start_dynesty_diagnostics(sampler, labels, opts)
+
     if not plan.resuming:
         print(
             "[*] Initial live points found! Starting main nested sampling loop...",
@@ -174,13 +176,18 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
     if maxcall is not None:
         print(f"[*] Dynesty call cap: maxcall={maxcall}", flush=True)
 
-    sampler.run_nested(
-        dlogz=opts.dlogz,
-        maxcall=maxcall,
-        print_progress=opts.show_progress,
-        resume=plan.resuming,
-        **checkpoint_kwargs,
-    )
+    try:
+        sampler.run_nested(
+            dlogz=opts.dlogz,
+            maxcall=maxcall,
+            print_progress=opts.show_progress,
+            resume=plan.resuming,
+            **checkpoint_kwargs,
+        )
+    finally:
+        if diagnostics is not None:
+            diagnostics.stop()
+
     res = sampler.results
 
     logw, weights = _normalized_dynesty_weights(res["logwt"])
