@@ -12,7 +12,6 @@ import os
 
 import numpy as np
 
-from darksirens.inference.checkpointing import plan_from_opts
 from darksirens.inference.nested_output import package_dead_points
 from darksirens.inference.tinyns_config import (
     build_tinyns_config,
@@ -23,6 +22,14 @@ from darksirens.inference.tinyns_output import (
     normalize_tinyns_diagnostics,
     print_tinyns_diagnostics,
 )
+
+
+def plan_from_opts(opts, sampler):
+    """Load the shared checkpoint planner only when checkpoint policy is used."""
+
+    from darksirens.inference.checkpointing import plan_from_opts as _plan_from_opts
+
+    return _plan_from_opts(opts, sampler)
 
 
 def _print_iteration_budget(config, run_kwargs) -> None:
