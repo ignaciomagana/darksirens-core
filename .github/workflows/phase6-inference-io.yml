@@ -71,6 +71,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_dynesty_checkpoint_state.py
 
+      - name: Phase 6F dynesty transform-dispatch tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_dynesty_transform_dispatch.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -130,12 +134,13 @@ jobs:
               "darksirens.redshift",
               "darksirens.sky",
               "healpy",
+              "dynesty",
               "numpyro",
               "tinyns",
           )
           for rel in (
               "src/darksirens/inference/prior.py",
-              "src/darksirens/inference/dynesty_checkpoint.py",
+              "src/darksirens/inference/dynesty_transform.py",
           ):
               path = Path(rel)
               tree = ast.parse(path.read_text())
@@ -151,7 +156,23 @@ jobs:
                           bad_ext.append((str(path), name))
               assert not bad_ext, bad_ext
 
-          adapter = ast.parse(Path("src/darksirens/inference/dynesty_checkpoint.py").read_text())
+          checkpoint_forbidden = tuple(
+              x for x in extension_forbidden if x != "dynesty"
+          )
+          adapter_path = Path("src/darksirens/inference/dynesty_checkpoint.py")
+          adapter = ast.parse(adapter_path.read_text())
+          bad_adapter = []
+          for node in ast.walk(adapter):
+              names = []
+              if isinstance(node, ast.Import):
+                  names = [a.name for a in node.names]
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  names = [node.module]
+              for name in names:
+                  if any(name == x or name.startswith(x + ".") for x in checkpoint_forbidden):
+                      bad_adapter.append((str(adapter_path), name))
+          assert not bad_adapter, bad_adapter
+
           top_level_dynesty = []
           for node in adapter.body:
               if isinstance(node, ast.Import):
@@ -163,7 +184,7 @@ jobs:
               if any(name == "dynesty" or name.startswith("dynesty.") for name in names):
                   top_level_dynesty.extend(names)
           assert not top_level_dynesty, top_level_dynesty
-          print("portable inference/IO boundaries and lazy dynesty adapter imports are clean")
+          print("portable inference/IO boundaries and lazy dynesty imports are clean")
           PY
           python - <<'PY'
           import sys
@@ -184,16 +205,10 @@ jobs:
 
       - name: Evaluate pinned legacy result-artifact behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
-            python candidate/tools/probe_result_artifact.py \
-            --implementation legacy --out /tmp/result-artifact-legacy.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_result_artifact.py --implementation legacy --out /tmp/result-artifact-legacy.json
       - name: Evaluate reconstructed result-artifact behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
-            python candidate/tools/probe_result_artifact.py \
-            --implementation candidate --out /tmp/result-artifact-candidate.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_result_artifact.py --implementation candidate --out /tmp/result-artifact-candidate.json
       - name: Require exact Phase 6A result-artifact parity
         run: |
           python - <<'PY'
@@ -201,23 +216,16 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/result-artifact-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/result-artifact-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(f"result-artifact parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          if legacy != candidate: raise SystemExit(f"result-artifact parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6A legacy/new result-artifact behavior is exact")
           PY
 
       - name: Evaluate pinned legacy checkpoint-plan behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
-            python candidate/tools/probe_checkpoint_plan.py \
-            --implementation legacy --out /tmp/checkpoint-plan-legacy.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_checkpoint_plan.py --implementation legacy --out /tmp/checkpoint-plan-legacy.json
       - name: Evaluate reconstructed checkpoint-plan behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
-            python candidate/tools/probe_checkpoint_plan.py \
-            --implementation candidate --out /tmp/checkpoint-plan-candidate.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_checkpoint_plan.py --implementation candidate --out /tmp/checkpoint-plan-candidate.json
       - name: Require exact Phase 6B checkpoint-plan parity
         run: |
           python - <<'PY'
@@ -225,23 +233,16 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/checkpoint-plan-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/checkpoint-plan-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(f"checkpoint-plan parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          if legacy != candidate: raise SystemExit(f"checkpoint-plan parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6B legacy/new checkpoint-plan behavior is exact")
           PY
 
       - name: Evaluate pinned legacy fingerprint-gate behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
-            python candidate/tools/probe_run_fingerprint_gate.py \
-            --implementation legacy --out /tmp/fingerprint-gate-legacy.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_run_fingerprint_gate.py --implementation legacy --out /tmp/fingerprint-gate-legacy.json
       - name: Evaluate reconstructed fingerprint-gate behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
-            python candidate/tools/probe_run_fingerprint_gate.py \
-            --implementation candidate --out /tmp/fingerprint-gate-candidate.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_run_fingerprint_gate.py --implementation candidate --out /tmp/fingerprint-gate-candidate.json
       - name: Require exact Phase 6C1 fingerprint-gate parity
         run: |
           python - <<'PY'
@@ -249,23 +250,16 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/fingerprint-gate-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/fingerprint-gate-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(f"fingerprint-gate parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          if legacy != candidate: raise SystemExit(f"fingerprint-gate parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6C1 legacy/new fingerprint-gate behavior is exact")
           PY
 
       - name: Evaluate pinned legacy prior-transform behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
-            python candidate/tools/probe_prior_transform.py \
-            --implementation legacy --out /tmp/prior-transform-legacy.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_prior_transform.py --implementation legacy --out /tmp/prior-transform-legacy.json
       - name: Evaluate reconstructed prior-transform behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
-            python candidate/tools/probe_prior_transform.py \
-            --implementation candidate --out /tmp/prior-transform-candidate.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_prior_transform.py --implementation candidate --out /tmp/prior-transform-candidate.json
       - name: Require exact Phase 6D prior-transform parity
         run: |
           python - <<'PY'
@@ -273,23 +267,16 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/prior-transform-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/prior-transform-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(f"prior-transform parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          if legacy != candidate: raise SystemExit(f"prior-transform parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6D legacy/new prior-transform behavior is bit-exact")
           PY
 
       - name: Evaluate pinned legacy dynesty checkpoint-state behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
-            python candidate/tools/probe_dynesty_checkpoint_state.py \
-            --implementation legacy --out /tmp/dynesty-checkpoint-legacy.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_dynesty_checkpoint_state.py --implementation legacy --out /tmp/dynesty-checkpoint-legacy.json
       - name: Evaluate reconstructed dynesty checkpoint-state behavior
         run: |
-          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
-            python candidate/tools/probe_dynesty_checkpoint_state.py \
-            --implementation candidate --out /tmp/dynesty-checkpoint-candidate.json
-
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_dynesty_checkpoint_state.py --implementation candidate --out /tmp/dynesty-checkpoint-candidate.json
       - name: Require exact Phase 6E dynesty checkpoint-state parity
         run: |
           python - <<'PY'
@@ -297,9 +284,25 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/dynesty-checkpoint-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/dynesty-checkpoint-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(f"dynesty checkpoint-state parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          if legacy != candidate: raise SystemExit(f"dynesty checkpoint-state parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6E legacy/new dynesty checkpoint-state behavior is exact")
+          PY
+
+      - name: Evaluate pinned legacy dynesty transform-dispatch behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_dynesty_transform_dispatch.py --implementation legacy --out /tmp/dynesty-transform-legacy.json
+      - name: Evaluate reconstructed dynesty transform-dispatch behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_dynesty_transform_dispatch.py --implementation candidate --out /tmp/dynesty-transform-candidate.json
+      - name: Require exact Phase 6F dynesty transform-dispatch parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/dynesty-transform-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/dynesty-transform-candidate.json').read_text())['behavior']
+          if legacy != candidate: raise SystemExit(f"dynesty transform-dispatch parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          print("Phase 6F legacy/new dynesty transform-dispatch behavior is exact")
           PY
 
       - name: Install pinned legacy parity dependencies
