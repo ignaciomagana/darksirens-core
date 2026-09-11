@@ -67,6 +67,10 @@ jobs:
         working-directory: candidate
         run: python -m pytest -q tests/test_prior_transform.py
 
+      - name: Phase 6E dynesty checkpoint-state tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_dynesty_checkpoint_state.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
@@ -115,7 +119,7 @@ jobs:
                           bad.append((str(path), name))
           assert not bad, bad
 
-          prior_forbidden = (
+          extension_forbidden = (
               "darksirens.cli",
               "darksirens.surveys",
               "darksirens_surveys",
@@ -126,30 +130,47 @@ jobs:
               "darksirens.redshift",
               "darksirens.sky",
               "healpy",
-              "dynesty",
               "numpyro",
               "tinyns",
           )
-          prior = Path("src/darksirens/inference/prior.py")
-          tree = ast.parse(prior.read_text())
-          bad_prior = []
-          for node in ast.walk(tree):
-              names = []
+          for rel in (
+              "src/darksirens/inference/prior.py",
+              "src/darksirens/inference/dynesty_checkpoint.py",
+          ):
+              path = Path(rel)
+              tree = ast.parse(path.read_text())
+              bad_ext = []
+              for node in ast.walk(tree):
+                  names = []
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      names = [node.module]
+                  for name in names:
+                      if any(name == x or name.startswith(x + ".") for x in extension_forbidden):
+                          bad_ext.append((str(path), name))
+              assert not bad_ext, bad_ext
+
+          adapter = ast.parse(Path("src/darksirens/inference/dynesty_checkpoint.py").read_text())
+          top_level_dynesty = []
+          for node in adapter.body:
               if isinstance(node, ast.Import):
                   names = [a.name for a in node.names]
               elif isinstance(node, ast.ImportFrom) and node.module:
                   names = [node.module]
-              for name in names:
-                  if any(name == x or name.startswith(x + ".") for x in prior_forbidden):
-                      bad_prior.append((str(prior), name))
-          assert not bad_prior, bad_prior
-          print("portable inference/IO has no hidden runtime/plugin/sampler dependency")
+              else:
+                  names = []
+              if any(name == "dynesty" or name.startswith("dynesty.") for name in names):
+                  top_level_dynesty.extend(names)
+          assert not top_level_dynesty, top_level_dynesty
+          print("portable inference/IO boundaries and lazy dynesty adapter imports are clean")
           PY
           python - <<'PY'
           import sys
           import darksirens.io.results
           import darksirens.inference.checkpointing
           import darksirens.inference.run_fingerprint
+          import darksirens.inference.dynesty_checkpoint
           from darksirens.inference.prior import make_prior_transform
           make_prior_transform([0.0], [1.0])
           bad = (
@@ -158,7 +179,7 @@ jobs:
               "darksirens.surveys", "darksirens.lss", "darksirens.lensing",
           )
           assert not [name for name in bad if name in sys.modules]
-          print("Phase 6A/6B/6C1 plus uniform 6D import stay runtime/plugin/backend free")
+          print("Phase 6 light imports plus uniform prior construction load no runtime/backend/plugin")
           PY
 
       - name: Evaluate pinned legacy result-artifact behavior
@@ -255,6 +276,30 @@ jobs:
           if legacy != candidate:
               raise SystemExit(f"prior-transform parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
           print("Phase 6D legacy/new prior-transform behavior is bit-exact")
+          PY
+
+      - name: Evaluate pinned legacy dynesty checkpoint-state behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_dynesty_checkpoint_state.py \
+            --implementation legacy --out /tmp/dynesty-checkpoint-legacy.json
+
+      - name: Evaluate reconstructed dynesty checkpoint-state behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_dynesty_checkpoint_state.py \
+            --implementation candidate --out /tmp/dynesty-checkpoint-candidate.json
+
+      - name: Require exact Phase 6E dynesty checkpoint-state parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/dynesty-checkpoint-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/dynesty-checkpoint-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(f"dynesty checkpoint-state parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
+          print("Phase 6E legacy/new dynesty checkpoint-state behavior is exact")
           PY
 
       - name: Install pinned legacy parity dependencies
