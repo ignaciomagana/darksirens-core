@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -139,11 +140,12 @@ def _plan(labels, *, conditional_pairs=(), conditioned=()):
 
 
 def test_numpyro_diagnostics_preserve_frozen_summary():
+    accept = np.array([0.9, 0.7, 0.8])
     diagnostics, diverging = _numpyro_diagnostics(
         {
             "diverging": np.array([False, True, False]),
             "num_steps": np.array([3, 7, 7]),
-            "accept_prob": np.array([0.9, 0.7, 0.8]),
+            "accept_prob": accept,
         },
         3,
         0.85,
@@ -152,7 +154,7 @@ def test_numpyro_diagnostics_preserve_frozen_summary():
     assert diagnostics == {
         "n_divergent": 1,
         "divergence_fraction": 1.0 / 3.0,
-        "mean_accept_prob": 0.8,
+        "mean_accept_prob": float(accept.mean()),
         "mean_num_steps": 17.0 / 3.0,
         "frac_at_max_tree_depth": 2.0 / 3.0,
         "max_tree_depth": 3,
@@ -187,12 +189,14 @@ def test_run_numpyro_wires_sites_mcmc_and_likelihood_recovery(monkeypatch, capsy
         prior_kinds=[("uniform", None, None), ("normal", 0.0, 1.0)],
     )
 
-    np.testing.assert_array_equal(
-        result["samples"],
-        np.column_stack([posterior["u"], posterior["n"]]),
+    expected_samples = np.asarray(
+        jnp.column_stack([posterior["u"], posterior["n"]])
     )
-    expected_ll = -np.sum(result["samples"] ** 2, axis=1)
-    np.testing.assert_allclose(result["log_likelihood"], expected_ll, rtol=0, atol=0)
+    np.testing.assert_array_equal(result["samples"], expected_samples)
+    expected_ll = np.asarray(
+        jax.lax.map(lambda theta: -jnp.sum(theta**2), jnp.asarray(expected_samples))
+    )
+    np.testing.assert_array_equal(result["log_likelihood"], expected_ll)
     assert result["logZ"] is None
     assert result["logZerr"] is None
     assert ("sample", "u", "Uniform") in events
