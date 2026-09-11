@@ -1,0 +1,100 @@
+name: phase7a-public-loaders
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-loaders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused loader test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "h5py==3.12.1" \
+            "jax==0.4.38" \
+            "jaxlib==0.4.38" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/__init__.py src/darksirens/catalog/io.py src/darksirens/catalog/__init__.py tests/test_public_loaders.py tools/probe_public_catalog_loader.py --select F,E9
+          python -m compileall -q src/darksirens/__init__.py src/darksirens/catalog/io.py tests/test_public_loaders.py tools/probe_public_catalog_loader.py
+
+      - name: Verify root import stays dependency-light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens as ds
+
+          assert callable(ds.load_events)
+          assert callable(ds.load_injections)
+          assert callable(ds.load_catalog)
+          for name in ("jax", "h5py", "healpy", "dynesty", "numpyro", "tinyns"):
+              assert name not in sys.modules, name
+          print("7A root import remains backend/data-library light")
+          PY
+
+      - name: Focused Phase 7A tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_public_loaders.py
+
+      - name: Evaluate frozen catalog loader
+        run: |
+          LEGACY_ROOT="$GITHUB_WORKSPACE/legacy" \
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+          python candidate/tools/probe_public_catalog_loader.py --mode legacy \
+            > /tmp/catalog-loader-legacy.json
+
+      - name: Evaluate reconstructed catalog loader
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+          python candidate/tools/probe_public_catalog_loader.py --mode candidate \
+            > /tmp/catalog-loader-candidate.json
+
+      - name: Require exact Phase 7A catalog parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/catalog-loader-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/catalog-loader-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "standardized catalog-loader parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 7A frozen/new standardized catalog behavior is exact")
+          PY
