@@ -1,0 +1,94 @@
+name: phase7e-public-infer
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-infer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused public-infer tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" \
+            "numpy==1.26.4" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e .
+
+      - name: Definite-error lint
+        run: |
+          ruff check src/darksirens/__init__.py src/darksirens/inference/public.py tests/test_public_infer.py --select F,E9
+          python -m compileall -q src/darksirens/__init__.py src/darksirens/inference/public.py tests/test_public_infer.py
+
+      - name: Verify package-root infer surface stays lazy
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens as ds
+
+          assert callable(ds.infer)
+          forbidden = {"jax", "h5py", "healpy", "dynesty", "numpyro", "tinyns"}
+          loaded = forbidden.intersection(sys.modules)
+          assert not loaded, loaded
+          print("Phase 7E root infer facade is dependency-light")
+          PY
+
+      - name: Verify public facade contains no backend or companion imports
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          paths = [
+              Path("src/darksirens/__init__.py"),
+              Path("src/darksirens/inference/public.py"),
+          ]
+          forbidden = (
+              "dynesty",
+              "tinyns",
+              "numpyro",
+              "darksirens_surveys",
+              "darksirens_lss",
+              "darksirens_lensing",
+              "darksirens.surveys",
+              "darksirens.lss",
+              "darksirens.lensing",
+          )
+          bad = []
+          for path in paths:
+              tree = ast.parse(path.read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [alias.name for alias in node.names]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      names = [node.module]
+                  else:
+                      continue
+                  for name in names:
+                      if any(name == item or name.startswith(item + ".") for item in forbidden):
+                          bad.append((str(path), name))
+          assert not bad, bad
+          print("Phase 7E facade delegates without backend/companion imports")
+          PY
+
+      - name: Focused Phase 7E tests
+        run: python -m pytest -q tests/test_public_infer.py

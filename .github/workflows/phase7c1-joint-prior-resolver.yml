@@ -1,0 +1,97 @@
+name: phase7c1-joint-prior-resolver
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  joint-prior-resolver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused resolver test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "jax[cpu]==0.4.34" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/inference/joint_prior.py tests/test_joint_prior_resolver.py tools/probe_joint_prior_resolver.py --select F,E9
+          python -m compileall -q src/darksirens/inference/joint_prior.py tests/test_joint_prior_resolver.py tools/probe_joint_prior_resolver.py
+
+      - name: Verify resolver module stays JAX-light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          from darksirens.inference.joint_prior import resolve_joint_prior_constraints
+
+          assert callable(resolve_joint_prior_constraints)
+          assert "jax" not in sys.modules
+          assert "jax.numpy" not in sys.modules
+          print("Phase 7C1 resolver import loads no JAX")
+          PY
+
+      - name: Focused Phase 7C1 tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_joint_prior_resolver.py
+
+      - name: Evaluate frozen resolver semantics
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_joint_prior_resolver.py \
+            --implementation legacy \
+            --legacy-root "$GITHUB_WORKSPACE/legacy" \
+            --out /tmp/joint-prior-legacy.json
+
+      - name: Evaluate reconstructed resolver semantics
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_joint_prior_resolver.py \
+            --implementation candidate \
+            --out /tmp/joint-prior-candidate.json
+
+      - name: Require exact Phase 7C1 resolver parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          legacy = json.loads(Path('/tmp/joint-prior-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/joint-prior-candidate.json').read_text())
+          if legacy != candidate:
+              raise SystemExit(
+                  "joint-prior resolver parity failure:\n"
+                  f"legacy={legacy!r}\n"
+                  f"candidate={candidate!r}"
+              )
+          print("Phase 7C1 frozen/new population resolver behavior is exact")
+          PY

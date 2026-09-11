@@ -1,0 +1,66 @@
+name: phase7c3-healpix-geometry
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healpix-geometry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install frozen HEALPix reference and focused tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "h5py==3.12.1" \
+            "healpy==1.17.3" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/catalog/geometry.py src/darksirens/catalog/__init__.py tests/test_healpix_geometry.py tools/probe_healpix_geometry.py --select F,E9
+          python -m compileall -q src/darksirens/catalog/geometry.py src/darksirens/catalog/__init__.py tests/test_healpix_geometry.py tools/probe_healpix_geometry.py
+
+      - name: Verify core geometry has no healpy runtime dependency
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          from darksirens.catalog.geometry import ang2pix_ring
+
+          assert callable(ang2pix_ring)
+          assert "healpy" not in sys.modules
+          print("Phase 7C3 geometry imports without healpy")
+          PY
+
+      - name: Focused Phase 7C3 tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_healpix_geometry.py
+
+      - name: Require exact frozen healpy RING parity
+        working-directory: candidate
+        run: python tools/probe_healpix_geometry.py --out /tmp/healpix-geometry.json
+
+      - name: Show parity record
+        run: cat /tmp/healpix-geometry.json

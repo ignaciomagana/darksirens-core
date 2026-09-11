@@ -6,11 +6,16 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 
-from darksirens.cosmology.distances import dL_of_z, zgrid as distance_zgrid
+from darksirens.cosmology.distances import (
+    dL_of_z,
+    z_of_dL_precomputed,
+    zgrid as distance_zgrid,
+)
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.cosmology.volume import log_comoving_volume_prior
 from darksirens.gw.types import GWEvent
 from darksirens.population import pop_model_parser
+from darksirens.population.angular import get_angular_model
 from darksirens.selection.gw import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     compute_selection_term,
@@ -43,6 +48,39 @@ class CatalogLikelihoodDiagnostics(NamedTuple):
     selection_log_correction: jnp.ndarray
 
 
+def _angular_log_weight_fn(
+    angular_model: str,
+    angular_params,
+    dL_grid,
+    dL_lo,
+    dL_hi,
+):
+    """Return frozen ``log g(nhat,z(dL))`` weighting, or ``None`` for isotropy.
+
+    The isotropic branch deliberately returns ``None`` so the already accepted
+    event and selection compute graphs remain unchanged.  For anisotropic
+    models, distance is clamped before inversion exactly as in the frozen
+    likelihood; unsupported samples are masked by the base importance weight.
+    """
+    if angular_model == "isotropic":
+        return None
+    model = get_angular_model(angular_model)
+    theta = jnp.asarray(angular_params)
+    expected = len(model.param_specs)
+    if theta.ndim != 1 or int(theta.shape[0]) != expected:
+        raise ValueError(
+            f"angular_params for {angular_model!r} must have shape ({expected},), "
+            f"got {tuple(theta.shape)}"
+        )
+
+    def _weight(nx, ny, nz, dL):
+        dL_c = jnp.clip(dL, dL_lo, dL_hi)
+        z = z_of_dL_precomputed(dL_c, dL_grid)
+        return model.log_g(nx, ny, nz, z, theta)
+
+    return _weight
+
+
 def spectral_siren_log_likelihood(
     cosmology: CosmologyParameters,
     pop_params: jnp.ndarray,
@@ -56,24 +94,15 @@ def spectral_siren_log_likelihood(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
+    angular_model: str = "isotropic",
+    angular_params=None,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
 ):
-    """Evaluate the catalog-free spectral-siren hierarchical likelihood.
-
-    The source population supplies the mass, mass-ratio, spin, and merger-rate
-    evolution. The redshift measure is the normalized comoving-volume prior
-    ``p(z) ∝ dV_c/dz``. Posterior samples and detected injections are both
-    reweighted in the canonical ``(m1det, q, dL)`` coordinates, and the same
-    target density is used in the PE numerator and selection integral.
-
-    This function contains no galaxy-catalog, survey-completeness, LSS, lensing,
-    flow, sampler, or application-CLI dispatch. Those are separate composition
-    layers.
-    """
+    """Evaluate the catalog-free spectral-siren hierarchical likelihood."""
     pop_params = jnp.asarray(pop_params)
     if pop_params.ndim == 0 or int(pop_params.shape[0]) == 0:
         raise ValueError(
@@ -102,15 +131,14 @@ def spectral_siren_log_likelihood(
     dL_grid = dL_of_z(distance_zgrid, H0, Om0, w0, wa)
     dL_lo = dL_grid[0]
     dL_hi = dL_grid[-1]
+    angular_weight = _angular_log_weight_fn(
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+    )
 
     def _log_prior_z(z, _pix, _catalog):
         return log_comoving_volume_prior(z, cosmology)
 
     def _log_weight(m1det, q, dL, chieff, pix, prior_wt, spin=None):
-        # z(dL) returns a NaN sentinel outside its tabulated support. Clamp the
-        # arithmetic first and mask the value afterwards, matching the reference
-        # reverse-mode discipline: invalid rows carry zero cotangent instead of
-        # storing NaNs that can poison a gradient through a dead branch.
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
         ldw = log_sample_weight(
@@ -141,6 +169,7 @@ def spectral_siren_log_likelihood(
         n_draw,
         n_events,
         sel_batch_size=sel_batch_size,
+        sky_log_weight_fn=angular_weight,
     )
 
     event_lls, event_vars = reduce_pe_events(
@@ -149,6 +178,7 @@ def spectral_siren_log_likelihood(
         nsamp,
         _log_weight,
         pe_event_block=pe_event_block,
+        sky_log_weight_fn=angular_weight,
     )
 
     selection_ll = selection_log_correction(
@@ -209,6 +239,8 @@ def _ordinary_hierarchical_likelihood(
     selection_neff_soft_guard: bool,
     max_likelihood_variance: float,
     return_diagnostics: bool,
+    angular_model: str = "isotropic",
+    angular_params=None,
 ):
     """Shared PE/selection reduction for explicit ordinary redshift models."""
 
@@ -229,6 +261,9 @@ def _ordinary_hierarchical_likelihood(
     )
     dL_grid = dL_of_z(distance_zgrid, H0, Om0, w0, wa)
     dL_lo, dL_hi = dL_grid[0], dL_grid[-1]
+    angular_weight = _angular_log_weight_fn(
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+    )
 
     def _weight(prior_fn, catalog):
         def fn(m1det, q, dL, chieff, pix, prior_wt, spin=None):
@@ -266,6 +301,7 @@ def _ordinary_hierarchical_likelihood(
         n_draw,
         n_events,
         sel_batch_size=sel_batch_size,
+        sky_log_weight_fn=angular_weight,
     )
     event_lls, event_vars = reduce_pe_events(
         gw_pe,
@@ -273,6 +309,7 @@ def _ordinary_hierarchical_likelihood(
         nsamp,
         pe_weight,
         pe_event_block=pe_event_block,
+        sky_log_weight_fn=angular_weight,
     )
     selection_ll = selection_log_correction(
         log_mu,
@@ -314,19 +351,15 @@ def dark_siren_log_likelihood(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
+    angular_model: str = "isotropic",
+    angular_params=None,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
 ):
-    """Ordinary incomplete-catalog conditional dark-siren likelihood.
-
-    PE samples and detected injections use independently prepared catalog views
-    but the same physical additive-count-density redshift model.  The observed
-    count KDE caches are data-only and must be constructed outside the sampled
-    likelihood evaluation.
-    """
+    """Ordinary incomplete-catalog conditional dark-siren likelihood."""
 
     from darksirens.catalog.models import (
         build_incomplete_catalog_prior_state,
@@ -360,6 +393,8 @@ def dark_siren_log_likelihood(
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
         return_diagnostics=return_diagnostics,
+        angular_model=angular_model,
+        angular_params=angular_params,
     )
 
 
@@ -380,6 +415,8 @@ def complete_catalog_siren_log_likelihood(
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
+    angular_model: str = "isotropic",
+    angular_params=None,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
@@ -420,6 +457,8 @@ def complete_catalog_siren_log_likelihood(
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
         return_diagnostics=return_diagnostics,
+        angular_model=angular_model,
+        angular_params=angular_params,
     )
 
 
@@ -468,11 +507,8 @@ def bright_siren_log_likelihood(
     """Bright-siren likelihood with one explicit counterpart per GW event.
 
     The PE numerator is counterpart Gaussian times the normalized volume prior
-    (with optional resolved-pixel gating).  The selection integral intentionally
+    (with optional resolved-pixel gating). The selection integral intentionally
     uses the catalog-free volume prior alone, matching the frozen legacy model.
-    ``counterparts`` is a Python sequence in event order; bright-event PE terms
-    are reduced event by event so no mutable "active counterpart index" is
-    required.
     """
 
     from darksirens.catalog.counterparts import (
@@ -517,7 +553,6 @@ def bright_siren_log_likelihood(
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
         return fn
 
-    # Selection is deliberately catalog-free for bright sirens.
     def volume_prior(z, _pix, _catalog):
         return log_comoving_volume_prior(z, cosmology)
 

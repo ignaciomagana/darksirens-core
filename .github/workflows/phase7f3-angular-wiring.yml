@@ -1,0 +1,130 @@
+name: phase7f3-angular-wiring
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  angular-wiring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      JAX_PLATFORMS: cpu
+      JAX_ENABLE_X64: "True"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      DARKSIRENS_ZMAX: "5.0"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused angular-wiring tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" \
+            "numpy==1.26.4" \
+            "scipy==1.12.0" \
+            "astropy==6.1.4" \
+            "h5py==3.12.1" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/__init__.py src/darksirens/analysis.py src/darksirens/runtime_binding.py src/darksirens/inference/joint_prior.py src/darksirens/likelihood/event.py src/darksirens/likelihood/hierarchical.py tests/test_angular_wiring.py tools/probe_angular_wiring.py --select F,E9
+          python -m compileall -q src/darksirens tests/test_angular_wiring.py tools/probe_angular_wiring.py
+
+      - name: Verify package-root import remains light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens
+          forbidden = {"jax", "h5py", "healpy", "dynesty", "numpyro", "tinyns"}
+          loaded = sorted(name for name in forbidden if name in sys.modules)
+          assert not loaded, loaded
+          print("package-root import remains dependency-light")
+          PY
+
+      - name: Verify angular wiring remains companion-free
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          forbidden = ("darksirens_surveys", "darksirens_lss", "darksirens_lensing", "darksirens.surveys", "darksirens.lss", "darksirens.lensing")
+          paths = [
+              Path("src/darksirens/analysis.py"),
+              Path("src/darksirens/runtime_binding.py"),
+              Path("src/darksirens/likelihood/event.py"),
+              Path("src/darksirens/likelihood/hierarchical.py"),
+          ]
+          bad = []
+          for path in paths:
+              tree = ast.parse(path.read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      names = [node.module]
+                  else:
+                      continue
+                  for name in names:
+                      if any(name == x or name.startswith(x + ".") for x in forbidden):
+                          bad.append((str(path), name))
+          assert not bad, bad
+          print("angular composition contains no companion imports")
+          PY
+
+      - name: Focused Phase 7F3 tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_angular_wiring.py tests/test_angular_basic.py tests/test_angular_advanced.py
+
+      - name: Evaluate pinned legacy dipole PE and selection wiring
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_angular_wiring.py \
+              --mode legacy --out /tmp/angular-wiring-legacy.json
+
+      - name: Evaluate reconstructed dipole PE and selection wiring
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_angular_wiring.py \
+              --mode candidate --out /tmp/angular-wiring-candidate.json
+
+      - name: Require exact dipole wiring parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/angular-wiring-legacy.json').read_text())
+          candidate = json.loads(Path('/tmp/angular-wiring-candidate.json').read_text())
+          assert candidate == legacy, (legacy, candidate)
+          print('Phase 7F3 dipole PE/selection wiring parity is exact')
+          PY
+
+      - name: Show parity records
+        if: always()
+        run: |
+          cat /tmp/angular-wiring-legacy.json || true
+          cat /tmp/angular-wiring-candidate.json || true

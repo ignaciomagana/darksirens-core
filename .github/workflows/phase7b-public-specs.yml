@@ -1,0 +1,61 @@
+name: phase7b-public-specs
+
+on:
+  push:
+    branches: [rebuild/phase7-public-api]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-specs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused public-spec test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "numpy==1.26.4" \
+            "jax[cpu]==0.4.34" \
+            "pytest==8.3.4" \
+            "ruff==0.15.20"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src/darksirens/_specs.py src/darksirens/__init__.py tests/test_public_specs.py --select F,E9
+          python -m compileall -q src/darksirens/_specs.py src/darksirens/__init__.py tests/test_public_specs.py
+
+      - name: Verify package-root specification import stays light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens as ds
+
+          assert ds.Cosmology().free_parameters == (("H0", 20.0, 140.0),)
+          assert ds.Population("brokenpowerlaw+2peaks", fixed="gwtc5").model_name == "gwtc5_fiducial_bpl2peaks"
+          for name in ("jax", "jax.numpy", "h5py", "numpyro", "dynesty", "tinyns"):
+              assert name not in sys.modules, (name, sorted(sys.modules))
+          print("Phase 7B root specs load no scientific/backend dependencies")
+          PY
+
+      - name: Focused Phase 7B tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_public_specs.py
