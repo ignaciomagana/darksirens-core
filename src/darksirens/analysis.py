@@ -7,6 +7,7 @@ load GW data, build runtime likelihood state, or run a sampler.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import operator
 from typing import Any
 
 from darksirens._specs import Cosmology, Population
@@ -45,22 +46,42 @@ class CompleteCatalogRedshift:
 
 
 @dataclass(frozen=True)
+class BrightRedshift:
+    """Resolved electromagnetic counterparts for a bright-siren analysis.
+
+    ``counterparts`` contains one resolved global-pixel counterpart per GW
+    event. ``nside`` is the RING HEALPix resolution used to map PE sky samples
+    into that same global pixel frame. Raw RA/Dec/Z input parsing remains an
+    input/survey concern rather than a core runtime responsibility.
+    """
+
+    counterparts: tuple[Any, ...]
+    nside: int
+
+
+@dataclass(frozen=True)
 class ParameterPlan:
-    """Sampler coordinates plus fixed blocks needed by later execution."""
+    """Sampler coordinates plus optional ordinary-analysis fixed blocks.
+
+    The first five fields are the stable sampler-facing contract used by both
+    ordinary analyses and :class:`darksirens.InferenceTarget`. The remaining
+    fields describe ordinary core composition and default to neutral values so
+    specialized companions never have to fabricate ordinary dark-siren state.
+    """
 
     labels: tuple[str, ...]
     lower: tuple[float, ...]
     upper: tuple[float, ...]
     prior_kinds: tuple[tuple[Any, ...], ...]
     joint_constraints: tuple[tuple[str, tuple[int, ...]], ...]
-    n_cosmology: int
-    n_population: int
-    n_catalog: int
-    n_angular: int
-    fixed_cosmology: tuple[tuple[str, float], ...]
-    population_labels: tuple[str, ...]
-    fixed_population: tuple[float, ...] | None
-    angular_labels: tuple[str, ...]
+    n_cosmology: int = 0
+    n_population: int = 0
+    n_catalog: int = 0
+    n_angular: int = 0
+    fixed_cosmology: tuple[tuple[str, float], ...] = ()
+    population_labels: tuple[str, ...] = ()
+    fixed_population: tuple[float, ...] | None = None
+    angular_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,7 +90,12 @@ class Analysis:
 
     cosmology: Cosmology
     population: Population
-    redshift: SpectralRedshift | IncompleteCatalogRedshift | CompleteCatalogRedshift
+    redshift: (
+        SpectralRedshift
+        | IncompleteCatalogRedshift
+        | CompleteCatalogRedshift
+        | BrightRedshift
+    )
     parameters: ParameterPlan
     population_latex: str
     angular_model: str = "isotropic"
@@ -80,7 +106,56 @@ class Analysis:
         return getattr(self.redshift, "catalog", None)
 
 
-def _resolve_redshift(catalog, completeness):
+def _counterpart_nside(value) -> int:
+    if value is None:
+        raise ValueError("counterpart_nside is required for bright sirens")
+    if isinstance(value, bool):
+        raise TypeError("counterpart_nside must be an integer HEALPix nside")
+    try:
+        nside = operator.index(value)
+    except TypeError as exc:
+        raise TypeError("counterpart_nside must be an integer HEALPix nside") from exc
+    if not (1 <= nside <= 2**29):
+        raise ValueError("counterpart_nside must lie in [1, 2**29]")
+    return int(nside)
+
+
+def _resolve_redshift(
+    catalog,
+    completeness,
+    *,
+    counterparts=None,
+    counterpart_nside=None,
+):
+    if counterparts is not None:
+        if catalog is not None:
+            raise ValueError("bright sirens do not take a galaxy catalog")
+        if completeness is not None:
+            raise ValueError("bright sirens do not use completeness")
+
+        from darksirens.catalog.counterparts import Counterpart
+
+        if isinstance(counterparts, Counterpart):
+            counterpart_tuple = (counterparts,)
+        else:
+            try:
+                counterpart_tuple = tuple(counterparts)
+            except TypeError as exc:
+                raise TypeError(
+                    "counterparts must be a Counterpart or an iterable of Counterpart objects"
+                ) from exc
+        if not counterpart_tuple:
+            raise ValueError("bright sirens require at least one counterpart")
+        if not all(isinstance(item, Counterpart) for item in counterpart_tuple):
+            raise TypeError("counterparts must contain only darksirens.Counterpart objects")
+        return BrightRedshift(
+            counterpart_tuple,
+            _counterpart_nside(counterpart_nside),
+        ), ()
+
+    if counterpart_nside is not None:
+        raise ValueError("counterpart_nside requires counterparts")
+
     if catalog is None:
         if completeness is not None:
             raise ValueError("completeness requires a catalog")
@@ -105,13 +180,20 @@ def model(
     catalog=None,
     completeness=None,
     angular="isotropic",
+    counterparts=None,
+    counterpart_nside=None,
 ) -> Analysis:
-    """Construct an ordinary spectral or catalog-siren analysis.
+    """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
     Composition, rather than a legacy ``universe_model`` string, selects the
-    ordinary redshift path.  ``angular`` names an independent mean-one source
+    ordinary redshift path. ``angular`` names an independent mean-one source
     population factor; the default ``"isotropic"`` contributes no coordinates
     and leaves the accepted ordinary likelihood exactly unchanged.
+
+    Bright sirens consume already-resolved :class:`darksirens.Counterpart`
+    objects and the HEALPix ``counterpart_nside`` defining their global pixel
+    frame. They do not use a galaxy catalog or catalog-completeness nuisance
+    block.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -124,7 +206,17 @@ def model(
     if not isinstance(angular, str):
         raise TypeError("angular must be an angular model name")
 
-    redshift, catalog_priors = _resolve_redshift(catalog, completeness)
+    redshift, catalog_priors = _resolve_redshift(
+        catalog,
+        completeness,
+        counterparts=counterparts,
+        counterpart_nside=counterpart_nside,
+    )
+    if isinstance(redshift, BrightRedshift) and angular != "isotropic":
+        raise ValueError(
+            "bright-siren angular composition is not part of the frozen public "
+            "bright path; use angular='isotropic'"
+        )
 
     from darksirens.population import (
         get_fixed_population_params,
@@ -157,7 +249,8 @@ def model(
     prior_kinds: list[tuple[Any, ...]] = []
 
     # Frozen global coordinate order: cosmology -> population -> survey/catalog
-    # -> angular.  Isotropy has an empty angular block.
+    # -> angular. Isotropy has an empty angular block. Bright sirens have no
+    # survey/catalog block.
     for name, lo, hi in cosmology.free_parameters:
         labels.append(name)
         lower.append(float(lo))
@@ -250,5 +343,6 @@ __all__ = [
     "SpectralRedshift",
     "IncompleteCatalogRedshift",
     "CompleteCatalogRedshift",
+    "BrightRedshift",
     "model",
 ]

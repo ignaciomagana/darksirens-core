@@ -1,15 +1,17 @@
-"""Thin public inference facade over accepted Phase-6/7 primitives.
+"""Thin public inference facade over accepted core primitives.
 
 This module owns no sampler algorithm, likelihood arithmetic, checkpoint
-filesystem policy, or result persistence. It only binds a public analysis,
-constructs the accepted unit-cube prior transform, normalizes keyword options
-onto the existing attribute-based sampler contract, and delegates to the
-accepted Phase-6 dispatcher.
+filesystem policy, or result persistence. Ordinary analyses are bound through
+the accepted runtime binder. Specialized companions may instead provide a small
+:class:`InferenceTarget` containing an already-constructed likelihood plus the
+same sampler-facing parameter plan.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+from darksirens.inference.target import InferenceTarget
 
 
 _SAMPLER_DEFAULTS = {
@@ -36,30 +38,7 @@ def _sampler_namespace(sampler, options):
     return SimpleNamespace(**values)
 
 
-def infer(
-    analysis,
-    *,
-    events,
-    injections,
-    sampler="tinyns",
-    **sampler_options,
-):
-    """Run one ordinary core analysis through the accepted sampler dispatcher.
-
-    Backend-specific options keep their existing names (for example
-    ``tinyns_preset=...`` or ``nuts_samples=...``). The returned mapping is the
-    standardized Phase-6 sampler result; this facade deliberately does not wrap
-    or persist it.
-
-    Sampler names are intentionally not validated here. The Phase-6 dispatcher
-    must see the request first because a zero-free analysis has exact evidence
-    and returns before any backend validation or optional-backend import.
-    """
-    from darksirens.runtime_binding import bind_analysis
-
-    bound = bind_analysis(analysis, events=events, injections=injections)
-    plan = analysis.parameters
-
+def _execute_target(likelihood, plan, *, sampler, sampler_options):
     from darksirens.inference.prior import make_prior_transform
 
     prior_transform = make_prior_transform(
@@ -74,7 +53,7 @@ def infer(
 
     return run_sampler(
         sampler,
-        bound,
+        likelihood,
         prior_transform,
         plan.labels,
         plan.lower,
@@ -82,6 +61,53 @@ def infer(
         opts,
         prior_kinds=plan.prior_kinds,
         joint_constraints=plan.joint_constraints,
+    )
+
+
+def infer(
+    analysis,
+    *,
+    events=None,
+    injections=None,
+    sampler="tinyns",
+    **sampler_options,
+):
+    """Run an ordinary analysis or specialized target through core samplers.
+
+    Ordinary analyses retain the existing API and require both standardized GW
+    stores. An :class:`InferenceTarget` already owns its likelihood, so stores
+    must be omitted. Backend-specific options keep their existing names.
+
+    Sampler names are intentionally not validated here. The Phase-6 dispatcher
+    must see the request first because a zero-free target has exact evidence and
+    returns before any backend validation or optional-backend import.
+    """
+    if isinstance(analysis, InferenceTarget):
+        if events is not None or injections is not None:
+            raise TypeError(
+                "events and injections must be omitted for an InferenceTarget"
+            )
+        likelihood = analysis.log_likelihood
+        plan = analysis.parameters
+    else:
+        if events is None or injections is None:
+            raise TypeError(
+                "ordinary analyses require both events and injections"
+            )
+        from darksirens.runtime_binding import bind_analysis
+
+        likelihood = bind_analysis(
+            analysis,
+            events=events,
+            injections=injections,
+        )
+        plan = analysis.parameters
+
+    return _execute_target(
+        likelihood,
+        plan,
+        sampler=sampler,
+        sampler_options=sampler_options,
     )
 
 
