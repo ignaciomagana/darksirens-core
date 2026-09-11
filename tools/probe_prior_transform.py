@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 
 import numpy as np
+import jax
+
+jax.config.update("jax_enable_x64", True)
 
 from darksirens.inference.prior import make_prior_transform
 
@@ -123,11 +126,11 @@ def _probe():
     )
     out["sequential_joint"] = _pack(sequential(u_seq))
 
-    # Pin the batched spelling against the exact per-row spelling for one
-    # non-uniform and one joint transform.
     u_batch = np.random.default_rng(0x6D).uniform(size=(16, 4))
     out["mixed_batched"] = _pack(mixed(u_batch))
-    out["mixed_rows"] = _pack(np.stack([np.asarray(mixed(row)) for row in u_batch]))
+    out["mixed_rows"] = _pack(
+        np.stack([np.asarray(mixed(row)) for row in u_batch])
+    )
 
     ordered = make_prior_transform(
         [0.0, 0.0], [1.0, 1.0], joint_constraints=[("ordered_le", (0, 1))]
