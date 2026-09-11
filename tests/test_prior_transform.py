@@ -16,6 +16,12 @@ def _cube(n=32, ndim=4, seed=17):
     return np.random.default_rng(seed).uniform(size=(n, ndim))
 
 
+def _enable_x64():
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    return jax
+
+
 def test_uniform_transform_is_host_native_and_numpy_preserving():
     lower = np.array([-2.0, 0.5, 4.0])
     upper = np.array([2.0, 2.5, 8.0])
@@ -35,12 +41,13 @@ def test_beta11_with_unit_interval_normalizes_to_uniform_fast_path():
     transform = make_prior_transform(lower, upper, kinds)
     assert getattr(transform, "host_native", False) is True
     u = np.array([0.37, 0.61])
-    np.testing.assert_array_equal(out := transform(u), u * (upper - lower) + lower)
+    out = transform(u)
+    np.testing.assert_array_equal(out, u * (upper - lower) + lower)
     assert out.shape == (2,)
 
 
 def test_nonuniform_transform_is_flagged_for_jit_and_stays_in_bounds():
-    pytest.importorskip("jax")
+    _enable_x64()
     lower = np.array([-3.0, 1e-3, 0.0, -2.0])
     upper = np.array([3.0, 10.0, 1.0, 2.0])
     kinds = [
@@ -59,10 +66,8 @@ def test_nonuniform_transform_is_flagged_for_jit_and_stays_in_bounds():
 
 
 def test_truncated_beta_respects_nontrivial_bounds():
-    pytest.importorskip("jax")
-    transform = make_prior_transform(
-        [0.2], [0.8], [("beta", 1.0, 3.0)]
-    )
+    _enable_x64()
+    transform = make_prior_transform([0.2], [0.8], [("beta", 1.0, 3.0)])
     u = np.array([[0.0], [0.5], [1.0]])
     out = np.asarray(transform(u))[:, 0]
     assert out[0] == pytest.approx(0.2)
@@ -71,7 +76,7 @@ def test_truncated_beta_respects_nontrivial_bounds():
 
 
 def test_ordered_le_joint_map_orders_coordinates():
-    pytest.importorskip("jax")
+    _enable_x64()
     transform = make_prior_transform(
         [0.0, 0.0], [1.0, 1.0], joint_constraints=[("ordered_le", (0, 1))]
     )
@@ -82,21 +87,22 @@ def test_ordered_le_joint_map_orders_coordinates():
 
 
 def test_simplex_joint_map_folds_into_triangle():
-    pytest.importorskip("jax")
+    _enable_x64()
     transform = make_prior_transform(
         [0.0, 0.0], [1.0, 1.0], joint_constraints=[("simplex", (0, 1))]
     )
     u = np.array([[0.8, 0.7], [0.2, 0.3]])
     out = np.asarray(transform(u))
     assert np.all(out.sum(axis=1) <= 1.0)
-    np.testing.assert_array_equal(out[0], np.array([0.2, 0.3]))
+    np.testing.assert_array_equal(out[0], np.array([1.0 - 0.8, 1.0 - 0.7]))
     np.testing.assert_array_equal(out[1], np.array([0.2, 0.3]))
 
 
 def test_conditional_upper_uses_product_and_is_finite_at_zero_edge():
-    pytest.importorskip("jax")
+    _enable_x64()
     transform = make_prior_transform(
-        [3.0, 3.0], [9.0, 9.0],
+        [3.0, 3.0],
+        [9.0, 9.0],
         joint_constraints=[("conditional_upper", (0, 1))],
     )
     u = np.array([[0.75, 0.0], [0.5, 0.4]])
@@ -108,9 +114,10 @@ def test_conditional_upper_uses_product_and_is_finite_at_zero_edge():
 
 
 def test_ball3_maps_inside_unit_ball():
-    pytest.importorskip("jax")
+    _enable_x64()
     transform = make_prior_transform(
-        [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0],
+        [-1.0, -1.0, -1.0],
+        [1.0, 1.0, 1.0],
         joint_constraints=[("ball3", (0, 1, 2))],
     )
     out = np.asarray(transform(_cube(n=128, ndim=3, seed=5)))
@@ -119,7 +126,7 @@ def test_ball3_maps_inside_unit_ball():
 
 
 def test_multiple_joint_maps_apply_in_sequence():
-    pytest.importorskip("jax")
+    _enable_x64()
     transform = make_prior_transform(
         [0.0, 0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0, 1.0],
@@ -144,7 +151,7 @@ def test_multiple_joint_maps_apply_in_sequence():
     ],
 )
 def test_batched_transform_matches_per_row_exactly(lower, upper, kinds, joint):
-    pytest.importorskip("jax")
+    _enable_x64()
     import jax.numpy as jnp
 
     transform = make_prior_transform(lower, upper, kinds, joint)
