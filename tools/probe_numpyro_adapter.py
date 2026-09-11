@@ -26,6 +26,8 @@ _STATE = {
 
 
 def _jsonable(value):
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
