@@ -42,6 +42,7 @@ jobs:
             "jax[cpu]==0.4.34" \
             "numpy==1.26.4" \
             "scipy==1.12.0" \
+            "astropy==6.1.4" \
             "pytest==8.3.4" \
             "ruff==0.15.20"
           python -m pip install --no-deps -e candidate
