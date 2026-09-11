@@ -102,6 +102,22 @@ def _sky_vectors(columns):
     return cos_dec * np.cos(ra), cos_dec * np.sin(ra), np.sin(dec)
 
 
+def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
+    """Move one validated compact host catalog onto the JAX runtime boundary."""
+    return GalaxyCatalog(
+        apix=jnp.asarray(catalog.apix),
+        zgals=jnp.asarray(catalog.zgals),
+        dzgals=jnp.asarray(catalog.dzgals),
+        wgals=jnp.asarray(catalog.wgals),
+        ngals=jnp.asarray(catalog.ngals, dtype=jnp.int32),
+        unique_pixels=(
+            None
+            if catalog.unique_pixels is None
+            else jnp.asarray(catalog.unique_pixels, dtype=jnp.int32)
+        ),
+    )
+
+
 def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
     nx, ny, nz = _sky_vectors(store.columns)
     return make_gw_event(
@@ -287,7 +303,7 @@ def bind_analysis(
         views = compact_pe_selection_catalog(
             catalog_store.catalog, global_pe, global_sel
         )
-        catalog = views.catalog
+        catalog = _jax_catalog(views.catalog)
         pe_pixels = views.pe_sample_to_row
         sel_pixels = views.selection_sample_to_row
         cache = (
