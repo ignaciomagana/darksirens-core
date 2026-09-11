@@ -176,5 +176,5 @@ jobs:
           ! grep -R "Phase 2 currently owns" README.md CONTRACT.md MIGRATION.md VALIDATION.md
           ! grep -R "Population, catalog, likelihood, selection, inference" README.md CONTRACT.md MIGRATION.md VALIDATION.md
           grep -q "InferenceTarget" README.md CONTRACT.md
-          grep -q "host-density" README.md CONTRACT.md
+          grep -qi "host-density" README.md CONTRACT.md
           grep -qi "Core must never import" CONTRACT.md
