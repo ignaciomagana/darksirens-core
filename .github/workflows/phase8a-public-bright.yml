@@ -1,0 +1,97 @@
+name: phase8a-public-bright
+
+on:
+  push:
+    branches: [rebuild/phase8-core-freeze]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-bright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      DARKSIRENS_ZMAX: "5.0"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+
+      - name: Check out pinned legacy reference
+        uses: actions/checkout@v4
+        with:
+          repository: ignaciomagana/darksirens
+          ref: c042527238bd71421b792936bc48c3b815b90d6d
+          path: legacy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: candidate/pyproject.toml
+
+      - name: Install validated CPU numerics and focused tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
+            "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" "ruff==0.15.20" \
+            "equinox==0.11.10" "tinygp==0.3.0"
+          python -m pip install --no-deps -e candidate
+
+      - name: Definite-error lint
+        working-directory: candidate
+        run: |
+          ruff check src tests tools --select F,E9
+          python -m compileall -q src tests tools
+
+      - name: Verify package-root import remains JAX-light
+        working-directory: candidate
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens
+          assert "Counterpart" in darksirens.__all__
+          assert "jax" not in sys.modules
+          assert "h5py" not in sys.modules
+          print("package root remains JAX/HDF5-light with lazy Counterpart")
+          PY
+
+      - name: Focused Phase 8A tests
+        working-directory: candidate
+        run: |
+          python -m pytest -q \
+            tests/test_public_bright.py \
+            tests/test_runtime_binding.py \
+            tests/test_catalog_hierarchical.py
+
+      - name: Install frozen legacy bright-parity dependencies
+        run: |
+          python -m pip install \
+            "matplotlib==3.9.2" "healpy==1.17.3" "tqdm==4.66.5" \
+            "dynesty==2.1.4" "seaborn==0.12.2" "numpyro==0.17.0"
+
+      - name: Evaluate pinned legacy ordinary/bright likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_catalog_likelihood.py \
+            --implementation legacy --out /tmp/likelihood-legacy.json
+
+      - name: Evaluate reconstructed ordinary/bright likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_catalog_likelihood.py \
+            --implementation candidate --out /tmp/likelihood-candidate.json
+
+      - name: Require frozen Phase 5C ordinary/bright parity
+        run: |
+          python candidate/tools/compare_catalog_likelihood_probe.py \
+            /tmp/likelihood-legacy.json /tmp/likelihood-candidate.json \
+            --golden candidate/tests/reference/legacy/unified_k1_golden.json \
+            --rtol 1e-12
