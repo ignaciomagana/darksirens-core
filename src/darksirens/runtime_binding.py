@@ -15,6 +15,7 @@ import numpy as np
 
 from darksirens.analysis import (
     Analysis,
+    BrightRedshift,
     CompleteCatalogRedshift,
     IncompleteCatalogRedshift,
     SpectralRedshift,
@@ -28,6 +29,7 @@ from darksirens.gw.runtime import make_gw_event
 from darksirens.gw.store import COMPONENT_SPIN_DATASETS
 from darksirens.gw.types import GWEvent, GWStore, SelectionStore
 from darksirens.likelihood.hierarchical import (
+    bright_siren_log_likelihood,
     complete_catalog_siren_log_likelihood,
     dark_siren_log_likelihood,
     spectral_siren_log_likelihood,
@@ -110,6 +112,30 @@ def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
     )
 
 
+def _bright_pixel_view(nside: int, global_pe):
+    """Build the zero-galaxy compact row map read by the bright sky gate.
+
+    Bright-siren redshift evaluation reads only ``unique_pixels[row]`` from the
+    catalog object; galaxy redshift/count leaves are scientifically inert. A
+    zero-galaxy view therefore carries exactly the required global-pixel map
+    without constructing a fake survey population.
+    """
+    unique_pixels, sample_to_row = np.unique(
+        np.asarray(global_pe, dtype=np.int64), return_inverse=True
+    )
+    n_rows = int(unique_pixels.size)
+    empty = np.zeros((n_rows, 1), dtype=np.float64)
+    catalog = GalaxyCatalog(
+        apix=np.pi / (3.0 * float(nside) ** 2),
+        zgals=empty,
+        dzgals=empty.copy(),
+        wgals=empty.copy(),
+        ngals=np.zeros(n_rows, dtype=np.int32),
+        unique_pixels=unique_pixels,
+    )
+    return _jax_catalog(catalog), np.asarray(sample_to_row, dtype=np.int32)
+
+
 def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
     nx, ny, nz = _sky_vectors(store.columns)
     return make_gw_event(
@@ -190,11 +216,14 @@ class BoundAnalysis:
             self.analysis, theta, z_depth=self.z_depth
         )
         pop = self.analysis.population
-        common = dict(
+        population_common = dict(
             pop_model=pop.model_name,
             shared_beta=pop.shared_beta,
             shared_spin=pop.shared_spin,
             shared_gamma=pop.shared_gamma,
+        )
+        ordinary_common = dict(
+            **population_common,
             angular_model=self.analysis.angular_model,
             angular_params=angular,
         )
@@ -208,7 +237,21 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
-                **common,
+                **ordinary_common,
+            )
+
+        if isinstance(self.analysis.redshift, BrightRedshift):
+            return bright_siren_log_likelihood(
+                cosmology,
+                population,
+                self.gw_pe,
+                self.catalog,
+                self.analysis.redshift.counterparts,
+                self.gw_selection,
+                self.n_events,
+                self.nsamp,
+                self.n_draw,
+                **population_common,
             )
 
         if isinstance(self.analysis.redshift, IncompleteCatalogRedshift):
@@ -225,7 +268,7 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
-                **common,
+                **ordinary_common,
             )
 
         if isinstance(self.analysis.redshift, CompleteCatalogRedshift):
@@ -240,7 +283,7 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
-                **common,
+                **ordinary_common,
             )
 
         raise TypeError(f"unsupported analysis redshift type {type(self.analysis.redshift)!r}")
@@ -276,6 +319,24 @@ def bind_analysis(
             np.asarray(injections.columns["dL"]), dtype=np.int32
         )
         catalog = None
+        cache = None
+        z_depth = None
+    elif isinstance(analysis.redshift, BrightRedshift):
+        if len(analysis.redshift.counterparts) != int(events.n_events):
+            raise ValueError(
+                "bright sirens require exactly one counterpart per GW event: "
+                f"got {len(analysis.redshift.counterparts)} counterpart(s) for "
+                f"{events.n_events} event(s)"
+            )
+        global_pe = ang2pix_ring(
+            analysis.redshift.nside,
+            events.columns["ra"],
+            events.columns["dec"],
+        )
+        catalog, pe_pixels = _bright_pixel_view(analysis.redshift.nside, global_pe)
+        sel_pixels = np.zeros_like(
+            np.asarray(injections.columns["dL"]), dtype=np.int32
+        )
         cache = None
         z_depth = None
     else:
