@@ -127,7 +127,7 @@ def test_adaptive_preset_and_auto_attempt_budget():
     assert config.replacement_chain_schedule == (1, 4, 16, 64, 256)
     assert config.replacement_chains == 1
     assert config.walks == 25
-    assert config.max_attempts == 25 * 256
+    assert config.max_attempts == max(10000, 25 * 256)
 
 
 def test_zero_max_samples_means_no_tinyns_iteration_cap():
@@ -181,7 +181,7 @@ def test_zero_max_samples_means_no_tinyns_iteration_cap():
             {"tinyns_bound": "single", "tinyns_rwalk_seed": "bound",
              "tinyns_multi_bound_max_ellipsoids": 8,
              "tinyns_jax_block_size": 1},
-            "multi_bound_\* options require",
+            r"multi_bound_\* options require",
         ),
         (
             {"tinyns_checkpoint_interval": 0},
