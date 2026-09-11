@@ -1,8 +1,8 @@
 """Core dark-siren inference package.
 
-The package root stays import-side-effect free. Public loader and model-builder
-functions import scientific/data modules only when called, and the public
-analysis specifications are dependency-light declarations, so
+The package root stays import-side-effect free. Public loader, model-builder,
+and inference functions import scientific/data modules only when called, and
+the public analysis specifications are dependency-light declarations, so
 ``import darksirens`` does not initialize JAX, HDF5, sampler backends, or
 optional extensions.
 """
@@ -52,6 +52,27 @@ def model(*, cosmology=None, population, catalog=None, completeness=None):
     )
 
 
+def infer(
+    analysis,
+    *,
+    events,
+    injections,
+    sampler="tinyns",
+    **sampler_options,
+):
+    """Run an ordinary analysis through the reconstructed inference stack."""
+    configure_jax_runtime()
+    from .inference.public import infer as _infer
+
+    return _infer(
+        analysis,
+        events=events,
+        injections=injections,
+        sampler=sampler,
+        **sampler_options,
+    )
+
+
 __all__ = [
     "__version__",
     "configure_jax_runtime",
@@ -61,4 +82,5 @@ __all__ = [
     "load_injections",
     "load_catalog",
     "model",
+    "infer",
 ]
