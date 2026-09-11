@@ -1,9 +1,8 @@
 """Bind public analysis declarations to fixed-theta core likelihood runtime state.
 
-This module is deliberately execution-adjacent but sampler-free.  It consumes
-already validated standardized stores, performs the frozen ordinary sky/catalog
-plumbing, and returns one callable over the :class:`~darksirens.analysis.ParameterPlan`
-coordinates.  Sampler orchestration remains in :mod:`darksirens.inference`.
+This module is deliberately execution-adjacent but sampler-free. It consumes
+already validated standardized stores and returns one callable over the public
+parameter-plan coordinates.
 """
 
 from __future__ import annotations
@@ -42,12 +41,6 @@ _COSMOLOGY_ORDER = ("H0", "Om0", "w0", "wa")
 
 
 def required_fit_columns(analysis: Analysis) -> tuple[str, ...]:
-    """Return the standardized store coordinates consumed by this population.
-
-    This is the small model-driven basis test used by the frozen staged loader:
-    a population component that declares ``consumes_spin_block`` requires the
-    component-spin density; all other ordinary core populations use chi_eff.
-    """
     pop = analysis.population
     model = get_model(
         pop.model_name,
@@ -103,7 +96,6 @@ def _sky_vectors(columns):
 
 
 def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
-    """Move one validated compact host catalog onto the JAX runtime boundary."""
     return GalaxyCatalog(
         apix=jnp.asarray(catalog.apix),
         zgals=jnp.asarray(catalog.zgals),
@@ -171,13 +163,13 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None):
             z_depth=z_depth,
         )
 
-    return cosmology, population, catalog_params
+    angular_start = plan.n_cosmology + plan.n_population + plan.n_catalog
+    angular = theta[angular_start : angular_start + plan.n_angular]
+    return cosmology, population, catalog_params, angular
 
 
 @dataclass(frozen=True)
 class BoundAnalysis:
-    """Prepared ordinary core analysis, callable at one sampler coordinate."""
-
     analysis: Analysis
     gw_pe: GWEvent
     gw_selection: GWEvent
@@ -194,7 +186,7 @@ class BoundAnalysis:
         return self.analysis.parameters.labels
 
     def __call__(self, theta):
-        cosmology, population, catalog_params = _decode_theta(
+        cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
         )
         pop = self.analysis.population
@@ -203,6 +195,8 @@ class BoundAnalysis:
             shared_beta=pop.shared_beta,
             shared_spin=pop.shared_spin,
             shared_gamma=pop.shared_gamma,
+            angular_model=self.analysis.angular_model,
+            angular_params=angular,
         )
 
         if isinstance(self.analysis.redshift, SpectralRedshift):
@@ -258,12 +252,6 @@ def bind_analysis(
     events: GWStore,
     injections: SelectionStore,
 ) -> BoundAnalysis:
-    """Bind validated public stores to an ordinary fixed-theta likelihood.
-
-    The function performs only deterministic runtime preparation.  It does not
-    construct a prior transform, JIT the likelihood, create checkpoints, or run
-    a sampler.
-    """
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
     if not isinstance(events, GWStore):

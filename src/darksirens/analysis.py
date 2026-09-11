@@ -1,8 +1,7 @@
 """Public analysis construction for ordinary core siren models.
 
 This module assembles declarations and parameter coordinates only. It does not
-load GW data, build runtime likelihood state, or run a sampler. Those execution
-steps belong to the later ``infer`` layer.
+load GW data, build runtime likelihood state, or run a sampler.
 """
 
 from __future__ import annotations
@@ -14,9 +13,6 @@ from darksirens._specs import Cosmology, Population
 from darksirens.inference.joint_prior import resolve_joint_prior_constraints
 
 
-# Frozen ordinary no-LSS survey block. ``b_miss`` is intentionally absent:
-# core has no LSS overdensity field, so the frozen registry marks it inert when
-# use_lss=False. Ordering is inherited from the frozen survey registry.
 _INCOMPLETE_CATALOG_PRIORS = (
     ("log10n0", -4.0, -1.0),
     ("delta", -3.0, 3.0),
@@ -60,9 +56,11 @@ class ParameterPlan:
     n_cosmology: int
     n_population: int
     n_catalog: int
+    n_angular: int
     fixed_cosmology: tuple[tuple[str, float], ...]
     population_labels: tuple[str, ...]
     fixed_population: tuple[float, ...] | None
+    angular_labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -74,6 +72,8 @@ class Analysis:
     redshift: SpectralRedshift | IncompleteCatalogRedshift | CompleteCatalogRedshift
     parameters: ParameterPlan
     population_latex: str
+    angular_model: str = "isotropic"
+    angular_latex: str = r"\text{Isotropic}"
 
     @property
     def catalog(self):
@@ -98,15 +98,20 @@ def _resolve_redshift(catalog, completeness):
     raise ValueError("completeness must be None, 'incomplete', or 'complete'")
 
 
-def model(*, cosmology=None, population, catalog=None, completeness=None) -> Analysis:
+def model(
+    *,
+    cosmology=None,
+    population,
+    catalog=None,
+    completeness=None,
+    angular="isotropic",
+) -> Analysis:
     """Construct an ordinary spectral or catalog-siren analysis.
 
     Composition, rather than a legacy ``universe_model`` string, selects the
-    ordinary path: no catalog is spectral; a catalog is incomplete by default;
-    ``completeness='complete'`` selects the complete-catalog model.
-
-    The returned object contains the exact sampler-coordinate order and fixed
-    blocks but no event/injection state and no sampler configuration.
+    ordinary redshift path.  ``angular`` names an independent mean-one source
+    population factor; the default ``"isotropic"`` contributes no coordinates
+    and leaves the accepted ordinary likelihood exactly unchanged.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -114,12 +119,20 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
         raise TypeError("cosmology must be a darksirens.Cosmology")
     if not isinstance(population, Population):
         raise TypeError("population must be a darksirens.Population")
+    if angular is None:
+        angular = "isotropic"
+    if not isinstance(angular, str):
+        raise TypeError("angular must be an angular model name")
 
     redshift, catalog_priors = _resolve_redshift(catalog, completeness)
 
     from darksirens.population import (
         get_fixed_population_params,
         pop_model_prior_parser,
+    )
+    from darksirens.population.angular import (
+        angular_model_prior_parser,
+        get_angular_model,
     )
 
     pop_lower, pop_upper, pop_labels, pop_kinds, pop_latex = pop_model_prior_parser(
@@ -130,12 +143,21 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
     )
     pop_labels = tuple(str(label) for label in pop_labels)
 
+    angular_lower, angular_upper, angular_labels, angular_kinds, angular_latex = (
+        angular_model_prior_parser(angular)
+    )
+    angular_labels = tuple(str(label) for label in angular_labels)
+    angular_constraints = getattr(
+        get_angular_model(angular), "constraint_groups", None
+    ) or ()
+
     labels: list[str] = []
     lower: list[float] = []
     upper: list[float] = []
     prior_kinds: list[tuple[Any, ...]] = []
 
-    # Frozen global coordinate order: cosmology -> population -> survey/catalog.
+    # Frozen global coordinate order: cosmology -> population -> survey/catalog
+    # -> angular.  Isotropy has an empty angular block.
     for name, lo, hi in cosmology.free_parameters:
         labels.append(name)
         lower.append(float(lo))
@@ -172,6 +194,12 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
         prior_kinds.append(_UNIFORM)
     n_catalog = len(catalog_priors)
 
+    labels.extend(angular_labels)
+    lower.extend(float(value) for value in angular_lower)
+    upper.extend(float(value) for value in angular_upper)
+    prior_kinds.extend(tuple(kind) for kind in angular_kinds)
+    n_angular = len(angular_labels)
+
     constraints = resolve_joint_prior_constraints(
         population.model_name,
         labels,
@@ -181,6 +209,7 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
         shared_beta=population.shared_beta,
         shared_spin=population.shared_spin,
         shared_gamma=population.shared_gamma,
+        extra_constraint_groups=angular_constraints,
     )
 
     plan = ParameterPlan(
@@ -195,12 +224,14 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
         n_cosmology=n_cosmology,
         n_population=n_population,
         n_catalog=n_catalog,
+        n_angular=n_angular,
         fixed_cosmology=tuple(
             (name, float(value))
             for name, value in cosmology.fixed_parameters.items()
         ),
         population_labels=pop_labels,
         fixed_population=fixed_population,
+        angular_labels=angular_labels,
     )
     return Analysis(
         cosmology=cosmology,
@@ -208,6 +239,8 @@ def model(*, cosmology=None, population, catalog=None, completeness=None) -> Ana
         redshift=redshift,
         parameters=plan,
         population_latex=str(pop_latex),
+        angular_model=str(angular),
+        angular_latex=str(angular_latex),
     )
 
 

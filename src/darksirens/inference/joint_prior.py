@@ -1,8 +1,8 @@
 """Resolve model-declared joint priors onto sampled coordinates.
 
 The sampler-facing cube maps live in :mod:`darksirens.inference.prior`.  This
-module is the small construction-time bridge from an existing population
-model's declarative ``constraint_groups`` to those already validated maps.
+module is the small construction-time bridge from declarative model constraint
+groups to those already validated maps.
 """
 
 from __future__ import annotations
@@ -33,14 +33,15 @@ def resolve_joint_prior_constraints(
     shared_beta=True,
     shared_spin=True,
     shared_gamma=True,
+    extra_constraint_groups=(),
 ):
-    """Return index-resolved population joint-prior cube maps.
+    """Return index-resolved model joint-prior cube maps.
 
-    This is the ordinary-population subset of the frozen resolver.  A model may
-    declare ``constraint_groups`` such as the GWTC-5 BPL+2G simplex and
-    conditional low-mass pair.  A cube map is emitted only when the currently
-    sampled bounds and prior kinds make that map exactly the declared density;
-    otherwise the likelihood-side rejection remains the backstop and the
+    Population constraints are resolved exactly as before.  Additional
+    declarative groups may be supplied by another independent core population
+    factor (currently the angular source model).  A cube map is emitted only
+    when the sampled bounds and prior kinds make that map exactly the declared
+    density; otherwise likelihood-side rejection remains the backstop and the
     frozen warning is preserved.
     """
     groups = []
@@ -54,6 +55,7 @@ def resolve_joint_prior_constraints(
         groups.extend(getattr(model, "constraint_groups", None) or ())
     except Exception:
         pass
+    groups.extend(tuple(extra_constraint_groups or ()))
 
     if not groups:
         return []

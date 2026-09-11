@@ -40,8 +40,16 @@ def load_catalog(path, *, sort_rows_by_z=True):
     return _load_catalog(path, sort_rows_by_z=sort_rows_by_z)
 
 
-def model(*, cosmology=None, population, catalog=None, completeness=None):
+def model(
+    *,
+    cosmology=None,
+    population,
+    catalog=None,
+    completeness=None,
+    angular="isotropic",
+):
     """Construct a typed ordinary analysis without executing inference."""
+    configure_jax_runtime()
     from .analysis import model as _model
 
     return _model(
@@ -49,6 +57,7 @@ def model(*, cosmology=None, population, catalog=None, completeness=None):
         population=population,
         catalog=catalog,
         completeness=completeness,
+        angular=angular,
     )
 
 

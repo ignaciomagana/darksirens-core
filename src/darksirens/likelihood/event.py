@@ -14,13 +14,7 @@ _PE_TAIL_OVERLAP_DENOM = 8
 
 
 def _pe_chunk_plan(n_events: int, pe_block: int) -> tuple[int, int, bool]:
-    """Return ``(n_full, remainder, overlap_tail)`` for PE event blocks.
-
-    The overlapping-tail plan is the validated legacy optimization: when cheap,
-    evaluate the final partial block at the full static block shape and retain
-    only its last rows, so the per-sample kernel is lowered at one shape rather
-    than two. The retained event rows are unchanged.
-    """
+    """Return ``(n_full, remainder, overlap_tail)`` for PE event blocks."""
     n_full = n_events // pe_block
     rem = n_events - n_full * pe_block
     overlap_tail = (
@@ -36,6 +30,7 @@ def _masked_log_weights(
     start,
     size: int,
     log_weight_fn,
+    sky_log_weight_fn=None,
 ):
     """Evaluate one contiguous PE slice and apply the structural sample mask."""
     sl = lambda arr: lax.dynamic_slice_in_dim(arr, start, size)
@@ -53,6 +48,10 @@ def _masked_log_weights(
             sl(event.m1det), sl(event.q), dL, sl(event.chieff),
             sl(event.pixels), pwt, spin=spin,
         )
+    if sky_log_weight_fn is not None:
+        ldw = ldw + sky_log_weight_fn(
+            sl(event.nx), sl(event.ny), sl(event.nz), dL
+        )
     return jnp.where(valid & jnp.isfinite(ldw), ldw, -jnp.inf)
 
 
@@ -62,13 +61,14 @@ def reduce_pe_events(
     nsamp: int,
     log_weight_fn,
     pe_event_block: int | None = None,
+    sky_log_weight_fn=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return per-event log evidences and PE Monte-Carlo variances.
 
-    ``gw_pe`` is flat with exactly ``n_events * nsamp`` rows. ``None`` processes
-    every event in one vectorized block; a finite ``pe_event_block`` limits the
-    live event axis while preserving the validated overlapping-tail plan from the
-    reference implementation.
+    ``sky_log_weight_fn(nx, ny, nz, dL)`` is an optional independent source-rate
+    factor.  ``None`` leaves the accepted isotropic/legacy compute path
+    call-for-call unchanged; a live angular model receives the same raw
+    direction and distance samples that the selection reducer receives.
     """
     if n_events < 1:
         raise ValueError(f"n_events must be >= 1, got {n_events}")
@@ -90,7 +90,9 @@ def reduce_pe_events(
     n_full, rem, overlap_tail = _pe_chunk_plan(n_events, pe_block)
 
     def _reduce_events(start, m: int):
-        ldw = _masked_log_weights(gw_pe, start, m * nsamp, log_weight_fn)
+        ldw = _masked_log_weights(
+            gw_pe, start, m * nsamp, log_weight_fn, sky_log_weight_fn
+        )
         ldw = ldw.reshape(m, nsamp)
         return jax.vmap(
             lambda row: log_evidence_and_mc_variance(row, nsamp)
