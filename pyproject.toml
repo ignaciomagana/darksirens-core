@@ -10,20 +10,38 @@ readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Ignacio Magana"}]
 dependencies = [
-  "jax>=0.4.34",
-  "jaxlib>=0.4.34",
-  "numpy>=1.26,<3",
-  "h5py>=3.10",
+  "jax==0.4.34",
+  "jaxlib==0.4.34",
+  "numpy==1.26.4",
+  "scipy==1.12.0",
+  "h5py==3.12.1",
+  "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c",
 ]
 
 [project.optional-dependencies]
 test = [
-  "pytest>=8.3",
-  "astropy>=6.1",
+  "pytest>=8.3,<9",
+  "ruff>=0.15",
+  "astropy>=6.1,<7",
+  "tinygp==0.3.0",
+  "equinox==0.11.10",
 ]
 gp = [
-  "tinygp",
+  "tinygp==0.3.0",
+  "equinox==0.11.10",
 ]
+dynesty = [
+  "dynesty==2.1.4",
+]
+numpyro = [
+  "numpyro==0.17.0",
+]
+gwcat = [
+  "gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3184bdb583f314d91ecae486436842ebe8e9f998",
+]
+
+[project.urls]
+Repository = "https://github.com/ignaciomagana/darksirens-core"
 
 [tool.setuptools.packages.find]
 where = ["src"]

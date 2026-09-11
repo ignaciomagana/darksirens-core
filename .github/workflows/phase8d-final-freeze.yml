@@ -1,0 +1,180 @@
+name: phase8d-final-freeze
+
+on:
+  push:
+    branches:
+      - rebuild/phase8-core-freeze
+  workflow_dispatch:
+
+jobs:
+  final-freeze:
+    runs-on: ubuntu-24.04
+    env:
+      JAX_PLATFORMS: cpu
+      DARKSIRENS_ZMAX: "5.0"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Require no scientific source change after accepted 8C
+        run: |
+          git diff --exit-code \
+            875a949d5a9f5ffb89f3a64cad030dcfc6daf6a2 HEAD \
+            -- src/darksirens
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "build>=1.2,<2"
+          python -m build --wheel --outdir dist
+          test "$(find dist -maxdepth 1 -name 'darksirens-*.whl' | wc -l)" -eq 1
+
+      - name: Install wheel in a clean environment
+        run: |
+          python -m venv /tmp/darksirens-phase8d
+          /tmp/darksirens-phase8d/bin/python -m pip install --upgrade pip
+          /tmp/darksirens-phase8d/bin/python -m pip install dist/darksirens-*.whl
+          /tmp/darksirens-phase8d/bin/python -m pip check
+
+      - name: Verify light root import and frozen public API
+        run: |
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import sys
+          import darksirens as ds
+
+          expected = {
+              "__version__",
+              "configure_jax_runtime",
+              "Cosmology",
+              "Population",
+              "Counterpart",
+              "ParameterPlan",
+              "InferenceTarget",
+              "load_events",
+              "load_injections",
+              "load_catalog",
+              "model",
+              "infer",
+          }
+          assert set(ds.__all__) == expected, (set(ds.__all__), expected)
+
+          forbidden = (
+              "jax",
+              "h5py",
+              "tinyns",
+              "dynesty",
+              "numpyro",
+              "tinygp",
+              "gwcat",
+              "darksirens_surveys",
+              "darksirens_lss",
+              "darksirens_lensing",
+          )
+          loaded = set(sys.modules)
+          bad = sorted(
+              name
+              for name in loaded
+              if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
+          )
+          assert not bad, bad
+          print("light root import and public API: PASS")
+          PY
+
+      - name: Verify base runtime and default backend are installed
+        run: |
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import h5py
+          import jax
+          import jaxlib
+          import numpy
+          import scipy
+          import tinyns
+          import darksirens.catalog.completeness
+
+          assert jax.__version__ == "0.4.34"
+          assert jaxlib.__version__ == "0.4.34"
+          assert numpy.__version__ == "1.26.4"
+          assert scipy.__version__ == "1.12.0"
+          assert h5py.__version__ == "3.12.1"
+          assert hasattr(tinyns, "NestedSampler")
+          print("base runtime/default backend: PASS")
+          PY
+
+      - name: Verify installed dependency metadata
+        run: |
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          from importlib.metadata import requires
+
+          reqs = requires("darksirens") or []
+          text = "\n".join(reqs).lower()
+          for required in (
+              "jax==0.4.34",
+              "jaxlib==0.4.34",
+              "numpy==1.26.4",
+              "scipy==1.12.0",
+              "h5py==3.12.1",
+              "tinyns",
+              "3f9e1b2537f32b59f17ee9ce68b2d725681a024c",
+          ):
+              assert required in text, (required, reqs)
+
+          for optional in ("tinygp", "dynesty", "numpyro", "gwcat"):
+              assert any(optional in req.lower() and "extra" in req.lower() for req in reqs), (
+                  optional,
+                  reqs,
+              )
+          print("installed metadata: PASS")
+          PY
+
+      - name: Verify default zero-dimensional target dispatch
+        run: |
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import darksirens as ds
+
+          plan = ds.ParameterPlan(
+              labels=(),
+              lower=(),
+              upper=(),
+              prior_kinds=(),
+              joint_constraints=(),
+          )
+          target = ds.InferenceTarget(
+              log_likelihood=lambda theta: -1.25,
+              parameters=plan,
+          )
+          result = ds.infer(target)
+          assert result["logZ"] == -1.25, result
+          assert result["logZerr"] == 0.0, result
+          print("default zero-dimensional dispatch: PASS")
+          PY
+
+      - name: Compile public examples and reject private imports
+        run: |
+          /tmp/darksirens-phase8d/bin/python -m compileall -q examples
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          for path in Path("examples").glob("*.py"):
+              tree = ast.parse(path.read_text())
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.ImportFrom) and node.module:
+                      assert not node.module.startswith("darksirens."), (path, node.module)
+          print("public examples: PASS")
+          PY
+
+      - name: Reject stale reconstruction docs
+        run: |
+          ! grep -R "Phase 2 currently owns" README.md CONTRACT.md MIGRATION.md VALIDATION.md
+          ! grep -R "Population, catalog, likelihood, selection, inference" README.md CONTRACT.md MIGRATION.md VALIDATION.md
+          grep -q "InferenceTarget" README.md CONTRACT.md
+          grep -q "host-density" README.md CONTRACT.md
+          grep -q "core never imports" README.md CONTRACT.md MIGRATION.md VALIDATION.md
