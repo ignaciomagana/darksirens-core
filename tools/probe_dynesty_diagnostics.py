@@ -100,12 +100,14 @@ def _legacy_functions(root: Path):
     tree = ast.parse(source.read_text(), filename=str(source))
 
     top = [
-        node for node in tree.body
+        node
+        for node in tree.body
         if isinstance(node, ast.FunctionDef)
         and node.name == "dynesty_diagnostics_dir"
     ]
     runs = [
-        node for node in tree.body
+        node
+        for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "run_sampler"
     ]
     if len(top) != 1 or len(runs) != 1:
@@ -151,7 +153,9 @@ def _candidate_writer(module, sampler, plotting, pyplot, *, calls=1):
 
 
 def _writer_cases(implementation, legacy=None):
-    import darksirens.inference.dynesty_diagnostics as candidate
+    candidate = None
+    if implementation == "candidate":
+        import darksirens.inference.dynesty_diagnostics as candidate
 
     cases = {
         "success_twice": dict(n=3, calls=2),
@@ -202,7 +206,9 @@ def _writer_cases(implementation, legacy=None):
 
 
 def _thread_cases(implementation, legacy=None):
-    import darksirens.inference.dynesty_diagnostics as candidate
+    candidate = None
+    if implementation == "candidate":
+        import darksirens.inference.dynesty_diagnostics as candidate
 
     out = {}
     for name, raises in (("success", False), ("writer_failure", True)):
@@ -243,7 +249,9 @@ def _thread_cases(implementation, legacy=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--implementation", choices=("legacy", "candidate"), required=True)
+    parser.add_argument(
+        "--implementation", choices=("legacy", "candidate"), required=True
+    )
     parser.add_argument("--legacy-root")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -260,7 +268,9 @@ def main():
         path_fn = candidate.dynesty_diagnostics_dir
 
     paths = {
-        "run_dir": path_fn(SimpleNamespace(save_path="/out", run_dir="/out/run_a")),
+        "run_dir": path_fn(
+            SimpleNamespace(save_path="/out", run_dir="/out/run_a")
+        ),
         "save_path": path_fn(SimpleNamespace(save_path="/out")),
         "default": path_fn(SimpleNamespace()),
     }
