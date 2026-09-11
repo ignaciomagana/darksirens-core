@@ -4,19 +4,50 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
 
+def _load_frozen_legacy_function():
+    """Execute only the pinned legacy ``_dead_point_block`` definition.
+
+    The frozen ``sampling.py`` monolith imports JAX, checkpointing, HDF5 IO and
+    sampler configuration before this pure NumPy helper is defined.  Importing
+    that module would therefore make a parity probe for this tiny seam depend on
+    unrelated legacy runtime packages.  Instead, parse the pinned source file
+    selected by ``PYTHONPATH``, extract the exact function definition, and
+    execute that definition with only its real dependency (NumPy) available.
+    """
+    roots = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if not roots:
+        raise RuntimeError("legacy probe requires PYTHONPATH to the pinned checkout")
+    source = Path(roots[0]) / "darksirens" / "inference" / "sampling.py"
+    tree = ast.parse(source.read_text(), filename=str(source))
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_dead_point_block"
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one _dead_point_block in {source}, found {len(matches)}"
+        )
+    module = ast.fix_missing_locations(ast.Module(body=[matches[0]], type_ignores=[]))
+    namespace = {"np": np}
+    exec(compile(module, str(source), "exec"), namespace)
+    return namespace["_dead_point_block"]
+
+
 def _load(implementation):
     if implementation == "legacy":
-        from darksirens.inference.sampling import _dead_point_block
-
-        return _dead_point_block
+        return _load_frozen_legacy_function()
     from darksirens.inference.nested_output import package_dead_points
 
     return package_dead_points
