@@ -30,6 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install \
             "numpy==1.26.4" \
+            "h5py==3.12.1" \
             "healpy==1.17.3" \
             "pytest==8.3.4" \
             "ruff==0.15.20"
