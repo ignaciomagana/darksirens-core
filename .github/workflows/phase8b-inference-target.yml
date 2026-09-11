@@ -1,0 +1,96 @@
+name: phase8b-inference-target
+
+on:
+  push:
+    branches: [rebuild/phase8-core-freeze]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inference-target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      DARKSIRENS_ZMAX: "5.0"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install validated CPU numerics and focused tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
+            "h5py==3.12.1" "pytest==8.3.4" "ruff==0.15.20"
+          python -m pip install --no-deps -e .
+
+      - name: Definite-error lint
+        run: |
+          ruff check \
+            src/darksirens/__init__.py \
+            src/darksirens/analysis.py \
+            src/darksirens/inference/public.py \
+            src/darksirens/inference/target.py \
+            tests/test_public_infer.py \
+            tests/test_inference_target.py \
+            --select F,E9
+          python -m compileall -q src tests
+
+      - name: Verify dependency-light public target types
+        run: |
+          python - <<'PY'
+          import sys
+          import darksirens as ds
+
+          assert "jax" not in sys.modules
+          assert "h5py" not in sys.modules
+          assert "dynesty" not in sys.modules
+          assert "tinyns" not in sys.modules
+          assert "numpyro" not in sys.modules
+
+          _ = ds.ParameterPlan
+          _ = ds.InferenceTarget
+
+          assert "jax" not in sys.modules
+          assert "h5py" not in sys.modules
+          assert "dynesty" not in sys.modules
+          assert "tinyns" not in sys.modules
+          assert "numpyro" not in sys.modules
+          print("InferenceTarget and ParameterPlan are dependency-light")
+          PY
+
+      - name: Focused Phase 8B tests
+        run: |
+          python -m pytest -q \
+            tests/test_inference_target.py \
+            tests/test_public_infer.py
+
+      - name: External-style target smoke test
+        run: |
+          python - <<'PY'
+          import darksirens as ds
+
+          plan = ds.ParameterPlan(
+              labels=(),
+              lower=(),
+              upper=(),
+              prior_kinds=(),
+              joint_constraints=(),
+          )
+          target = ds.InferenceTarget(lambda theta: -2.0, plan)
+          out = ds.infer(target, sampler="not-a-real-backend")
+          assert out["logZ"] == -2.0
+          assert out["samples"].shape == (1, 0)
+          print("external target reaches exact zero-free sampler path")
+          PY

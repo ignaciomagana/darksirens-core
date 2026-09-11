@@ -14,13 +14,23 @@ __version__ = "0.1.0.dev0"
 
 
 def __getattr__(name):
-    """Lazily expose scientific public types without making root import heavy."""
+    """Lazily expose public types without making root import heavy."""
     if name == "Counterpart":
         configure_jax_runtime()
         from .catalog.counterparts import Counterpart
 
         globals()[name] = Counterpart
         return Counterpart
+    if name == "ParameterPlan":
+        from .analysis import ParameterPlan
+
+        globals()[name] = ParameterPlan
+        return ParameterPlan
+    if name == "InferenceTarget":
+        from .inference.target import InferenceTarget
+
+        globals()[name] = InferenceTarget
+        return InferenceTarget
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -79,12 +89,12 @@ def model(
 def infer(
     analysis,
     *,
-    events,
-    injections,
+    events=None,
+    injections=None,
     sampler="tinyns",
     **sampler_options,
 ):
-    """Run an ordinary analysis through the reconstructed inference stack."""
+    """Run an ordinary analysis or specialized target through core samplers."""
     configure_jax_runtime()
     from .inference.public import infer as _infer
 
@@ -103,6 +113,8 @@ __all__ = [
     "Cosmology",
     "Population",
     "Counterpart",
+    "ParameterPlan",
+    "InferenceTarget",
     "load_events",
     "load_injections",
     "load_catalog",

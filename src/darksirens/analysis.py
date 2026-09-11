@@ -61,21 +61,27 @@ class BrightRedshift:
 
 @dataclass(frozen=True)
 class ParameterPlan:
-    """Sampler coordinates plus fixed blocks needed by later execution."""
+    """Sampler coordinates plus optional ordinary-analysis fixed blocks.
+
+    The first five fields are the stable sampler-facing contract used by both
+    ordinary analyses and :class:`darksirens.InferenceTarget`. The remaining
+    fields describe ordinary core composition and default to neutral values so
+    specialized companions never have to fabricate ordinary dark-siren state.
+    """
 
     labels: tuple[str, ...]
     lower: tuple[float, ...]
     upper: tuple[float, ...]
     prior_kinds: tuple[tuple[Any, ...], ...]
     joint_constraints: tuple[tuple[str, tuple[int, ...]], ...]
-    n_cosmology: int
-    n_population: int
-    n_catalog: int
-    n_angular: int
-    fixed_cosmology: tuple[tuple[str, float], ...]
-    population_labels: tuple[str, ...]
-    fixed_population: tuple[float, ...] | None
-    angular_labels: tuple[str, ...]
+    n_cosmology: int = 0
+    n_population: int = 0
+    n_catalog: int = 0
+    n_angular: int = 0
+    fixed_cosmology: tuple[tuple[str, float], ...] = ()
+    population_labels: tuple[str, ...] = ()
+    fixed_population: tuple[float, ...] | None = None
+    angular_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
