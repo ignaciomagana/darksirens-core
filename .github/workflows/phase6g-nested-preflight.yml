@@ -1,4 +1,4 @@
-name: phase6g-nested-preflight
+name: phase6-runtime-guards
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  nested-preflight:
+  runtime-guards:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -48,18 +48,35 @@ jobs:
       - name: Definite-error lint
         working-directory: candidate
         run: |
-          ruff check src/darksirens/inference/preflight.py tests/test_nested_sampler_preflight.py tools/probe_nested_sampler_preflight.py --select F,E9
-          python -m compileall -q src/darksirens/inference/preflight.py tests/test_nested_sampler_preflight.py tools/probe_nested_sampler_preflight.py
+          ruff check \
+            src/darksirens/inference/preflight.py \
+            src/darksirens/inference/run.py \
+            tests/test_nested_sampler_preflight.py \
+            tests/test_zero_free_parameter_result.py \
+            tools/probe_nested_sampler_preflight.py \
+            tools/probe_zero_free_parameter_result.py \
+            --select F,E9
+          python -m compileall -q \
+            src/darksirens/inference/preflight.py \
+            src/darksirens/inference/run.py \
+            tests/test_nested_sampler_preflight.py \
+            tests/test_zero_free_parameter_result.py \
+            tools/probe_nested_sampler_preflight.py \
+            tools/probe_zero_free_parameter_result.py
 
       - name: Phase 6G nested-sampler preflight tests
         working-directory: candidate
         run: python -m pytest -q tests/test_nested_sampler_preflight.py
 
+      - name: Phase 6H zero-free exact-evidence tests
+        working-directory: candidate
+        run: python -m pytest -q tests/test_zero_free_parameter_result.py
+
       - name: Full reconstructed regression suite
         working-directory: candidate
         run: python -m pytest -q
 
-      - name: Verify Phase 6G dependency boundary and light import
+      - name: Verify Phase 6G/6H dependency boundary and light imports
         working-directory: candidate
         run: |
           python - <<'PY'
@@ -67,8 +84,6 @@ jobs:
           import sys
           from pathlib import Path
 
-          path = Path("src/darksirens/inference/preflight.py")
-          tree = ast.parse(path.read_text())
           forbidden = (
               "darksirens.cli",
               "darksirens.surveys", "darksirens_surveys",
@@ -77,26 +92,33 @@ jobs:
               "darksirens.redshift", "darksirens.sky",
               "healpy", "dynesty", "numpyro", "tinyns",
           )
-          bad = []
-          for node in ast.walk(tree):
-              names = []
-              if isinstance(node, ast.Import):
-                  names = [a.name for a in node.names]
-              elif isinstance(node, ast.ImportFrom) and node.module:
-                  names = [node.module]
-              for name in names:
-                  if any(name == x or name.startswith(x + ".") for x in forbidden):
-                      bad.append(name)
-          assert not bad, bad
+          for rel in (
+              "src/darksirens/inference/preflight.py",
+              "src/darksirens/inference/run.py",
+          ):
+              path = Path(rel)
+              tree = ast.parse(path.read_text())
+              bad = []
+              for node in ast.walk(tree):
+                  names = []
+                  if isinstance(node, ast.Import):
+                      names = [a.name for a in node.names]
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      names = [node.module]
+                  for name in names:
+                      if any(name == x or name.startswith(x + ".") for x in forbidden):
+                          bad.append((rel, name))
+              assert not bad, bad
 
           import darksirens.inference.preflight
+          import darksirens.inference.run
           light_forbidden = (
               "jax", "jaxlib", "dynesty", "numpyro", "tinyns", "healpy",
               "darksirens.cli", "darksirens.redshift", "darksirens.sky",
               "darksirens.surveys", "darksirens.lss", "darksirens.lensing",
           )
           assert not [name for name in light_forbidden if name in sys.modules]
-          print("Phase 6G preflight boundary and light import are clean")
+          print("Phase 6G/6H runtime boundaries and light imports are clean")
           PY
 
       - name: Evaluate pinned legacy nested-preflight behavior
@@ -119,4 +141,26 @@ jobs:
                   f"nested-preflight parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}"
               )
           print("Phase 6G legacy/new nested-preflight behavior is exact")
+          PY
+
+      - name: Evaluate pinned legacy zero-free behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" python candidate/tools/probe_zero_free_parameter_result.py --implementation legacy --out /tmp/zero-free-legacy.json
+
+      - name: Evaluate reconstructed zero-free behavior
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_zero_free_parameter_result.py --implementation candidate --out /tmp/zero-free-candidate.json
+
+      - name: Require exact Phase 6H zero-free parity
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          legacy = json.loads(Path('/tmp/zero-free-legacy.json').read_text())['behavior']
+          candidate = json.loads(Path('/tmp/zero-free-candidate.json').read_text())['behavior']
+          if legacy != candidate:
+              raise SystemExit(
+                  f"zero-free parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}"
+              )
+          print("Phase 6H legacy/new zero-free behavior is exact")
           PY
