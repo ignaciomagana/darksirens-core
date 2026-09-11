@@ -177,4 +177,4 @@ jobs:
           ! grep -R "Population, catalog, likelihood, selection, inference" README.md CONTRACT.md MIGRATION.md VALIDATION.md
           grep -q "InferenceTarget" README.md CONTRACT.md
           grep -q "host-density" README.md CONTRACT.md
-          grep -q "core never imports" README.md CONTRACT.md MIGRATION.md VALIDATION.md
+          grep -qi "Core must never import" CONTRACT.md
