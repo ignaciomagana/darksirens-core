@@ -35,7 +35,7 @@ def _directions():
 
 
 def test_basic_angular_registry_contract():
-    assert ANGULAR_MODEL_NAMES == ("isotropic", "dipole")
+    assert ANGULAR_MODEL_NAMES[:2] == ("isotropic", "dipole")
     assert get_angular_model("dipole") is get_angular_model("dipole")
 
     lo, hi, labels, kinds, latex = angular_model_prior_parser("isotropic")
@@ -99,7 +99,5 @@ def test_dipole_fiducial_and_antipodal_mean_are_isotropic():
             nx, ny, nz, jnp.zeros(nx.size), jnp.asarray([0.4, -0.1, 0.2])
         )
     )
-    # The deterministic direction set consists of antipodal pairs, so the
-    # dipole perturbation averages to exactly zero up to floating arithmetic.
     assert abs(float(np.mean(np.exp(logg))) - 1.0) < 1e-15
     assert angular_log_prior_volume_correction("dipole") == 0.0

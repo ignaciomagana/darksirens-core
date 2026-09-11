@@ -1,23 +1,36 @@
-"""Reusable angular source-population models.
-
-This Phase-7 slice reconstructs only the frozen isotropic and dipole models plus
-small registry helpers.  Higher-dimensional sphere/3-D GP and multipole models
-are migrated in later parity-gated slices.  The angular factor is mean-one, so
-isotropy is exactly ``g == 1`` and does not trade against the overall merger
-rate.
-"""
+"""Reusable angular source-population models and registry."""
 
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
 
+from .angular_advanced import (
+    MultipoleAngular,
+    OverdensityGP3DAngular,
+    SphereGPAngular,
+    SphereZGPAngular,
+    multipole_lm_indices,
+)
 from .base import ParamSpec, pack_specs
 
-ANGULAR_MODEL_NAMES = ("isotropic", "dipole")
+ANGULAR_MODEL_NAMES = (
+    "isotropic",
+    "dipole",
+    "sphere_gp",
+    "sphere_gp_z",
+    "overdensity_gp",
+    "multipole",
+    "multipole_l3",
+)
 ANGULAR_MODEL_LATEX = {
     "isotropic": r"\text{Isotropic}",
     "dipole": r"\text{Dipole}",
+    "sphere_gp": r"\text{Sphere GP}",
+    "sphere_gp_z": r"\text{Sphere GP }(\hat n, z)",
+    "overdensity_gp": r"\text{3D Overdensity GP}",
+    "multipole": r"\text{Multipole }(\ell\le2)",
+    "multipole_l3": r"\text{Multipole }(\ell\le3)",
 }
 
 
@@ -46,7 +59,7 @@ class IsotropicAngular:
 class DipoleAngular:
     r"""Mean-one dipole ``g(nhat) = 1 + nhat . d``.
 
-    Positivity on the whole sphere requires ``|d| <= 1``.  The three Cartesian
+    Positivity on the whole sphere requires ``|d| <= 1``. The three Cartesian
     coordinates therefore declare the frozen ``ball3`` joint-prior map rather
     than sampling a cube and clipping invalid directions pointwise.
     """
@@ -81,6 +94,11 @@ class DipoleAngular:
 _FACTORIES = {
     "isotropic": IsotropicAngular,
     "dipole": DipoleAngular,
+    "sphere_gp": SphereGPAngular,
+    "sphere_gp_z": SphereZGPAngular,
+    "overdensity_gp": OverdensityGP3DAngular,
+    "multipole": lambda: MultipoleAngular(lmax=2),
+    "multipole_l3": lambda: MultipoleAngular(lmax=3),
 }
 _REGISTRY: dict[str, object] = {}
 
@@ -115,7 +133,11 @@ def angular_fiducial(name: str) -> tuple[float, ...]:
     model = get_angular_model(name)
     values = []
     for spec in model.param_specs:
-        if spec.name in ("sky_dx", "sky_dy", "sky_dz"):
+        if (
+            spec.name.startswith("sky_xi")
+            or spec.name.startswith("sky_a")
+            or spec.name in ("sky_dx", "sky_dy", "sky_dz")
+        ):
             values.append(0.0)
         else:
             values.append(0.5 * (spec.low + spec.high))
@@ -137,6 +159,11 @@ __all__ = [
     "ANGULAR_MODEL_LATEX",
     "IsotropicAngular",
     "DipoleAngular",
+    "SphereGPAngular",
+    "SphereZGPAngular",
+    "OverdensityGP3DAngular",
+    "MultipoleAngular",
+    "multipole_lm_indices",
     "get_angular_model",
     "angular_model_parser",
     "angular_model_prior_parser",
