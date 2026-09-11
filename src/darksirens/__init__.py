@@ -1,11 +1,13 @@
 """Core dark-siren inference package.
 
 The package root stays import-side-effect free. Public loader functions import
-scientific/data modules only when called, so ``import darksirens`` does not
-initialize JAX, HDF5, sampler backends, or optional extensions.
+scientific/data modules only when called, and the public analysis specifications
+are dependency-light declarations, so ``import darksirens`` does not initialize
+JAX, HDF5, sampler backends, or optional extensions.
 """
 
 from ._jax import configure_jax_runtime
+from ._specs import Cosmology, Population
 
 __version__ = "0.1.0.dev0"
 
@@ -40,6 +42,8 @@ def load_catalog(path, *, sort_rows_by_z=True):
 __all__ = [
     "__version__",
     "configure_jax_runtime",
+    "Cosmology",
+    "Population",
     "load_events",
     "load_injections",
     "load_catalog",
