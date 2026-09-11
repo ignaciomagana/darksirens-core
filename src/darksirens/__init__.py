@@ -13,6 +13,17 @@ from ._specs import Cosmology, Population
 __version__ = "0.1.0.dev0"
 
 
+def __getattr__(name):
+    """Lazily expose scientific public types without making root import heavy."""
+    if name == "Counterpart":
+        configure_jax_runtime()
+        from .catalog.counterparts import Counterpart
+
+        globals()[name] = Counterpart
+        return Counterpart
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def load_events(path, *, fit_columns=None):
     """Load a standardized gwcat posterior store for ordinary inference."""
     configure_jax_runtime()
@@ -47,6 +58,8 @@ def model(
     catalog=None,
     completeness=None,
     angular="isotropic",
+    counterparts=None,
+    counterpart_nside=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -58,6 +71,8 @@ def model(
         catalog=catalog,
         completeness=completeness,
         angular=angular,
+        counterparts=counterparts,
+        counterpart_nside=counterpart_nside,
     )
 
 
@@ -87,6 +102,7 @@ __all__ = [
     "configure_jax_runtime",
     "Cosmology",
     "Population",
+    "Counterpart",
     "load_events",
     "load_injections",
     "load_catalog",
