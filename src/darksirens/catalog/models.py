@@ -16,7 +16,7 @@ from darksirens.cosmology._grid import log_interp_zgrid, zgrid, zgrid_upper_inde
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.cosmology.volume import normalized_comoving_volume_grid
 
-from .completeness import ObservedDensityCache, completion_curves
+from .completeness import CompletionCurves, ObservedDensityCache, completion_curves
 from .redshift import (
     CatalogKernelState,
     build_catalog_kernel_state,
@@ -56,6 +56,42 @@ def _interp_row(lo, hi, t):
     return lo + t * (hi - lo)
 
 
+def build_incomplete_catalog_prior_state_from_curves(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    curves: CompletionCurves,
+) -> IncompleteCatalogPriorState:
+    """Build the ordinary conditional prior from precomputed completion curves.
+
+    This is the generic composition seam for an already-accepted
+    :class:`~darksirens.catalog.completeness.CompletionCurves` object.  It owns
+    no completeness prescription: count-derived, magnitude-selection, or other
+    callers must construct ``curves`` using their owning implementation before
+    entering this function.
+
+    The observed-host kernel, finite-depth observed-count factor, additive
+    missing density, and row normalization are exactly the ordinary
+    incomplete-catalog convention used by :func:`build_incomplete_catalog_prior_state`.
+    """
+
+    if not isinstance(curves, CompletionCurves):
+        raise TypeError("curves must be darksirens.catalog.completeness.CompletionCurves")
+
+    kernels = build_catalog_kernel_state(cosmo, params, catalog)
+    Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
+    Nobs = Nobs * jnp.exp(kernels.log_depth_mass)
+    log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
+    Z = Nobs + curves.N_miss
+    log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
+    return IncompleteCatalogPriorState(
+        kernels=kernels,
+        log_Nobs=log_Nobs,
+        dN_miss=curves.dN_miss,
+        log_Z=log_Z,
+    )
+
+
 def build_incomplete_catalog_prior_state(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -75,18 +111,12 @@ def build_incomplete_catalog_prior_state(
     again in the missing branch.
     """
 
-    kernels = build_catalog_kernel_state(cosmo, params, catalog)
     curves = completion_curves(cosmo, params, catalog, observed_cache)
-    Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
-    Nobs = Nobs * jnp.exp(kernels.log_depth_mass)
-    log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
-    Z = Nobs + curves.N_miss
-    log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
-    return IncompleteCatalogPriorState(
-        kernels=kernels,
-        log_Nobs=log_Nobs,
-        dN_miss=curves.dN_miss,
-        log_Z=log_Z,
+    return build_incomplete_catalog_prior_state_from_curves(
+        cosmo,
+        params,
+        catalog,
+        curves,
     )
 
 
@@ -128,7 +158,7 @@ def build_complete_catalog_prior_state(
     params: CatalogParameters,
     catalog: GalaxyCatalog,
 ) -> CompleteCatalogPriorState:
-    """Build the frozen complete-catalog conditional prior state.
+    """Build the frozen complete-catalog prior state with explicit empty-row fallback support.
 
     Complete-catalog mode uses the same unit-mass, galaxy-measure-tilted kernel
     convention as the frozen legacy ``volume_weighted=False`` path.  A survey
@@ -194,6 +224,7 @@ __all__ = [
     "IncompleteCatalogPriorState",
     "build_complete_catalog_prior_state",
     "build_incomplete_catalog_prior_state",
+    "build_incomplete_catalog_prior_state_from_curves",
     "eval_complete_catalog_prior_state",
     "eval_complete_catalog_prior_state_vmap",
     "eval_incomplete_catalog_prior_state",
