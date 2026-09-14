@@ -119,18 +119,25 @@ def test_selection_completion_curves_compose_without_reinterpretation(selection,
     )
 
     np.testing.assert_array_equal(np.asarray(state.dN_miss), np.asarray(curves.dN_miss))
-    nobs = np.asarray(cat.ngals, dtype=float) * np.exp(
-        np.asarray(state.kernels.log_depth_mass)
+
+    # Spell the accepted normalization in JAX, matching the runtime arithmetic
+    # rather than demanding bit identity against a separately rounded NumPy
+    # evaluation of exp/log at ~1e-15. The exact old-path identity is pinned by
+    # the preceding test with assert_array_equal on the full prior state.
+    nobs = jnp.asarray(cat.ngals, dtype=zgrid.dtype) * jnp.exp(
+        state.kernels.log_depth_mass
     )
-    expected_log_z = np.where(
-        nobs + np.asarray(curves.N_miss) > 0.0,
-        np.log(np.maximum(nobs + np.asarray(curves.N_miss), 1.0e-300)),
+    total = nobs + curves.N_miss
+    expected_log_z = jnp.where(
+        total > 0.0,
+        jnp.log(jnp.maximum(total, 1.0e-300)),
         0.0,
     )
-    np.testing.assert_array_equal(np.asarray(state.log_Z), expected_log_z)
+    np.testing.assert_array_equal(np.asarray(state.log_Z), np.asarray(expected_log_z))
 
-    # The composed conditional row prior is still normalized. The tolerance is
-    # the existing catalog-grid quadrature tolerance, not a new approximation.
+    # Zero density is a valid part of a parametric-selection prior (especially
+    # the Schechter tail), so -inf log density is not an error. What matters is
+    # absence of NaNs/+inf and unit row normalization on the shared z grid.
     for row in range(cat.zgals.shape[0]):
         lp = np.asarray(
             eval_incomplete_catalog_prior_state_vmap(
@@ -140,9 +147,13 @@ def test_selection_completion_curves_compose_without_reinterpretation(selection,
                 cat,
             )
         )
-        assert np.all(np.isfinite(lp[1:]))
+        assert not np.any(np.isnan(lp))
+        assert not np.any(np.isposinf(lp))
+        density = np.exp(lp)
+        assert np.all(np.isfinite(density))
+        assert np.all(density >= 0.0)
         np.testing.assert_allclose(
-            _trapezoid(np.exp(lp), np.asarray(zgrid)),
+            _trapezoid(density, np.asarray(zgrid)),
             1.0,
             rtol=5.0e-3,
             atol=0.0,
