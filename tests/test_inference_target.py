@@ -192,6 +192,44 @@ def test_target_contract_validates_sampler_coordinates():
         )
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("normal", None, 1.0),
+        ("normal", 0.0, None),
+        ("normal", None, None),
+        ("lognormal", None, None),
+        ("lognormal", 0.0, None),
+        ("beta", None, None),
+        ("beta", 1.0, None),
+    ],
+)
+def test_non_uniform_prior_kinds_require_explicit_loc_and_scale(entry):
+    """ParamSpec's None means the (0, 1) defaults; the seam demands them spelled out.
+
+    make_prior_transform keeps the frozen default substitution (a whitened
+    latent declared through ParamSpec is a standard normal), but a companion
+    writes ParameterPlan triples by hand, where a missing value is an omission.
+    """
+    kind = entry[0]
+    with pytest.raises(ValueError, match=f"prior kind {kind!r} .* requires an explicit"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.0,),
+                upper=(1.0,),
+                prior_kinds=(entry,),
+            ),
+        )
+
+    # The transform consumes only beta's shape, so beta's loc stays optional.
+    InferenceTarget(
+        lambda theta: 0.0,
+        _plan(labels=("x",), lower=(0.0,), upper=(1.0,), prior_kinds=(("beta", None, 2.0),)),
+    )
+
+
 def test_prior_kind_vocabulary_fails_closed():
     """An unrecognized kind used to sample uniform; a bad scale froze the axis."""
     for bad in ("gaussian", "loguniform", "delta", "Normal"):
@@ -251,7 +289,7 @@ def test_prior_kind_vocabulary_fails_closed():
                 UNIFORM,
                 ("normal", 5.0, 1.0),
                 ("lognormal", 0.0, 0.5),
-                ("beta", 1.0, None),
+                ("beta", 1.0, 2.0),
             ),
         ),
     )

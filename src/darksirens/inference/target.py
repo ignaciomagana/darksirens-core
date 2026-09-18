@@ -31,15 +31,28 @@ def _validate_prior_kind(label: str, entry) -> None:
         )
     if kind == "uniform":
         return
+    # This seam is stricter than ParamSpec, whose None means the standard (0, 1)
+    # defaults that core's own registries never rely on: a companion writes
+    # these triples by hand, so an unstated loc or scale is far more likely an
+    # omission than a request for the default. The transform consumes only the
+    # shape for "beta" (Beta(1, scale)), so beta's loc stays optional.
+    if kind != "beta" and loc is None:
+        raise ValueError(
+            f"prior kind {kind!r} for parameter {label!r} requires an explicit loc"
+        )
+    if scale is None:
+        raise ValueError(
+            f"prior kind {kind!r} for parameter {label!r} requires an explicit "
+            "scale"
+        )
     if loc is not None and not math.isfinite(float(loc)):
         raise ValueError(f"non-finite prior loc for parameter {label!r}")
-    if scale is not None:
-        width = float(scale)
-        if not math.isfinite(width) or not width > 0.0:
-            raise ValueError(
-                f"prior scale for parameter {label!r} must be finite and > 0, "
-                f"got {width!r}"
-            )
+    width = float(scale)
+    if not math.isfinite(width) or not width > 0.0:
+        raise ValueError(
+            f"prior scale for parameter {label!r} must be finite and > 0, "
+            f"got {width!r}"
+        )
 
 
 def _validate_parameter_plan(plan: ParameterPlan) -> None:
