@@ -290,6 +290,29 @@ def test_likelihood_options_reach_the_likelihood_call(monkeypatch):
     assert captured["pe_event_block"] == 2
 
 
+def test_pairing_grid_guard_is_wired_into_binding(monkeypatch):
+    # The opt-in pairing m1 grid clamps above its ceiling, so the binder is the
+    # one host-side place that must size and check it against the model.
+    import darksirens.runtime_binding as rb
+
+    events, injections = _stores()
+    pop = _fixed_pop()
+    analysis = model(
+        cosmology=Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=pop,
+    )
+    calls = []
+
+    def fake_ensure(name, *, shared_beta, shared_spin, shared_gamma):
+        calls.append((name, shared_beta, shared_spin, shared_gamma))
+
+    monkeypatch.setattr(rb, "ensure_pairing_grid_covers", fake_ensure)
+    bind_analysis(analysis, events=events, injections=injections)
+    assert calls == [
+        (pop.model_name, pop.shared_beta, pop.shared_spin, pop.shared_gamma)
+    ]
+
+
 def _paired(pe_attrs, sel_attrs):
     events, injections = _stores()
     return (
