@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import pytest
@@ -126,10 +127,15 @@ def test_population_rejects_unknown_fixed_mode(fixed):
 
 
 def test_package_root_specs_are_dependency_light():
-    # This assertion is useful when this test is run alone in a fresh process;
-    # the dedicated workflow also checks it before any population import.
     assert ds.Cosmology.__module__ == "darksirens._specs"
     assert ds.Population.__module__ == "darksirens._specs"
-    assert "numpyro" not in sys.modules
-    assert "dynesty" not in sys.modules
-    assert "tinyns" not in sys.modules
+    # Checked in a fresh interpreter: other test modules legitimately import
+    # the real sampler backends into this process, so an in-process check of
+    # sys.modules would depend on collection order.
+    code = (
+        "import sys, darksirens as ds; ds.Cosmology(Om0=(0.2, 0.4));"
+        " ds.Population('brokenpowerlaw+2peaks', fixed='gwtc5');"
+        " heavy = {'jax', 'numpyro', 'dynesty', 'tinyns', 'h5py'} & set(sys.modules);"
+        " assert not heavy, heavy"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
