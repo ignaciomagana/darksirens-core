@@ -80,6 +80,45 @@ def test_complete_catalog_uses_only_delta_and_kernel_width():
     assert analysis.parameters.n_catalog == 2
 
 
+def test_complete_catalog_empty_pixels_default_to_the_strict_policy():
+    analysis = ds.model(
+        population=ds.Population("powerlaw+peak", fixed=True),
+        catalog=_catalog(),
+        completeness="complete",
+    )
+    assert analysis.redshift.empty_policy == "zero"
+
+    opted_in = ds.model(
+        population=ds.Population("powerlaw+peak", fixed=True),
+        catalog=_catalog(),
+        completeness="complete",
+        empty_policy="volume",
+    )
+    assert opted_in.redshift.empty_policy == "volume"
+
+
+def test_empty_policy_is_legal_only_for_a_complete_catalog():
+    population = ds.Population("powerlaw+peak", fixed=True)
+    with pytest.raises(ValueError, match="completeness='complete'"):
+        ds.model(population=population, catalog=_catalog(), empty_policy="zero")
+    with pytest.raises(ValueError, match="completeness='complete'"):
+        ds.model(
+            population=population,
+            catalog=_catalog(),
+            completeness="incomplete",
+            empty_policy="zero",
+        )
+    with pytest.raises(ValueError, match="completeness='complete'"):
+        ds.model(population=population, empty_policy="volume")
+    with pytest.raises(ValueError, match="empty_policy must be"):
+        ds.model(
+            population=population,
+            catalog=_catalog(),
+            completeness="complete",
+            empty_policy="guess",
+        )
+
+
 def test_sampled_parameter_order_is_cosmology_population_catalog():
     population = ds.Population("powerlaw+peak")
     analysis = ds.model(

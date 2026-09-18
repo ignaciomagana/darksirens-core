@@ -411,7 +411,7 @@ def complete_catalog_siren_log_likelihood(
     n_draw: float,
     *,
     pop_model: str,
-    empty_policy: str = "volume",
+    empty_policy: str = "zero",
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,

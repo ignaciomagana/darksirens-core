@@ -67,6 +67,7 @@ def model(
     population,
     catalog=None,
     completeness=None,
+    empty_policy=None,
     angular="isotropic",
     counterparts=None,
     counterpart_nside=None,
@@ -80,6 +81,7 @@ def model(
         population=population,
         catalog=catalog,
         completeness=completeness,
+        empty_policy=empty_policy,
         angular=angular,
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
@@ -92,6 +94,10 @@ def infer(
     events=None,
     injections=None,
     sampler="tinyns",
+    selection_neff_guard="auto",
+    max_likelihood_variance=None,
+    sel_batch_size=None,
+    pe_event_block=None,
     **sampler_options,
 ):
     """Run an ordinary analysis or specialized target through core samplers."""
@@ -103,6 +109,10 @@ def infer(
         events=events,
         injections=injections,
         sampler=sampler,
+        selection_neff_guard=selection_neff_guard,
+        max_likelihood_variance=max_likelihood_variance,
+        sel_batch_size=sel_batch_size,
+        pe_event_block=pe_event_block,
         **sampler_options,
     )
 

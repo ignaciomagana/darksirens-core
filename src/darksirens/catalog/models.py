@@ -184,9 +184,14 @@ def eval_complete_catalog_prior_state(
     state: CompleteCatalogPriorState,
     catalog: GalaxyCatalog,
     *,
-    empty_policy: str = "volume",
+    empty_policy: str = "zero",
 ):
-    """Evaluate a complete-catalog row under the explicit empty-row policy."""
+    """Evaluate a complete-catalog row under the explicit empty-row policy.
+
+    ``"zero"`` is the default: under the complete-catalog assumption a
+    galaxy-free row has no hosts. ``"volume"`` re-admits the normalized
+    dV_c/dz prior there and is an opt-in robustness approximation.
+    """
 
     if empty_policy not in ("zero", "volume"):
         raise ValueError(
@@ -208,7 +213,7 @@ def eval_complete_catalog_prior_state_vmap(
     state,
     catalog,
     *,
-    empty_policy: str = "volume",
+    empty_policy: str = "zero",
 ):
     """Vectorized paired ``(z, row)`` complete-catalog evaluator."""
 
