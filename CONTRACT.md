@@ -120,10 +120,14 @@ parameter decoders or sampler adapters.
   attributes differ (stores without one are exempt) and warns when their
   declared cosmologies differ.
 - `ParameterPlan.prior_kinds` are `(kind, loc, scale)` triples with `kind` in
-  `{uniform, normal, lognormal, beta}` and, for non-uniform kinds, finite `loc`
-  and positive finite `scale`; joint-constraint kinds are
+  `{uniform, normal, lognormal, beta}`; joint-constraint kinds are
   `{ordered_le, conditional_upper, simplex, ball3}` with arity 2/2/2/3. The
-  prior transform raises on anything else.
+  prior transform raises on any other kind. Inside core, `None` for `loc` or
+  `scale` keeps the `ParamSpec` meaning: the standard `(0, 1)` defaults, which
+  core's own registries never rely on. At the `InferenceTarget` seam a
+  non-uniform kind must state `loc` and `scale` explicitly (finite, `scale`
+  positive); `beta` consumes only its shape (`scale`), so its `loc` may be
+  omitted.
 
 ## Specialized extension seams
 

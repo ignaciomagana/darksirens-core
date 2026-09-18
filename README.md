@@ -130,7 +130,10 @@ user typed them rather than as a silent `-inf`:
   `logZ_corrected` next to the raw `logZ`, so evidences from angular models
   that reject part of their prior box are comparable.
 - `ParameterPlan` prior kinds and joint-constraint kinds are closed
-  vocabularies; anything else raises instead of being reinterpreted.
+  vocabularies; anything else raises instead of being reinterpreted. An
+  `InferenceTarget` plan must spell out `loc` and `scale` for every
+  non-uniform prior (core's own `ParamSpec` may leave them `None`, meaning the
+  standard `(0, 1)` defaults).
 - The opt-in `DARKSIRENS_GW_PAIRING_M1_GRID` normaliser grid is sized to the
   bound model's mass support at bind time and refused if it cannot cover it.
 

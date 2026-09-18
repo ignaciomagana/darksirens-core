@@ -162,19 +162,22 @@ run IDs before those exact-head gates exist.
 
 ## Phases 12A and 12B
 
-Direct commits to `main` (`8b9dc64`, `bb4812d`) adding
-`build_incomplete_catalog_prior_state_from_curves`, `catalog/field.py` and
-`selection/footprint.py`. Accepted by `tests/test_completion_curve_composition.py`
-(the curve seam reproduces the accepted incomplete-catalog state exactly) and
+PR #8 (squash merge `8b9dc64`) and PR #9 (squash merge `bb4812d`), each with a
+control record in `ignaciomagana/darksirens-rebuild` (`phases/12A_*`,
+`phases/12B_*`), adding `build_incomplete_catalog_prior_state_from_curves`,
+`catalog/field.py` and `selection/footprint.py`. Accepted by
+`tests/test_completion_curve_composition.py` (the curve seam reproduces the
+accepted incomplete-catalog state exactly) and
 `tests/test_phase12b_field_footprint.py`. No dedicated workflow; the broad
 regression suite covers both.
 
 ## Review follow-up
 
 A 130-agent adversarial review against the frozen reference confirmed 40
-findings; branch `fix/review-followup` implements them. Acceptance for this
-branch is mutation-based: every fix ships with a test that fails on the review's
-own mutant, verified in the branch history. The load-bearing ones:
+findings; the stacked PRs #10, #16, #12, #13, #14 and #15 implement them, merged
+in that order. Acceptance is mutation-based: every fix ships with a test that
+fails on the review's own mutant, verified in the PR history. The load-bearing
+ones:
 
 ```text
 dV_of_z without 1/E(z)             astropy anchor fails, ratio 4.95
@@ -183,6 +186,7 @@ m1src = m1det (no source frame)    pinned weight fails (0.58 rel), dlnL/dH0 0.07
 distance mask removed              Phase 4 probe fails, max rel 3.1; unit anchor fails
 GP z nodes uniform in z            all 9 z-normalisation checks fail (up to 1.19)
 fixed 64-node m1 table             toe probes fail (1.25 at m1 = m_min + 0.25 dm_min)
+24-node q lattice, m1-conditional  independent-grid check fails (0.876 at the same probe)
 ang2pix_ring pre-fix               12 of 49 healpy parity cases fail
 soft guard without double-where    Neff = inf gradient is NaN
 ```
@@ -194,16 +198,17 @@ every other `tools/probe_*.py` candidate output is byte-identical to the
 pre-branch tree, and `tests/data/population_registry_golden.json` gained two
 `@md` entries with every pre-existing entry unchanged.
 
-Full suite on the validated stack after the branch: 703 passed, 1 skipped (the
-golden-regeneration guard), against 543 passed, 1 skipped before it. Every
-optional backend used by the new tests (TinyNS, Dynesty, NumPyro, healpy,
-Matplotlib) was installed for that run, so nothing was skipped for a missing
-package.
+Local measurement on the validated stack with every optional backend installed
+(TinyNS, Dynesty, NumPyro, healpy, Matplotlib), before the last three review
+commits: 703 passed, 1 skipped (the golden-regeneration guard), against 543
+passed, 1 skipped before the stack. The reproducible record is the GitHub
+Actions runs on the accepted PR heads: `phase8-regression` now installs the
+same optional stack, and the dedicated `real-backends` workflow runs the
+end-to-end TinyNS, Dynesty and NumPyro tests, the real Dynesty checkpoint
+round-trip and the healpy parity suite and fails on any skip. Their run
+identifiers belong in the darksirens-rebuild Phase 12C acceptance record.
 
 Deliberate numerics changes and their reach are recorded in `MIGRATION.md`.
-The CI install-list change in `phase8-regression.yml` (adding the pinned TinyNS)
-was not exercised here; the healpy, Dynesty and NumPyro backed tests skip in
-that workflow until those packages are added to its install step.
 
 ## Permanent firewall
 
