@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 
 import pytest
@@ -16,12 +17,12 @@ def test_default_cosmology_samples_only_h0():
 def test_cosmology_scalar_or_bounds_contract_and_order():
     cosmo = ds.Cosmology(
         H0=67.74,
-        Om0=(0.1, 0.5),
+        Om0=(0.2, 0.4),
         w0=(-2.0, -0.3),
         wa=0,
     )
     assert cosmo.free_parameters == (
-        ("Om0", 0.1, 0.5),
+        ("Om0", 0.2, 0.4),
         ("w0", -2.0, -0.3),
     )
     assert cosmo.fixed_parameters == {"H0": 67.74, "wa": 0.0}
@@ -41,6 +42,36 @@ def test_cosmology_scalar_or_bounds_contract_and_order():
 def test_cosmology_rejects_invalid_parameter_declarations(kwargs, exc):
     with pytest.raises(exc):
         ds.Cosmology(**kwargs)
+
+
+def test_cosmology_rejects_prior_outside_the_tabulated_distance_grid():
+    # Outside the table r_of_z is NaN and the likelihood is -inf, so an
+    # accepted out-of-grid bound truncates the prior with no diagnostic.
+    with pytest.raises(
+        ValueError,
+        match=r"Om0 prior .*\[0\.15749999999999997, 0\.45749999999999996\]",
+    ):
+        ds.Cosmology(H0=(20.0, 140.0), Om0=(0.10, 0.50))
+
+    with pytest.raises(ValueError, match=r"wa prior .*\[-2\.5, 2\.5\]"):
+        ds.Cosmology(wa=(-3.0, 3.0))
+
+
+def test_cosmology_rejects_fixed_value_outside_the_tabulated_distance_grid():
+    with pytest.raises(
+        ValueError,
+        match=r"Om0 fixed at 0\.55 .*\[0\.15749999999999997, 0\.45749999999999996\]",
+    ):
+        ds.Cosmology(Om0=0.55)
+
+
+def test_cosmology_accepts_grid_endpoints_and_any_finite_h0():
+    # The support is closed, and H0 is not an interpolation axis.
+    assert ds.Cosmology(w0=(-2.25, 0.25)).free_parameters == (
+        ("H0", 20.0, 140.0),
+        ("w0", -2.25, 0.25),
+    )
+    assert ds.Cosmology(H0=(1.0, 1.0e6)).free_parameters == (("H0", 1.0, 1.0e6),)
 
 
 def test_population_sampled_and_fiducial_modes():
@@ -96,10 +127,15 @@ def test_population_rejects_unknown_fixed_mode(fixed):
 
 
 def test_package_root_specs_are_dependency_light():
-    # This assertion is useful when this test is run alone in a fresh process;
-    # the dedicated workflow also checks it before any population import.
     assert ds.Cosmology.__module__ == "darksirens._specs"
     assert ds.Population.__module__ == "darksirens._specs"
-    assert "numpyro" not in sys.modules
-    assert "dynesty" not in sys.modules
-    assert "tinyns" not in sys.modules
+    # Checked in a fresh interpreter: other test modules legitimately import
+    # the real sampler backends into this process, so an in-process check of
+    # sys.modules would depend on collection order.
+    code = (
+        "import sys, darksirens as ds; ds.Cosmology(Om0=(0.2, 0.4));"
+        " ds.Population('brokenpowerlaw+2peaks', fixed='gwtc5');"
+        " heavy = {'jax', 'numpyro', 'dynesty', 'tinyns', 'h5py'} & set(sys.modules);"
+        " assert not heavy, heavy"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
