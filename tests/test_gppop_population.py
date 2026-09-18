@@ -94,22 +94,95 @@ def test_gppop_density_finite_inside_inf_outside():
     assert np.isneginf(np.asarray(lp_below)).all()
 
 
+def _bin_log_rates(model, theta, seed=None):
+    """Per-bin log rates, optionally from a seeded (non-flat) latent draw."""
+    vec = np.array(theta, dtype=float)
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        for k, spec in enumerate(model.param_specs):
+            if spec.name.startswith("xi_"):
+                vec[k] = float(rng.standard_normal())
+    vec = jnp.asarray(vec)
+    amp = jnp.exp(vec[0])
+    ls = [jnp.exp(vec[1])] * (3 if model._has_z else 2)
+    if model._has_z:
+        ls[2] = jnp.exp(vec[2])
+    n_hyper = 3 if model._has_z else 2
+    return model._bin_log_rates(amp, ls, vec[n_hyper:n_hyper + model.M])
+
+
+def _edge_aligned_masses(model, per_segment=200):
+    """Dense m1 nodes that LAND ON every bin edge.
+
+    The binned density is piecewise constant in (ln m1, ln m2), so a grid that
+    straddles an edge integrates a step function across the cell containing it.
+    Building the nodes from ``model._ln_m_edges`` puts a node exactly on each
+    discontinuity, which is what makes this an independent reference rather than
+    a re-run of the library's own quadrature.
+    """
+    ln_edges = np.asarray(model._ln_m_edges)
+    segments = [np.exp(np.linspace(a, b, per_segment))
+                for a, b in zip(ln_edges[:-1], ln_edges[1:])]
+    return np.unique(np.concatenate(segments))
+
+
 def test_gppop_mass_shape_is_normalised():
+    """int p(m1, q) dm1 dq = 1 on an INDEPENDENT, edge-aligned grid.
+
+    This used to rebuild ``get_mass_grid() x get_q_grid()``, call the same
+    ``_binned_density``, divide by ``_mass_norm`` and reduce with the same nested
+    trapezoid -- x/x, true for any grid and any integrand (deleting the 1/(q m1)
+    Jacobian or scaling the density by 137 both still gave exactly 1.0).  On an
+    edge-aligned grid the assertion has content: it measures the 500-node linear
+    mass grid's ability to resolve seven bin edges it straddles.  Measured
+    residuals at the default config: 0.15% (xi = 0), 0.05% (seed 0), 0.28%
+    (seed 1), 0.24% (seed 3), so rtol 1e-2 is a real gate with ~4x headroom.
+    """
     _require_tinygp_transforms()
     model = get_model("gppop")
     theta = jnp.asarray(get_fixed_population_params("gppop"))
-    amp = jnp.exp(theta[0])
-    ls = jnp.exp(theta[1])
-    xi = theta[2:2 + model.M]
-    logn = model._bin_log_rates(amp, [ls, ls], xi)
 
-    mg, qg = get_mass_grid(), get_q_grid()
-    M1, Q = jnp.meshgrid(mg, qg, indexing="ij")
-    pun = model._binned_density(M1.ravel(), Q.ravel(),
-                                jnp.zeros(M1.size), logn).reshape(M1.shape)
-    p = pun / model._mass_norm(logn)
-    integral = jnp.trapezoid(jnp.trapezoid(p, qg, axis=1), mg)
-    np.testing.assert_allclose(float(integral), 1.0, rtol=1e-5)
+    m1g = _edge_aligned_masses(model)
+    qg = np.linspace(1e-9, 1.0, 2001)   # 0 excluded: the density carries 1/(q m1)
+    M1, Q = np.meshgrid(m1g, qg, indexing="ij")
+    for seed in (None, 0, 1, 3):
+        logn = _bin_log_rates(model, theta, seed)
+        pun = np.asarray(model._binned_density(
+            jnp.asarray(M1.ravel()), jnp.asarray(Q.ravel()),
+            jnp.zeros(M1.size), logn)).reshape(M1.shape)
+        p = pun / float(model._mass_norm(logn))
+        integral = _trapezoid(_trapezoid(p, qg, axis=1), m1g)
+        np.testing.assert_allclose(integral, 1.0, rtol=1e-2,
+                                   err_msg=f"seed={seed}")
+
+
+def test_gppop_mz_mass_quadrature_resolves_the_bin_edges():
+    """``gppop_mz`` has no ``_mass_norm``: its z bins ARE the free-form R(z) and
+    the model is deliberately left unnormalised over z.  What an independent grid
+    can still pin is that the library's default (m1, q) quadrature resolves the
+    bin edges of the larger (mass x z) bin table -- integrate the SAME density at
+    a fixed z on the library grid and on an edge-aligned grid and require the two
+    to agree.  Measured disagreement at the default config: 0.15%.
+    """
+    _require_tinygp_transforms()
+    model = get_model("gppop_mz")
+    theta = jnp.asarray(get_fixed_population_params("gppop_mz"))
+    logn = _bin_log_rates(model, theta, seed=0)
+    zv = 0.1                                   # inside the first z bin
+
+    lib_m, lib_q = np.asarray(get_mass_grid()), np.asarray(get_q_grid())
+    ref_m = _edge_aligned_masses(model)
+    ref_q = np.linspace(1e-9, 1.0, 2001)
+
+    def integrate(mg, qg):
+        M1, Q = np.meshgrid(mg, qg, indexing="ij")
+        pun = np.asarray(model._binned_density(
+            jnp.asarray(M1.ravel()), jnp.asarray(Q.ravel()),
+            jnp.full(M1.size, zv), logn)).reshape(M1.shape)
+        return _trapezoid(_trapezoid(pun, qg, axis=1), mg)
+
+    np.testing.assert_allclose(integrate(lib_m, lib_q), integrate(ref_m, ref_q),
+                               rtol=1e-2)
 
 
 def test_gppop_rate_constant_within_bin():

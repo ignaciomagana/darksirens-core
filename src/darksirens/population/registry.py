@@ -813,6 +813,50 @@ def population_m1_support_max(model) -> float:
     return float(M_HI)
 
 
+def ensure_pairing_grid_covers(
+    pop_model: str,
+    *,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> None:
+    """Size and check the opt-in pairing m1 grid against a model's m1 support.
+
+    ``DARKSIRENS_GW_PAIRING_M1_GRID`` replaces the exact per-sample pairing
+    normaliser with an interpolant on a static log grid ending at
+    ``pairing_m_hi`` (default 200), and ``jnp.interp`` CLAMPS above that end.
+    Three registered models have support to 300 Msun, so with the knob on every
+    200 < m1 <= 300 sample silently reuses the m1 = 200 normaliser: measured 0.41
+    in log density, one-signed across the whole high-mass tail, at a
+    sampler-reachable theta.  The two helpers that prevent it
+    (:func:`~darksirens.population.utils.size_pairing_grid_to_support` and
+    :func:`~darksirens.population.utils.assert_pairing_grid_covers_support`) had
+    no caller in this tree.  This is the one place that resolves a population
+    model by name, so it is where they belong.
+
+    Idempotent, and a no-op when the grid is disabled (the default).  Call it
+    once per analysis, after the model name is resolved and before the first
+    likelihood evaluation.
+    """
+    from .utils import (
+        assert_pairing_grid_covers_support,
+        normalization_grid_settings,
+        size_pairing_grid_to_support,
+    )
+
+    if normalization_grid_settings().pairing_m1_grid is None:
+        return
+    model = get_model(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
+    support = population_m1_support_max(model)
+    size_pairing_grid_to_support(support)
+    assert_pairing_grid_covers_support(support, model_name=pop_model)
+
+
 def get_fixed_population_params(
     pop_model: str,
     *,

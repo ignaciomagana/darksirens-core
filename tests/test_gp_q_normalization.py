@@ -30,13 +30,14 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+
+from darksirens.population.gp import build_gp_model, _coarse_axis_grid, _ZNORM_HI
+from darksirens.population.utils import get_chi_grid, get_q_grid
+from darksirens.cosmology._grid import zMax
 
 # numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
 _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-import pytest
-
-from darksirens.population.gp import build_gp_model, _ZNORM_HI
-from darksirens.cosmology._grid import zMax
 
 # Some parametric test modules insert a tinygp STUB into sys.modules; GP models
 # then cannot evaluate.  Follow the registry-golden convention: a stub (no
@@ -88,11 +89,33 @@ def test_conditional_q_integral_is_unity(name):
     chi_in = "chi" in model.gp_axes
     z_in = "z" in model.gp_axes
 
-    qg = jnp.linspace(0.0, 1.0, 400)
-    cg = jnp.linspace(-1.0, 1.0, 200)
+    # Integrate on the model's OWN probability-axis quadrature.  The GP
+    # normaliser deliberately uses a coarse (q, chi) grid whenever the full
+    # tensor product would be intractable (``JointGPPopulation._normalise``), so
+    # an independent fine grid measures that documented coarse-grid choice on top
+    # of the m1 interpolation this test is about, and the two cannot be told
+    # apart: on 400 q-nodes x 200 chi-nodes, gp3d_q_chi_z at m1 = m_min +
+    # 0.25 dm_min integrates to 0.875 no matter how the m1 table is built,
+    # because the 24-node coarse q grid cannot resolve a q-support only 0.17
+    # wide.  (That is a separate, unfixed limitation of the coarse grid near
+    # m_min; it is not what these probes are for.)
+    coarse = (z_in and len(model._prob_gp) >= 2) or len(model._prob_gp) >= 3
+    qg = _coarse_axis_grid("q") if coarse else get_q_grid()
+    cg = _coarse_axis_grid("chi") if coarse else get_chi_grid()
     zs = (0.05, 1.0, 4.5) if z_in else (0.3,)
 
-    for m1v in (8.3, 21.7, 55.1):
+    # Probes ACROSS THE LOW-MASS TAPER TOE, where the q-normalisation table used
+    # to be a fixed 64-node log grid over [2, 200] that knew nothing about the
+    # sampled m_min/dm_min.  N(m1) turns on there like exp(-dm_min/(m1 - m_min)),
+    # so log-linear interpolation across one cell of that table was unrelated to
+    # the true value: measured for gp1d_q at the shipped fiducial, m1 = 6.5 gave
+    # int p_gp(q|m1) dq = 1.91, and at m_min = 8, dm_min = 2 (interior to the
+    # priors) m1 = 8.16 gave 2.4e+25.  With support-following nodes the same
+    # probes are 1.006 and 1.005.
+    m_min, dm_min = float(P("m_min")), float(P("dm_min"))
+    toe = [m_min + f * dm_min for f in (0.25, 0.5, 1.0, 2.0)]
+
+    for m1v in toe + [8.3, 21.7, 55.1]:
         mass = model._baseline_mass(m1v, P("alpha_mass"), P("m_min"),
                                     P("dm_min"), P("m_max"), P("dm_max"))
         for zv in zs:
@@ -113,11 +136,13 @@ def test_conditional_q_integral_is_unity(name):
                 pgp = dens / (rate * mass * spin)
                 integ = jnp.trapezoid(pgp, qg)
 
-            # Taper-toe pinch: at the lowest m1 the norm curves steeply in
-            # log-m1 as the q-support turns on, so the fixed 64-node log-m1
-            # interpolation carries a few-% residual there; m1 >= 20 is <1%.
-            rtol = 6e-2 if m1v < 12.0 else 2e-2
-            assert abs(float(integ) - 1.0) < rtol, (name, m1v, zv, float(integ))
+            # One tolerance everywhere now, toe included.  The old file granted
+            # rtol = 6e-2 below m1 = 12 and called the excess "a few-% residual
+            # at the taper toe"; it was up to 25 orders of magnitude at interior
+            # prior points, and the grant is what hid it.  Measured worst
+            # residual over these probes and all four models: 5.8e-3, at
+            # m1 = m_min + 0.25 dm_min.
+            assert abs(float(integ) - 1.0) < 2e-2, (name, m1v, zv, float(integ))
 
 
 @_NEED_TINYGP

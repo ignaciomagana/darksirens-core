@@ -93,7 +93,8 @@ _JITTER_REL = 1e-4
 # z-independent integrals use the full normalisation grids for accuracy.
 _KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
 _KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
-_M1NORM_N = 64                             # log-m1 nodes for m1-conditional q-norm
+_M1NORM_N = 64                             # log-m1 nodes above the taper toe
+_M1NORM_TOE_N = 48                         # log-m1 nodes across [m_min, m_min+dm_min]
 # The z-normalisation interpolation grid is FROZEN above _ZNORM_HI: GP model
 # evaluations at z > _ZNORM_HI silently reuse the norm at the grid edge
 # (library-review SEV-3). Parametric models are unaffected (analytic in z).
@@ -102,13 +103,25 @@ _M1NORM_N = 64                             # log-m1 nodes for m1-conditional q-n
 # so the GP normaliser can never freeze below the redshifts the rest of the
 # pipeline samples (the old default of 3.0 silently froze z in (3, 5]).
 # DARKSIRENS_GP_ZNORM_HI still overrides explicitly; ``_ZNORM_N`` tracks
-# ``_ZNORM_HI`` to hold node density fixed (8/z-unit: 40 nodes at the z=5
-# default, 24 at the 3.0 floor).
+# ``_ZNORM_HI`` so the node density is held fixed.  That density is counted in
+# the GP COORDINATE log1p(z) (see ``_znorm_nodes``), the only place a length
+# scale is defined, and against the SHORTEST one the prior admits, ``_Z_LS_FLOOR``:
+# four INTERVALS per length scale, i.e. 145 nodes over log1p(5) = 1.792 at the
+# default ceiling.  The old rule (8 nodes per z-unit, 40 at zMax = 5) was one
+# node per length scale at the floor and could not resolve what it integrated:
+# measured on each model's own quadrature at log_ls_z = its prior floor, the
+# worst |int p_gp - 1| over z in [0.01, 4.5] was 0.90 (linear-in-z nodes), 0.20
+# (log1p nodes, 40) and 0.008 (log1p nodes, 145).  It is paid for: the z
+# tabulation is O(_ZNORM_N * G * M) per proposal and 40 -> 145 costs 2.6x
+# forward / 3.2x reverse on gp3d_q_chi_z (CPU, 512 queries).  It is independent
+# of the number of query points, so on a production call it is amortised over
+# every event and injection sample.
+_Z_LS_FLOOR = 0.05
 if "DARKSIRENS_GP_ZNORM_HI" in os.environ:
     _ZNORM_HI = float(os.environ["DARKSIRENS_GP_ZNORM_HI"])
 else:
     _ZNORM_HI = max(3.0, float(zMax))
-_ZNORM_N = max(24, int(round(8.0 * _ZNORM_HI)))
+_ZNORM_N = max(24, 1 + math.ceil(4.0 * math.log1p(_ZNORM_HI) / _Z_LS_FLOOR))
 
 
 def _coarse_axis_grid(axis: str):
@@ -116,20 +129,60 @@ def _coarse_axis_grid(axis: str):
     return jnp.linspace(lo, hi, _KD_N[axis])
 
 
-def _m1norm_grid():
+def _znorm_nodes():
+    """Tabulation nodes for the z-conditional normaliser, uniform in log1p(z).
+
+    Same argument as ``AxisCfg.nodes_phys`` for the z axis, which this failed to
+    carry over: the GP coordinate is ``log1p(z)`` (``_to_coord``) and ``ls_z``
+    is measured there, with a prior floor of 0.05.  Nodes uniform in z leave a
+    COORDINATE spacing of 0.121 at z = 0 -- where essentially every detected
+    event sits -- against that floor, so log Z(z) was linearly interpolated
+    across features the numerator exp(f) resolves exactly at the query z, and the
+    conditional density stopped integrating to 1 (measured on the model's own
+    quadrature: int p_gp dq = 1.90 at z = 0.30 for gp2d_q_z at the ls_z floor,
+    0.93 at z = 0.10; 0.999 after this change).
+    """
+    return jnp.expm1(jnp.linspace(0.0, math.log1p(_ZNORM_HI), _ZNORM_N))
+
+
+def _m1norm_grid(m_min, dm_min):
     """Log-spaced m1 nodes for the m1-conditional q-normalisation.
 
     The four ``q``-in-GP / ``m1``-not-in-GP models normalise the GP factor over
     ``q`` (and ``chi``) *conditional on m1*: the ``m2 = q*m1`` secondary cut ties
     the taper to the query m1, so the norm is a smooth 1-D function of m1 (like
     the z-conditioning idiom).  It is tabulated on these nodes once per proposal
-    and interpolated in ``log m1`` per query (nodes are log-uniform).  The span
-    matches the mass normalisation grid (floored at 2.0, the ``m_min`` prior
-    lower bound, so every node can host a physical m2 = q*m1 >= m_min).
+    and interpolated in ``log m1`` per query.
+
+    THE NODES FOLLOW THE SUPPORT, they are not a fixed table.  N(m1) is exactly
+    zero at m1 = m_min and turns on across the low-mass taper toe
+    ``[m_min, m_min + dm_min]`` like ``exp(-dm_min/(m1 - m_min))``: fifteen
+    orders of magnitude inside ONE cell of the old fixed 64-node [2, 200] table,
+    whose spacing knew nothing about the sampled ``m_min``/``dm_min``.  Linearly
+    interpolating log N across that ramp is not an approximation -- the numerator
+    applies the same taper exactly at the query, so the interpolation error IS
+    the density error.  Measured with the fixed table at m_min = 8, dm_min = 2
+    (interior to the priors, at the fiducial xi = 0), int p_gp(q|m1) dq reached
+    5.5e+26 at m1 = 8.16.  Splitting the tabulation into ``_M1NORM_TOE_N`` nodes
+    across the toe and ``_M1NORM_N`` above it costs only a wider taper broadcast:
+    the field itself is m1-independent on this branch and is computed once as
+    ``(G,)``.
+
+    ABOVE the toe the nodes are log-spaced in ``m1 - m_min``, not in ``m1``.
+    There the taper is fully on and what still moves N(m1) is the width of the
+    q-support, ``1 - m_min/m1 = (m1 - m_min)/m1``, so log N is nearly LINEAR in
+    log(m1 - m_min) and the interpolant is near-exact in the one place log-m1
+    nodes were still too coarse at this node count: at m_min = 10, dm_min = 0.05
+    (both interior to the priors) log-m1 spacing left int p_gp(q|m1) dq = 2.77 at
+    m1 = m_min + 4 dm_min, against 1.03 here.
     """
     s = normalization_grid_settings()
-    return jnp.exp(jnp.linspace(jnp.log(max(s.m_lo, 2.0)),
-                                jnp.log(s.m_hi), _M1NORM_N))
+    m_lo = jnp.maximum(jnp.asarray(m_min, dtype=float), _LOGSAFE)
+    width = jnp.maximum(jnp.asarray(dm_min, dtype=float), _LOGSAFE)
+    toe = jnp.exp(jnp.linspace(jnp.log(m_lo), jnp.log(m_lo + width), _M1NORM_TOE_N))
+    u_hi = jnp.maximum(s.m_hi - m_lo, 2.0 * width)
+    above = m_lo + jnp.exp(jnp.linspace(jnp.log(width), jnp.log(u_hi), _M1NORM_N))
+    return jnp.concatenate([toe, above[1:]])
 
 
 def _interp2_log(ltab, zg, m1g, z_q, m1_q):
@@ -140,14 +193,18 @@ def _interp2_log(ltab, zg, m1g, z_q, m1_q):
     Memory is O(N_query) -- the table is gathered at the bracketing nodes, never
     outer-producted against the queries -- and the map is differentiable exactly
     like ``jnp.interp`` (grad flows through the table values and the edge-clamped
-    weights).  The m1 axis is interpolated in ``log m1`` because ``m1g`` is
-    log-uniform.
+    weights).  Each axis is interpolated in its own GP COORDINATE -- ``log m1``
+    and ``log1p(z)`` -- because that is where the nodes are uniform and where the
+    length scales that the table has to resolve are defined (see
+    ``_znorm_nodes``).
     """
     lm1g = jnp.log(m1g)
     lm1q = jnp.log(jnp.clip(m1_q, _LOGSAFE, None))
+    lzg = jnp.log1p(zg)
+    lzq = jnp.log1p(z_q)
 
-    iz = jnp.clip(jnp.searchsorted(zg, z_q) - 1, 0, zg.shape[0] - 2)
-    wz = jnp.clip((z_q - zg[iz]) / (zg[iz + 1] - zg[iz]), 0.0, 1.0)
+    iz = jnp.clip(jnp.searchsorted(lzg, lzq) - 1, 0, lzg.shape[0] - 2)
+    wz = jnp.clip((lzq - lzg[iz]) / (lzg[iz + 1] - lzg[iz]), 0.0, 1.0)
 
     im = jnp.clip(jnp.searchsorted(lm1g, lm1q) - 1, 0, lm1g.shape[0] - 2)
     wm = jnp.clip((lm1q - lm1g[im]) / (lm1g[im + 1] - lm1g[im]), 0.0, 1.0)
@@ -164,8 +221,9 @@ def _znorm_interp(eval_norm_fn, z_query):
     forms the explicit cross-kernel ``k(coords, Z)`` of shape (G, M) before its
     matvec; batching that with ``vmap`` materialises the whole (N_z, G, M) cube at
     once, which for the registered ``gp4d`` model (G = 48*24*24 = 27648 coarse
-    normalisation nodes, M = 10*8*10*8 = 6400 inducing points, N_z = 40 at the
-    default zMax = 5) is 40*27648*6400*8 B = 52.74 GiB of XLA scratch -- measured
+    normalisation nodes, M = 10*8*10*8 = 6400 inducing points, N_z = 40 when
+    these figures were taken and 145 now) is 40*27648*6400*8 B = 52.74 GiB of XLA
+    scratch and scales linearly in N_z from there -- measured
     as ``temp_size_in_bytes`` for a query of only 8 points, i.e. before any event
     or injection data enters, so no ``--sel_batch_size``/auto-blocking setting can
     reduce it: an immediate OOM on any GPU in the fleet.  ``lax.map`` keeps one
@@ -182,9 +240,10 @@ def _znorm_interp(eval_norm_fn, z_query):
     forward values and gradients.
     """
     import jax
-    zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+    zg = _znorm_nodes()
     norms = jax.lax.map(jax.checkpoint(eval_norm_fn), zg)
-    return jnp.exp(jnp.interp(z_query, zg, jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))))
+    return jnp.exp(jnp.interp(jnp.log1p(z_query), jnp.log1p(zg),
+                              jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))))
 
 
 def _to_coord(axis: str, m1, q, chi, z):
@@ -256,7 +315,7 @@ _DEFAULT_AXES = {
     # analysis range.  The node COUNT is deliberately unchanged: M is the product
     # over axes, so gp4d would go from 6400 to 11200 inducing points.
     "z":   AxisCfg("z",   "rbf",       8, 0.0, max(1.5, float(zMax)),
-                   math.log(0.05), math.log(0.8)),
+                   math.log(_Z_LS_FLOOR), math.log(0.8)),
 }
 
 # Shared prior bounds.
@@ -577,7 +636,7 @@ class JointGPPopulation:
 
         m1_cond = ("q" in self._prob_gp) and ("m1" not in self.gp_axes)
         if m1_cond:
-            m1g = _m1norm_grid()                             # (Nm1,), log-uniform
+            m1g = _m1norm_grid(m_min, dm_min)                # (Nm1,), support-following
             grid_shape = [g.shape[0] for g in grids]
 
             def _eval_norm(zval):
@@ -603,7 +662,7 @@ class JointGPPopulation:
 
             if self._z_in_gp:
                 import jax
-                zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+                zg = _znorm_nodes()
                 # lax.map + checkpoint, not vmap: batching the (Nm1, G) lattice
                 # AND the (G, M) cross-kernel inside over all z nodes at once is
                 # what made gp4d need 52.7 GiB of scratch (see _znorm_interp).
@@ -803,14 +862,15 @@ class AdditiveGPPopulation:
             return Z, jnp.stack(cs)
 
         if self._z_in_gp:
-            zg = jnp.linspace(0.0, _ZNORM_HI, _ZNORM_N)
+            zg = _znorm_nodes()
+            lzg, lzq = jnp.log1p(zg), jnp.log1p(z)
             # jax.checkpoint is REQUIRED, not cosmetic (see _znorm_interp): a scan
             # keeps its per-iteration residuals for the transpose, so reverse mode
             # would otherwise tape every z node's (G, M) cross-kernel for all six
             # terms.
             Zg, Cg_terms = jax.lax.map(jax.checkpoint(_grid_quant), zg)
-            c_at = [jnp.interp(z, zg, Cg_terms[:, j]) for j in range(len(term_built))]
-            norm = jnp.exp(jnp.interp(z, zg,
+            c_at = [jnp.interp(lzq, lzg, Cg_terms[:, j]) for j in range(len(term_built))]
+            norm = jnp.exp(jnp.interp(lzq, lzg,
                                       jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
         else:
             # No term carries z (e.g. gp_separable), so _grid_quant is constant in
