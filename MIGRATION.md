@@ -24,6 +24,9 @@ behind the same gates. The frozen legacy repository is read-only.
 | 8A | public counterpart/bright-siren composition | `5256141e00a2d96a72b9cbf2182a77174c8c269e` |
 | 8B | explicit sampler-facing `InferenceTarget` | `2e98ca1f1a67cf688f8da8444c3747d446a4e91d` |
 | 8C | explicit host-density/redshift extension seam | `875a949d5a9f5ffb89f3a64cad030dcfc6daf6a2` |
+| 12A | generic `CompletionCurves` composition seam | `8b9dc64` (direct to `main`) |
+| 12B | footprint-aware field catalog estimator | `bb4812d` (direct to `main`) |
+| review follow-up | guards, independent anchors, inherited-defect fixes | branch `fix/review-followup` |
 
 Exact per-slice heads, trees, workflow runs and parity probes are recorded in
 `ignaciomagana/darksirens-rebuild/phases/`.
@@ -100,3 +103,33 @@ Phase 8D is packaging/API/install/example closure only. It must make no
 scientific arithmetic change relative to accepted 8C. Its acceptance is recorded
 in the rebuild control repository; after merge, the resulting `main` tree is the
 core baseline from which companion repositories may begin.
+
+## Post-freeze work
+
+Phases 12A and 12B added two narrow composition seams (completion curves;
+footprint fractions and the field numerator) without touching the accepted
+evaluators. Neither has a dedicated workflow; both are covered by the broad
+regression suite.
+
+The review follow-up implemented the confirmed findings of an adversarial parity
+review against the frozen reference. It is deliberately not parity-neutral in
+four places, each chosen over the frozen behavior for a stated reason:
+
+- the complete-catalog empty-row default returns to the frozen `zero`; the
+  reconstruction had flipped it to `volume`, the one true parity drift found;
+- the GP z-conditional normaliser is tabulated in `log1p(z)` on 145 nodes
+  instead of uniformly in z on 40, and the m1-conditional q-normaliser follows
+  the sampled taper toe. Both defects are inherited from the reference; the
+  fixes cost roughly 3x per proposal on z-conditioned GP models;
+- `ang2pix_ring` now matches healpy at ring boundaries, the polar caps and
+  right ascensions just below a multiple of 2 pi;
+- inputs the reference refused and the reconstruction had silently accepted
+  (out-of-grid cosmology priors, unknown prior or constraint kinds, mismatched
+  PE/injection contracts, uncentered or view-dependent host marks, a short
+  redshift-parameter vector, a non-divisible selection batch) now raise.
+
+Everything else in that branch is a test or a probe: independent anchors against
+astropy, healpy, scipy quadrature and hand-computed expectations; real TinyNS,
+Dynesty and NumPyro runs; a Phase 4 spectral probe that now covers the
+out-of-table distance mask; and coverage for the `@md` rate evolution and the
+`in_prior_v2` fiducial set.
