@@ -19,7 +19,14 @@ def dynesty_diagnostics_dir(opts):
 
 def _load_plotting():
     import dynesty.plotting as dyplot
-    import matplotlib
+
+    try:
+        import matplotlib
+    except ImportError as exc:
+        raise ImportError(
+            "dynesty diagnostics need matplotlib; install the 'dynesty' extra "
+            "(pip install 'darksirens[dynesty]')"
+        ) from exc
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

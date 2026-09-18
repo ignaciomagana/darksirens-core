@@ -32,6 +32,8 @@ gp = [
 ]
 dynesty = [
   "dynesty==2.1.4",
+  # dynesty_diagnostics imports matplotlib lazily; dynesty itself does not ship it.
+  "matplotlib",
 ]
 numpyro = [
   "numpyro==0.17.0",
