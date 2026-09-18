@@ -160,6 +160,81 @@ Phase 8D acceptance and the final post-merge integrity run are recorded in
 `ignaciomagana/darksirens-rebuild`; this document intentionally does not predict
 run IDs before those exact-head gates exist.
 
+## Phases 12A and 12B
+
+PR #8 (squash merge `8b9dc64`) and PR #9 (squash merge `bb4812d`), each with a
+control record in `ignaciomagana/darksirens-rebuild` (`phases/12A_*`,
+`phases/12B_*`), adding `build_incomplete_catalog_prior_state_from_curves`,
+`catalog/field.py` and `selection/footprint.py`. Accepted by
+`tests/test_completion_curve_composition.py` (the curve seam reproduces the
+accepted incomplete-catalog state exactly) and
+`tests/test_phase12b_field_footprint.py`. No dedicated workflow; the broad
+regression suite covers both.
+
+## Review follow-up
+
+A 130-agent adversarial review against the frozen reference confirmed 40
+findings; the stacked PRs #10, #16, #12, #13, #14 and #15 implement them, merged
+in that order. Acceptance is mutation-based: every fix ships with a test that
+fails on the review's own mutant, verified in the PR history. The load-bearing
+ones:
+
+```text
+dV_of_z without 1/E(z)             astropy anchor fails, ratio 4.95
+ddL_of_z one-off in (1+z)          finite-difference anchor fails, ratio 0.91
+m1src = m1det (no source frame)    pinned weight fails (0.58 rel), dlnL/dH0 0.070 -> 0.009
+distance mask removed              Phase 4 probe fails, max rel 3.1; unit anchor fails
+GP z nodes uniform in z            all 9 z-normalisation checks fail (up to 1.19)
+fixed 64-node m1 table             toe probes fail (1.25 at m1 = m_min + 0.25 dm_min)
+24-node q lattice, m1-conditional  independent-grid check fails (0.876 at the same probe)
+ang2pix_ring pre-fix               12 of 49 healpy parity cases fail
+soft guard without double-where    Neff = inf gradient is NaN
+```
+
+Parity was re-established after the changes: the Phase 2 cosmology probe
+(`compare_cosmology_probe.py`, rtol 0) and the widened Phase 4 spectral probe
+(`compare_spectral_probe.py`, rtol 1e-12) both pass legacy against candidate,
+every other `tools/probe_*.py` candidate output is byte-identical to the
+pre-branch tree, and `tests/data/population_registry_golden.json` gained two
+`@md` entries with every pre-existing entry unchanged.
+
+Local measurement on the validated stack with every optional backend installed
+(TinyNS, Dynesty, NumPyro, healpy, Matplotlib), on the final tree of the stack:
+714 passed, 1 skipped (the golden-regeneration guard), against 543 passed,
+1 skipped before the stack. The reproducible record is the GitHub
+Actions matrix on the PR heads. `phase8-regression` installs the same optional
+stack, and the dedicated `real-backends` workflow runs the end-to-end TinyNS,
+Dynesty and NumPyro tests, the real Dynesty checkpoint round-trip and the
+healpy parity suite and fails on any skip. Every PR-triggered workflow passed
+on every head below; the load-bearing runs:
+
+```text
+main after #10 (4c0e960)  reference-integrity          35326494368  SUCCESS
+main after #16 (8bb1fc2)  reference-integrity          35326699909  SUCCESS
+
+#12 head b7304ad          phase4-spectral-likelihood   35327465851  SUCCESS
+                          phase5-catalog-dark-bright   35327465922  SUCCESS
+                          phase8-regression            35327466013  SUCCESS
+#13 head 2c8e646          phase3-population            35327467822  SUCCESS
+                          phase4-spectral-likelihood   35327467787  SUCCESS
+                          phase5-catalog-dark-bright   35327467821  SUCCESS
+                          phase8-regression            35327467785  SUCCESS
+#14 head f5e070c          phase7c3-healpix-geometry    35327467109  SUCCESS
+                          phase8-regression            35327467040  SUCCESS  714 passed, 1 skipped
+                          real-backends                35327467082  SUCCESS
+#15 head 9a87ffb          phase2-foundation            35327952962  SUCCESS
+                          phase4-spectral-likelihood   35327952991  SUCCESS
+                          phase5-catalog-dark-bright   35327952955  SUCCESS
+                          phase7-regression            35327952966  SUCCESS
+                          phase8-regression            35327952967  SUCCESS  714 passed, 1 skipped
+                          real-backends                35327953066  SUCCESS  75 passed, 0 skipped
+```
+
+The commit that records this table changes no code, so the `9a87ffb` runs
+stand for the final tree of the stack.
+
+Deliberate numerics changes and their reach are recorded in `MIGRATION.md`.
+
 ## Permanent firewall
 
 The broad Phase-8 regression statically parses `src/darksirens/**/*.py` and

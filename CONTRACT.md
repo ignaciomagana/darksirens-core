@@ -99,6 +99,36 @@ result = ds.infer(
 Ordinary users should not need low-level GW event structs, catalog internals,
 parameter decoders or sampler adapters.
 
+### Public option contract
+
+- `Cosmology` accepts `Om0`, `w0` and `wa` only inside the tabulated
+  distance-grid support (`Om0` [0.1575, 0.4575], `w0` [-2.25, 0.25], `wa`
+  [-2.5, 2.5], closed intervals); `H0` is unrestricted. Out-of-grid values or
+  bounds raise at construction.
+- `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
+  default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
+  robustness approximation. `empty_policy` is illegal with any other
+  composition.
+- `infer(..., selection_neff_guard="auto"|"hard"|"soft",
+  max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None)` are
+  likelihood options, never sampler options. `auto` resolves to `soft` for
+  NumPyro and `hard` otherwise. They are refused for an `InferenceTarget`.
+- Ordinary `infer` results carry `log_prior_volume_fraction` and, for a finite
+  `logZ`, `logZ_corrected = logZ - log_prior_volume_fraction`. The raw `logZ`
+  is exactly the sampler's number.
+- `infer` refuses a PE store and an injection store whose `contract_hash`
+  attributes differ (stores without one are exempt) and warns when their
+  declared cosmologies differ.
+- `ParameterPlan.prior_kinds` are `(kind, loc, scale)` triples with `kind` in
+  `{uniform, normal, lognormal, beta}`; joint-constraint kinds are
+  `{ordered_le, conditional_upper, simplex, ball3}` with arity 2/2/2/3. The
+  prior transform raises on any other kind. Inside core, `None` for `loc` or
+  `scale` keeps the `ParamSpec` meaning: the standard `(0, 1)` defaults, which
+  core's own registries never rely on. At the `InferenceTarget` seam a
+  non-uniform kind must state `loc` and `scale` explicitly (finite, `scale`
+  positive); `beta` consumes only its shape (`scale`), so its `loc` may be
+  omitted.
+
 ## Specialized extension seams
 
 ### `InferenceTarget`
@@ -119,6 +149,23 @@ This seam knows nothing about specialized physics.
 protocol, parameter-plan composition and `make_host_density_target`. A companion
 owns its opaque redshift/field/count state; core continues to own GW population
 weighting, Jacobians, PE reduction, selection reduction, priors and samplers.
+
+### Completion-curve composition seam
+
+`darksirens.catalog.models.build_incomplete_catalog_prior_state_from_curves`
+builds the accepted ordinary conditional prior from an already-constructed
+`darksirens.catalog.completeness.CompletionCurves` object. Core owns the kernel,
+the finite-depth observed-count factor, the additive missing density and the row
+normalization; the caller owns the completeness prescription that produced the
+curves.
+
+### Footprint and field seam
+
+`darksirens.selection.footprint` composes one externally supplied coverage
+fraction per standardized catalog row into the magnitude-selection completeness
+curves, and `darksirens.catalog.field` evaluates the complementary field-weighted
+(unnormalized additive) host-density numerator. Raw map parsing, HEALPix
+degradation and the construction of the row fractions belong to survey packages.
 
 There is no model-name discovery, entry-point registration or callback registry.
 
@@ -143,7 +190,18 @@ public function is called.
   the scientific contract;
 - ordinary isotropic behavior stays on the already validated compute path;
 - sampler zero-free-parameter exact evidence occurs before backend validation or
-  optional-backend import.
+  optional-backend import;
+- cosmology priors lie inside the tabulated distance-grid support, so no sample
+  is silently `-inf` from an unrepresentable `(Om0, w0, wa)`;
+- a complete-catalog row without galaxies contributes zero host mass unless the
+  volume fallback is requested explicitly;
+- GP z-conditional and m1-conditional normalisers are tabulated in the GP
+  coordinate (`log1p(z)`) and on nodes that follow the sampled mass support, so
+  the conditional density integrates to one inside the prior box;
+- `ang2pix_ring` reproduces `healpy.ang2pix(..., nest=False)` exactly,
+  including ring-boundary and polar-cap rounding;
+- marked-host PE and selection views share one catalog view and one mark table,
+  or one survey-wide reference table, and mark tables are z-centered.
 
 ## Packaging contract
 
@@ -152,5 +210,6 @@ TinyNS commit used by the legacy campaign, because TinyNS is the public default
 sampler. SciPy is a base dependency because ordinary completeness evaluation
 uses `scipy.special` at runtime.
 
-GP models, Dynesty, NumPyro and gwcat prior support are explicit extras. Raw
-survey/LSS/lensing packages are never package dependencies of core.
+GP models, Dynesty, NumPyro and gwcat prior support are explicit extras; the
+Dynesty extra also carries Matplotlib because its optional run diagnostics plot.
+Raw survey/LSS/lensing packages are never package dependencies of core.
