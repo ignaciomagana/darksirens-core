@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from darksirens.catalog.hosts import build_marked_incomplete_catalog_prior_state
+from darksirens.catalog.hosts import (
+    build_marked_incomplete_catalog_prior_state,
+    require_shared_host_view,
+)
 from darksirens.catalog.models import eval_incomplete_catalog_prior_state_vmap
 from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
@@ -40,10 +43,13 @@ def marked_dark_siren_log_likelihood(
     """Evaluate the conditional incomplete-catalog hierarchy with host marks.
 
     The same marked redshift model is used for PE samples and detected
-    injections.  ``host_marks_pe`` and ``host_marks_sel`` may be different
-    compact row views, but should carry the same optional survey-wide reference
-    table when the missing-host efficiency must be view-independent.
+    injections.  The two seams must share one catalog view and one mark table,
+    or both marks must carry the same survey-wide reference table: without one
+    of those, ``mu_miss(z|eta)`` differs between the numerator and beta and eta
+    is biased.  ``require_shared_host_view`` enforces this eagerly.
     """
+
+    require_shared_host_view(catalog_pe, host_marks_pe, catalog_sel, host_marks_sel)
 
     state_pe = build_marked_incomplete_catalog_prior_state(
         cosmology,

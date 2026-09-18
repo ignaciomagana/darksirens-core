@@ -333,3 +333,47 @@ def test_redshift_model_contract_requires_parameter_plan_and_scalar_auxiliary():
             selection_neff_soft_guard=True,
             max_likelihood_variance=MAX_VAR,
         )
+
+
+def test_redshift_params_length_must_match_the_declared_plan():
+    """JAX clamps out-of-bounds indexing, so a short vector silently aliases."""
+    pe, selection, nsamp, nsel = _runtime_events()
+    base = _base_analysis()
+
+    class IndexingModel(VolumeRedshiftModel):
+        def log_auxiliary_likelihood(self, parameters, state):
+            self.aux_calls += 1
+            self.aux_state = state
+            return parameters[0] + parameters[1] + parameters[2]
+
+    def call(params):
+        return host_density_log_likelihood(
+            CosmologyParameters(67.74, 0.3075, -1.0, 0.0),
+            np.asarray(base.parameters.fixed_population),
+            params,
+            pe,
+            None,
+            selection,
+            None,
+            1,
+            nsamp,
+            float(nsel),
+            redshift_model=IndexingModel(_plan(("a", "b", "c"))),
+            pop_model=base.population.model_name,
+            selection_neff_soft_guard=True,
+            max_likelihood_variance=MAX_VAR,
+        )
+
+    for bad in (
+        np.array([0.5, -0.2]),
+        np.array([0.5, -0.2, 0.9, 0.1]),
+        np.zeros((3, 1)),
+        np.asarray(0.5),
+    ):
+        with pytest.raises(ValueError, match=r"redshift_params must have shape \(3,\)"):
+            call(bad)
+
+    expected = _direct_spectral(base, pe, selection, nsamp, nsel) + 1.2
+    np.testing.assert_array_equal(
+        np.asarray(call(np.array([0.5, -0.2, 0.9]))), np.asarray(expected)
+    )

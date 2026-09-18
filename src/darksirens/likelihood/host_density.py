@@ -98,8 +98,18 @@ def host_density_log_likelihood(
     ordinary PE/selection reduction.
     """
 
-    _parameter_spec(redshift_model)
+    plan = _parameter_spec(redshift_model)
     redshift_params = jnp.asarray(redshift_params)
+    # JAX clamps out-of-bounds integer indexing, so a short vector would alias
+    # the model's trailing parameters onto the last supplied value instead of
+    # raising.  Mirror the theta check make_host_density_target performs.
+    n_redshift = len(plan.labels)
+    if redshift_params.ndim != 1 or int(redshift_params.shape[0]) != n_redshift:
+        raise ValueError(
+            f"redshift_params must have shape ({n_redshift},) to match the "
+            f"{n_redshift} labels redshift_model.parameter_spec() declares, got "
+            f"{tuple(redshift_params.shape)}"
+        )
 
     def prior_pe(z, pixel, _state):
         return redshift_model.log_density(

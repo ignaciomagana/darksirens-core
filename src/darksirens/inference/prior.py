@@ -4,6 +4,18 @@ from __future__ import annotations
 
 import numpy as np
 
+# The per-parameter families and the index arity of each joint cube map this
+# transform implements.  Anything outside these vocabularies used to be
+# reinterpreted silently (an unknown kind kept the affine uniform value, an
+# unknown two-index kind took the simplex fold), so both are rejected below.
+PRIOR_KINDS = ("uniform", "normal", "lognormal", "beta")
+JOINT_CONSTRAINT_ARITY = {
+    "ordered_le": 2,
+    "conditional_upper": 2,
+    "simplex": 2,
+    "ball3": 3,
+}
+
 
 def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None):
     """Unit-cube -> parameter inverse-CDF transform, per-parameter prior-aware.
@@ -16,6 +28,18 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
     joint_constraints = list(joint_constraints or [])
+    for kind, idx in joint_constraints:
+        arity = JOINT_CONSTRAINT_ARITY.get(kind)
+        if arity is None:
+            raise ValueError(
+                f"unknown joint-prior constraint kind {kind!r}; accepted kinds "
+                f"are {tuple(JOINT_CONSTRAINT_ARITY)}"
+            )
+        if len(tuple(idx)) != arity:
+            raise ValueError(
+                f"joint-prior constraint {kind!r} takes {arity} indices, got "
+                f"{len(tuple(idx))}"
+            )
 
     if prior_kinds is not None:
         # Beta(1, 1) is uniform. Normalizing it here is load-bearing for the
@@ -31,6 +55,14 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
             else k
             for k, lo, hi in zip(prior_kinds, lower, upper)
         ]
+        # Fail closed before the all-uniform fast path: an unrecognized kind
+        # otherwise keeps the affine (uniform) value with no error.
+        for index, k in enumerate(prior_kinds):
+            if k[0] not in PRIOR_KINDS:
+                raise ValueError(
+                    f"unknown prior kind {k[0]!r} at parameter index {index}; "
+                    f"accepted kinds are {PRIOR_KINDS}"
+                )
 
     if joint_constraints:
         import jax.numpy as _jnp
@@ -59,10 +91,15 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
                     # Multiplicative spelling is intentional: at u_j == 0 the
                     # conditional edge remains finite and maps exactly to lo.
                     new_i, new_j = ui * uj, uj
-                else:  # simplex in the frozen implementation
+                elif kind == "simplex":
                     over = (ui + uj) > 1.0
                     new_i = _jnp.where(over, 1.0 - ui, ui)
                     new_j = _jnp.where(over, 1.0 - uj, uj)
+                else:
+                    raise ValueError(
+                        f"unknown joint-prior constraint kind {kind!r}; "
+                        f"accepted kinds are {tuple(JOINT_CONSTRAINT_ARITY)}"
+                    )
                 u = u.at[..., i].set(new_i).at[..., j].set(new_j)
             return u
 

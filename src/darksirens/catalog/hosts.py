@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import logsumexp
 
 from darksirens.cosmology._grid import zgrid
@@ -175,6 +176,96 @@ def _real_mask(catalog: GalaxyCatalog):
     )[:, None]
 
 
+def _host_array(array, *, what: str):
+    """Return a concrete host view of a build-time table.
+
+    Mark tables and catalog pixel maps are data closed over by a jitted
+    likelihood, never traced arguments, so a tracer here means the caller
+    inverted that.  Fail closed rather than skip the guard.
+    """
+
+    if array is None:
+        return None
+    if isinstance(array, jax.core.Tracer):
+        raise TypeError(
+            f"{what} arrived as a JAX tracer; the marked-host build-time guards "
+            "need concrete tables. Close over the marks and the catalog when "
+            "you jit the likelihood instead of passing them as jit arguments."
+        )
+    return np.asarray(array)
+
+
+def _same_table(a, b, *, what: str) -> bool:
+    if a is b:
+        return True
+    a = _host_array(a, what=what)
+    b = _host_array(b, what=what)
+    if a is None or b is None:
+        return a is None and b is None
+    return a.shape == b.shape and bool(np.array_equal(a, b))
+
+
+def require_shared_host_view(
+    catalog_pe: GalaxyCatalog,
+    marks_pe: CenteredHostMarks,
+    catalog_sel: GalaxyCatalog,
+    marks_sel: CenteredHostMarks,
+) -> None:
+    """Refuse PE/selection views whose ``mu_miss(z|eta)`` would differ.
+
+    Every other quantity the marked prior builds is per-ROW (kernels, dN_miss,
+    Z[row]) and is therefore invariant to restricting a view to a subset of
+    pixels.  ``mu_miss(z|eta) = E_obs[h|z]`` is the one AGGREGATE: without a
+    survey-wide reference table it is estimated by z-binning ``h`` over
+    whichever rows the supplied view holds.  Two different views then give the
+    PE numerator and the selection beta different missing-host modulations, the
+    population prior stops cancelling between the seams, and eta (through the
+    missing-galaxy budget, H0) is biased.  This is the eager host-side twin of
+    the frozen reference's ``require_view_independent_mu_miss``.
+    """
+
+    if marks_pe.reference_values is not None or marks_sel.reference_values is not None:
+        # A survey-wide reference table is what makes mu_miss view-independent,
+        # so both seams must carry the SAME one.
+        same_reference = _same_table(
+            marks_pe.reference_values,
+            marks_sel.reference_values,
+            what="CenteredHostMarks.reference_values",
+        ) and _same_table(
+            marks_pe.reference_z,
+            marks_sel.reference_z,
+            what="CenteredHostMarks.reference_z",
+        )
+        if same_reference:
+            return
+        raise ValueError(
+            "marked dark-siren likelihood: the PE and selection host marks "
+            "carry different survey-wide reference tables. mu_miss(z|eta) is "
+            "estimated from that table, so both seams must supply the same "
+            "reference_z/reference_values."
+        )
+
+    same_pixels = _same_table(
+        catalog_pe.unique_pixels,
+        catalog_sel.unique_pixels,
+        what="GalaxyCatalog.unique_pixels",
+    )
+    if same_pixels and _same_table(
+        marks_pe.values, marks_sel.values, what="CenteredHostMarks.values"
+    ):
+        return
+    raise ValueError(
+        "marked dark-siren likelihood: the PE and selection views must cover "
+        "the same catalog pixels and carry the same mark table, or both marks "
+        "must carry a survey-wide reference table "
+        "(CenteredHostMarks.reference_z / reference_values). mu_miss(z|eta) is "
+        "a view-level aggregate over the galaxies present, so two different "
+        "views give the PE numerator and the selection beta different "
+        "missing-host modulations and the population prior no longer cancels "
+        "between them."
+    )
+
+
 def check_centered_marks(
     model: LogLinearHostModel,
     marks: CenteredHostMarks,
@@ -189,6 +280,11 @@ def check_centered_marks(
     response is dominated by the rail rather than by the supplied host
     properties.  This function is intentionally a build-time check, not part of
     the traced likelihood.
+
+    The optional survey-wide ``reference_values`` table is checked too: it feeds
+    ``mu_miss`` through the same clip, so an uncentered reference table kills
+    eta in the missing branch exactly as an uncentered aligned table does in the
+    observed branch.
     """
 
     model._check_names(marks.names)
@@ -197,21 +293,47 @@ def check_centered_marks(
             f"{where}: mark table shape {marks.values.shape[:2]} does not match "
             f"catalog rows {catalog.zgals.shape}"
         )
-    abs_sum = jnp.sum(jnp.abs(marks.values), axis=-1)
-    real = _real_mask(catalog)
-    n_real = jnp.sum(real)
+    values = _host_array(marks.values, what=f"{where}: mark table")
+    ngals = _host_array(catalog.ngals, what=f"{where}: catalog row lengths")
+    abs_sum = np.sum(np.abs(values), axis=-1)
+    real = np.arange(values.shape[1])[None, :] < ngals[:, None]
+    n_real = int(np.sum(real))
     sat = (model.eta_bound * abs_sum >= LOG_H_CLIP) & real
-    frac = float(
-        jnp.where(n_real > 0, jnp.sum(sat) / jnp.maximum(n_real, 1), 0.0)
+    frac = float(np.sum(sat) / n_real) if n_real > 0 else 0.0
+    if frac > MARK_SATURATION_MAX_FRACTION:
+        raise ValueError(
+            f"{where}: {100.0 * frac:.1f}% of real galaxies can hit the "
+            f"|log h| <= {LOG_H_CLIP:g} rail inside |eta_k| <= "
+            f"{model.eta_bound:g}. The runtime contract requires z-centered host "
+            "properties; survey-side construction must subtract E[m|z] before "
+            "building CenteredHostMarks."
+        )
+
+    reference = _host_array(
+        marks.reference_values, what=f"{where}: reference mark table"
     )
-    if frac <= MARK_SATURATION_MAX_FRACTION:
+    if reference is None or reference.shape[0] == 0:
         return
+    # Every reference row is a real galaxy, so the saturated fraction is a
+    # plain mean over rows.
+    ref_abs_sum = np.sum(np.abs(reference), axis=-1)
+    ref_frac = float(
+        np.mean((model.eta_bound * ref_abs_sum >= LOG_H_CLIP).astype(float))
+    )
+    if ref_frac <= MARK_SATURATION_MAX_FRACTION:
+        return
+    detail = "; ".join(
+        f"{name}: mean={float(np.mean(reference[:, k])):+.3g}, "
+        f"max|m|={float(np.max(np.abs(reference[:, k]))):.3g}"
+        for k, name in enumerate(marks.names)
+    )
     raise ValueError(
-        f"{where}: {100.0 * frac:.1f}% of real galaxies can hit the "
-        f"|log h| <= {LOG_H_CLIP:g} rail inside |eta_k| <= "
-        f"{model.eta_bound:g}. The runtime contract requires z-centered host "
-        "properties; survey-side construction must subtract E[m|z] before "
-        "building CenteredHostMarks."
+        f"{where}: {100.0 * ref_frac:.1f}% of survey-wide reference galaxies "
+        f"can hit the |log h| <= {LOG_H_CLIP:g} rail inside |eta_k| <= "
+        f"{model.eta_bound:g}, so mu_miss(z|eta) is pinned to the clip and the "
+        f"missing branch carries no host preference [{detail}]. The runtime "
+        "contract requires z-centered host properties; build reference_values "
+        "from the same centered marks as the aligned table."
     )
 
 
@@ -394,6 +516,10 @@ def build_marked_incomplete_catalog_prior_state(
 ) -> IncompleteCatalogPriorState:
     """Build the ordinary conditional marked-host dark-siren prior state."""
 
+    # Eager, once per catalog view: an uncentered table pins log h to the clip
+    # rail across the whole eta prior and the eta posterior comes back flat with
+    # nothing downstream reporting a fault.
+    check_centered_marks(model, marks, catalog)
     kernels, log_N_host, log_h = build_marked_catalog_kernel_state(
         cosmo, params, catalog, model, marks, eta
     )
@@ -431,4 +557,5 @@ __all__ = [
     "build_marked_incomplete_catalog_prior_state",
     "check_centered_marks",
     "missing_host_efficiency_grid",
+    "require_shared_host_view",
 ]
