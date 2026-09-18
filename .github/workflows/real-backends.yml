@@ -1,0 +1,63 @@
+name: real-backends
+
+# The optional sampler backends run for real here, with the pinned stack, so
+# the end-to-end TinyNS/Dynesty/NumPyro tests, the real Dynesty checkpoint
+# round-trip and the healpy parity suite are exercised by CI rather than
+# skipped for a missing package. A skip anywhere in this job is a failure.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JAX_PLATFORMS: cpu
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+      DARKSIRENS_ZMAX: "5.0"
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the validated stack plus every optional backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
+            "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" \
+            "equinox==0.11.10" "tinygp==0.3.0" \
+            "dynesty==2.1.4" "numpyro==0.17.0" "matplotlib==3.9.2" "healpy==1.17.3" \
+            "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
+          python -m pip install --no-deps -e .
+
+      - name: Real backend runs, checkpoint round-trip and healpy parity
+        run: |
+          python -m pytest -q -rs \
+            tests/test_real_backends.py \
+            tests/test_dynesty_checkpoint_state.py \
+            tests/test_dynesty_diagnostics.py \
+            tests/test_dynesty_diagnostics_integration.py \
+            tests/test_numpyro_adapter.py \
+            tests/test_healpix_geometry.py \
+            2>&1 | tee /tmp/backends.log
+
+      - name: Refuse a silently skipped backend test
+        run: |
+          if grep -q "skipped" /tmp/backends.log; then
+            echo "a backend test skipped: the optional stack is not fully installed"
+            grep "SKIPPED" /tmp/backends.log || true
+            exit 1
+          fi

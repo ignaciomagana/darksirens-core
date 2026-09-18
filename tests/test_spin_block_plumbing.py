@@ -7,12 +7,6 @@ padded structurally and passed to the weight function as a trailing
 ``spin=`` keyword only when present, so 7-argument weight functions (and
 test doubles) never see it.
 """
-import sys
-import types
-
-_tqdm_stub = types.ModuleType("tqdm")
-_tqdm_stub.tqdm = lambda iterable=None, *args, **kwargs: iterable
-sys.modules.setdefault("tqdm", _tqdm_stub)
 
 import jax
 import numpy as np

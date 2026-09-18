@@ -33,7 +33,9 @@ jobs:
           python -m pip install \
             "jax[cpu]==0.4.34" "numpy==1.26.4" "scipy==1.12.0" \
             "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" "ruff==0.15.20" \
-            "equinox==0.11.10" "tinygp==0.3.0"
+            "equinox==0.11.10" "tinygp==0.3.0" \
+            "dynesty==2.1.4" "numpyro==0.17.0" "matplotlib==3.9.2" "healpy==1.17.3" \
+            "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
           python -m pip install --no-deps -e .
 
       - name: Definite-error lint

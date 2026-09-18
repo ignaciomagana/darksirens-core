@@ -8,6 +8,7 @@ import sys
 import types
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from darksirens.inference import dynesty_checkpoint as dc
@@ -182,3 +183,68 @@ def test_module_import_does_not_eagerly_load_dynesty_or_other_backends():
     env.pop("PYTHONPATH", None)
     proc = subprocess.run([sys.executable, "-c", code], env=env, check=False)
     assert proc.returncode == 0
+
+
+def _real_loglike(x):
+    return float(-0.5 * np.sum(np.asarray(x) ** 2))
+
+
+def _real_ptform(u):
+    return 12.0 * np.asarray(u) - 6.0
+
+
+def test_real_dynesty_sampler_round_trips_through_the_state_only_checkpoint(tmp_path):
+    """The fakes above pin the detach/rebind bookkeeping but never prove that a
+    real dynesty sampler survives it. Advance one, checkpoint it through core's
+    hook, restore it, and require the restored sampler to be the same sampler:
+    same RNG state, same counters, same live points, same next draws."""
+    dynesty = pytest.importorskip("dynesty")
+
+    sampler = dynesty.NestedSampler(
+        _real_loglike,
+        _real_ptform,
+        2,
+        nlive=60,
+        rstate=np.random.default_rng(7),
+        bound="multi",
+        sample="rwalk",
+    )
+    generator = sampler.sample(
+        maxiter=40, dlogz=0.0, add_live=False, save_bounds=True, save_samples=True
+    )
+    for _ in range(40):
+        next(generator)
+    assert sampler.it > 1 and sampler.ncall > 60
+
+    rstate_state = sampler.rstate.bit_generator.state
+    live_logl = np.array(sampler.live_logl, copy=True)
+    path = str(tmp_path / "state.pkl")
+    assert dc.install_dynesty_checkpointing(sampler) is sampler
+    sampler.save(path)
+
+    # The checkpoint really is state-only: the callables come back detached.
+    detached = dynesty.NestedSampler.restore(path)
+    sentinel = type(dc._DETACHED)
+    assert isinstance(detached.loglikelihood.loglikelihood, sentinel)
+    assert isinstance(detached.prior_transform, sentinel)
+    with pytest.raises(RuntimeError, match="stores sampler state only"):
+        detached.prior_transform(np.zeros(2))
+
+    restored = dc.restore_dynesty_sampler(path, _real_loglike, _real_ptform)
+    assert restored.rstate.bit_generator.state == rstate_state
+    assert restored.it == sampler.it
+    assert restored.ncall == sampler.ncall
+    np.testing.assert_array_equal(np.asarray(restored.live_logl), live_logl)
+    np.testing.assert_array_equal(
+        np.asarray(restored.live_u), np.asarray(sampler.live_u)
+    )
+
+    original_draws = sampler.sample(maxiter=15, dlogz=0.0, add_live=False)
+    restored_draws = restored.sample(maxiter=15, dlogz=0.0, add_live=False)
+    for _ in range(15):
+        before = next(original_draws)
+        after = next(restored_draws)
+        np.testing.assert_array_equal(np.asarray(after[1]), np.asarray(before[1]))
+        assert after[3] == before[3]
+    assert restored.it == sampler.it
+    assert restored.ncall == sampler.ncall
