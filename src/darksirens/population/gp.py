@@ -93,6 +93,10 @@ _JITTER_REL = 1e-4
 # z-independent integrals use the full normalisation grids for accuracy.
 _KD_N = {"m1": 48, "q": 24, "chi": 24}     # coarse per-axis sizes for k-D norm
 _KD_SPAN = {"m1": (2.0, 100.0), "q": (0.02, 1.0), "chi": (-1.0, 1.0)}
+# q nodes for the k-D norm on the m1-conditional branch, whose lattice carries no
+# m1 axis and can therefore afford the resolution the taper toe needs (see
+# JointGPPopulation._normalise).
+_KD_N_M1COND_Q = 128
 _M1NORM_N = 64                             # log-m1 nodes above the taper toe
 _M1NORM_TOE_N = 48                         # log-m1 nodes across [m_min, m_min+dm_min]
 # The z-normalisation interpolation grid is FROZEN above _ZNORM_HI: GP model
@@ -124,9 +128,9 @@ else:
 _ZNORM_N = max(24, 1 + math.ceil(4.0 * math.log1p(_ZNORM_HI) / _Z_LS_FLOOR))
 
 
-def _coarse_axis_grid(axis: str):
+def _coarse_axis_grid(axis: str, n: int | None = None):
     lo, hi = _KD_SPAN[axis]
-    return jnp.linspace(lo, hi, _KD_N[axis])
+    return jnp.linspace(lo, hi, _KD_N[axis] if n is None else int(n))
 
 
 def _znorm_nodes():
@@ -623,8 +627,22 @@ class JointGPPopulation:
         # z-free model (gp2d_q_chi, full 200x200 = 4e4) stays on the full grid,
         # so its normalisation is unchanged.
         coarse = (self._z_in_gp and len(self._prob_gp) >= 2) or len(self._prob_gp) >= 3
+        m1_cond = ("q" in self._prob_gp) and ("m1" not in self.gp_axes)
         if coarse:
-            grids = [_coarse_axis_grid(a) for a in self._prob_gp]
+            # The q-support just above m_min is a sliver of width (m1 - m_min)/m1
+            # that 24 nodes over [0.02, 1] cannot resolve: measured on an
+            # independent 801 x 401 (q, chi) grid, int p_gp(q, chi | m1, z) for
+            # gp3d_q_chi_z was 0.876 at m1 = m_min + 0.25 dm_min and 1.001 with
+            # 128 q nodes. On the m1-conditional branch the lattice has no m1
+            # axis, so the finer q axis costs nothing measurable; the k-D models
+            # with m1 in the GP keep the coarse q axis their memory budget
+            # (see _znorm_interp) was sized for.
+            grids = [
+                _coarse_axis_grid(
+                    a, n=_KD_N_M1COND_Q if (m1_cond and a == "q") else None
+                )
+                for a in self._prob_gp
+            ]
         else:
             grids = [_axis_phys_grid(a) for a in self._prob_gp]
         mesh = jnp.meshgrid(*grids, indexing="ij")
@@ -634,7 +652,6 @@ class JointGPPopulation:
         for a, fv in zip(self._prob_gp, flat):
             phys[a] = fv
 
-        m1_cond = ("q" in self._prob_gp) and ("m1" not in self.gp_axes)
         if m1_cond:
             m1g = _m1norm_grid(m_min, dm_min)                # (Nm1,), support-following
             grid_shape = [g.shape[0] for g in grids]
