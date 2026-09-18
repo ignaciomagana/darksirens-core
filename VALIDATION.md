@@ -199,9 +199,9 @@ pre-branch tree, and `tests/data/population_registry_golden.json` gained two
 `@md` entries with every pre-existing entry unchanged.
 
 Local measurement on the validated stack with every optional backend installed
-(TinyNS, Dynesty, NumPyro, healpy, Matplotlib), before the last three review
-commits: 703 passed, 1 skipped (the golden-regeneration guard), against 543
-passed, 1 skipped before the stack. The reproducible record is the GitHub
+(TinyNS, Dynesty, NumPyro, healpy, Matplotlib), on the final tree of the stack:
+714 passed, 1 skipped (the golden-regeneration guard), against 543 passed,
+1 skipped before the stack. The reproducible record is the GitHub
 Actions runs on the accepted PR heads: `phase8-regression` now installs the
 same optional stack, and the dedicated `real-backends` workflow runs the
 end-to-end TinyNS, Dynesty and NumPyro tests, the real Dynesty checkpoint
