@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import jit
 
+from .. import _cosmology_support as _support
 from ._interpolation import interpnd, interpnd_scalar_head
 from .parameters import H0_FID, OM0_FID, W0_FID, WA_FID
 
@@ -31,39 +32,50 @@ w0Fiducial = W0_FID
 waFiducial = WA_FID
 speed_of_light = np.float64(299792.458)
 
-_OM0_PRIOR_HALF_WIDTH = 0.1
-_OM0_GRID_PAD = 0.05
-_W0_PRIOR_HALF_WIDTH = 1.0
-_W0_GRID_PAD = 0.25
-_WA_PRIOR_HALF_WIDTH = 2.0
-_WA_GRID_PAD = 0.5
+# The axis geometry lives in darksirens._cosmology_support so the public
+# Cosmology spec can reject an out-of-grid prior without importing jax.
+_OM0_PRIOR_HALF_WIDTH = _support.OM0_PRIOR_HALF_WIDTH
+_OM0_GRID_PAD = _support.OM0_GRID_PAD
+_W0_PRIOR_HALF_WIDTH = _support.W0_PRIOR_HALF_WIDTH
+_W0_GRID_PAD = _support.W0_GRID_PAD
+_WA_PRIOR_HALF_WIDTH = _support.WA_PRIOR_HALF_WIDTH
+_WA_GRID_PAD = _support.WA_GRID_PAD
 
-Om0PriorLower = Om0Planck - _OM0_PRIOR_HALF_WIDTH
-Om0PriorUpper = Om0Planck + _OM0_PRIOR_HALF_WIDTH
-w0PriorLower = w0Fiducial - _W0_PRIOR_HALF_WIDTH
-w0PriorUpper = w0Fiducial + _W0_PRIOR_HALF_WIDTH
-waPriorLower = waFiducial - _WA_PRIOR_HALF_WIDTH
-waPriorUpper = waFiducial + _WA_PRIOR_HALF_WIDTH
+Om0PriorLower = _support.OM0_PRIOR_LOWER
+Om0PriorUpper = _support.OM0_PRIOR_UPPER
+w0PriorLower = _support.W0_PRIOR_LOWER
+w0PriorUpper = _support.W0_PRIOR_UPPER
+waPriorLower = _support.WA_PRIOR_LOWER
+waPriorUpper = _support.WA_PRIOR_UPPER
 
 _ZGRID_NODES = max(500, int(round(500 * np.log(zMax + 1.0) / np.log(6.0))))
 _zgrid_numpy = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), _ZGRID_NODES))
 
-Om0grid = jnp.linspace(
-    Om0PriorLower - _OM0_GRID_PAD,
-    Om0PriorUpper + _OM0_GRID_PAD,
-    21,
-)
-w0grid = jnp.linspace(
-    w0PriorLower - _W0_GRID_PAD,
-    w0PriorUpper + _W0_GRID_PAD,
-    41,
-)
-wagrid = jnp.linspace(
-    waPriorLower - _WA_GRID_PAD,
-    waPriorUpper + _WA_GRID_PAD,
-    31,
-)
+Om0grid = jnp.linspace(_support.OM0_GRID_LOWER, _support.OM0_GRID_UPPER, 21)
+w0grid = jnp.linspace(_support.W0_GRID_LOWER, _support.W0_GRID_UPPER, 41)
+wagrid = jnp.linspace(_support.WA_GRID_LOWER, _support.WA_GRID_UPPER, 31)
 zgrid = jnp.array(_zgrid_numpy)
+
+
+def _check_support_constants():
+    """The light support constants must describe exactly this grid.
+
+    They are what Cosmology validates a prior against, so a drift between the
+    two would either reopen the silent-truncation hole or reject usable priors.
+    """
+    assert (_support.OM0_FID, _support.W0_FID, _support.WA_FID) == (
+        OM0_FID,
+        W0_FID,
+        WA_FID,
+    ), "_cosmology_support fiducials drifted from cosmology.parameters"
+    for name, grid in (("Om0", Om0grid), ("w0", w0grid), ("wa", wagrid)):
+        lower, upper = _support.GRID_SUPPORT[name]
+        assert float(grid[0]) == lower and float(grid[-1]) == upper, (
+            f"{name} grid endpoints drifted from _cosmology_support"
+        )
+
+
+_check_support_constants()
 
 
 def _cpl_E_numpy(z, Om0, w0, wa):

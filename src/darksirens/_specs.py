@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import math
 from typing import TypeAlias
 
+from ._cosmology_support import GRID_SUPPORT
+
 ParameterValue: TypeAlias = float | tuple[float, float]
 
 _COSMOLOGY_ORDER = ("H0", "Om0", "w0", "wa")
@@ -59,6 +61,32 @@ def _normalize_parameter(name: str, value) -> ParameterValue:
     raise TypeError(f"{name} must be a finite scalar or a (lower, upper) pair")
 
 
+def _outside_distance_grid(name: str, value: ParameterValue) -> str | None:
+    """Describe an axis the tabulated distance grid cannot represent.
+
+    Comoving distance is interpolated on a fixed (Om0, w0, wa, z) table and is
+    NaN outside it, which the likelihood turns into -inf. Accepting such a
+    declaration would truncate the prior with no diagnostic anywhere.
+    """
+    support = GRID_SUPPORT.get(name)
+    if support is None:
+        return None
+    lower, upper = support
+    if isinstance(value, tuple):
+        if value[0] < lower or value[1] > upper:
+            return (
+                f"{name} prior [{value[0]}, {value[1]}] extends outside the "
+                f"tabulated distance grid [{lower}, {upper}], which would "
+                "silently truncate the prior"
+            )
+    elif not lower <= value <= upper:
+        return (
+            f"{name} fixed at {value} is outside the tabulated distance grid "
+            f"[{lower}, {upper}], which would make every sample -inf"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class Cosmology:
     """Public flat-CPL cosmology specification.
@@ -66,6 +94,10 @@ class Cosmology:
     A scalar fixes a parameter. A two-value tuple/list declares a uniform prior
     over that interval. The default samples only ``H0`` and keeps the remaining
     background parameters at the frozen Planck-2015 fiducials used by core.
+
+    ``Om0``, ``w0`` and ``wa`` must stay inside the closed support of the
+    tabulated distance grid (``darksirens._cosmology_support.GRID_SUPPORT``);
+    ``H0`` is unrestricted because it rescales that table analytically.
     """
 
     H0: ParameterValue = (20.0, 140.0)
@@ -76,6 +108,13 @@ class Cosmology:
     def __post_init__(self) -> None:
         for name in _COSMOLOGY_ORDER:
             object.__setattr__(self, name, _normalize_parameter(name, getattr(self, name)))
+        problems = [
+            problem
+            for name in _COSMOLOGY_ORDER
+            if (problem := _outside_distance_grid(name, getattr(self, name)))
+        ]
+        if problems:
+            raise ValueError("; ".join(problems))
 
     @property
     def free_parameters(self) -> tuple[tuple[str, float, float], ...]:

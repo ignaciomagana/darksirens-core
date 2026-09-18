@@ -9,6 +9,16 @@ def test_package_root_does_not_import_jax():
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_cosmology_grid_guard_does_not_import_jax():
+    # Cosmology validates its bounds against the tabulated distance grid, which
+    # only stays light because the grid support lives in _cosmology_support.
+    code = (
+        "import sys, darksirens as ds; ds.Cosmology(Om0=(0.2, 0.4));"
+        " assert 'jax' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_cosmology_public_names():
     import darksirens.cosmology as c
 
