@@ -32,8 +32,9 @@ gp = [
 ]
 dynesty = [
   "dynesty==2.1.4",
-  # dynesty_diagnostics imports matplotlib lazily; dynesty itself does not ship it.
-  "matplotlib",
+  # dynesty_diagnostics imports matplotlib lazily; dynesty itself does not ship
+  # it. Pinned to the version the legacy-reference replay validates against.
+  "matplotlib==3.9.2",
 ]
 numpyro = [
   "numpyro==0.17.0",
