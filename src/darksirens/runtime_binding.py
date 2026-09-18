@@ -26,6 +26,7 @@ from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.runtime import make_gw_event
+from darksirens.gw.samples import require_matching_contract, warn_pair_cosmology
 from darksirens.gw.store import COMPONENT_SPIN_DATASETS
 from darksirens.gw.types import GWEvent, GWStore, SelectionStore
 from darksirens.likelihood.hierarchical import (
@@ -35,6 +36,7 @@ from darksirens.likelihood.hierarchical import (
     spectral_siren_log_likelihood,
 )
 from darksirens.population import get_model
+from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
 _CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
 _COMPONENT_FIT_COLUMNS = ("m1det", "q", "dL") + tuple(COMPONENT_SPIN_DATASETS)
@@ -206,6 +208,10 @@ class BoundAnalysis:
     catalog: GalaxyCatalog | None = None
     observed_density_cache: Any = None
     z_depth: float | None = None
+    selection_neff_soft_guard: bool = False
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE
+    sel_batch_size: int | None = None
+    pe_event_block: int | None = None
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -216,14 +222,20 @@ class BoundAnalysis:
             self.analysis, theta, z_depth=self.z_depth
         )
         pop = self.analysis.population
-        population_common = dict(
+        # Bright sirens take no angular composition and no PE event blocking,
+        # so their likelihood signature is a strict subset of the others'.
+        bright_common = dict(
             pop_model=pop.model_name,
             shared_beta=pop.shared_beta,
             shared_spin=pop.shared_spin,
             shared_gamma=pop.shared_gamma,
+            sel_batch_size=self.sel_batch_size,
+            selection_neff_soft_guard=self.selection_neff_soft_guard,
+            max_likelihood_variance=self.max_likelihood_variance,
         )
         ordinary_common = dict(
-            **population_common,
+            **bright_common,
+            pe_event_block=self.pe_event_block,
             angular_model=self.analysis.angular_model,
             angular_params=angular,
         )
@@ -251,7 +263,7 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
-                **population_common,
+                **bright_common,
             )
 
         if isinstance(self.analysis.redshift, IncompleteCatalogRedshift):
@@ -283,6 +295,7 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
+                empty_policy=self.analysis.redshift.empty_policy,
                 **ordinary_common,
             )
 
@@ -294,6 +307,10 @@ def bind_analysis(
     *,
     events: GWStore,
     injections: SelectionStore,
+    selection_neff_soft_guard: bool = False,
+    max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    sel_batch_size: int | None = None,
+    pe_event_block: int | None = None,
 ) -> BoundAnalysis:
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
@@ -307,6 +324,10 @@ def bind_analysis(
     required = required_fit_columns(analysis)
     _require_store_basis(events, required, kind="PE")
     _require_store_basis(injections, required, kind="selection")
+    # Per-store gates only compare each file against the model. The pairing
+    # contract is what makes numerator and denominator the same estimand.
+    require_matching_contract(events, injections)
+    warn_pair_cosmology(events, injections)
 
     if events.n_events < 1 or events.nsamp < 1:
         raise ValueError("events store must contain at least one event and sample")
@@ -373,6 +394,10 @@ def bind_analysis(
         catalog=catalog,
         observed_density_cache=cache,
         z_depth=z_depth,
+        selection_neff_soft_guard=bool(selection_neff_soft_guard),
+        max_likelihood_variance=float(max_likelihood_variance),
+        sel_batch_size=sel_batch_size,
+        pe_event_block=pe_event_block,
     )
 
 

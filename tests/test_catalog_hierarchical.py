@@ -108,6 +108,24 @@ def test_complete_empty_policy_is_live():
     assert np.isfinite(vals["volume"])
     assert vals["zero"] != vals["volume"]
 
+    default = float(
+        complete_catalog_siren_log_likelihood(
+            COSMO,
+            PARAMS,
+            POP,
+            pe,
+            cat,
+            sel,
+            cat,
+            1,
+            2,
+            16.0,
+            pop_model="powerlaw+peak",
+            max_likelihood_variance=1e6,
+        )
+    )
+    assert default == vals["zero"]
+
 
 def test_bright_selection_is_exactly_catalog_free_volume_selection():
     cat = _catalog()

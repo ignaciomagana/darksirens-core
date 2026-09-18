@@ -40,9 +40,16 @@ class IncompleteCatalogRedshift:
 
 @dataclass(frozen=True)
 class CompleteCatalogRedshift:
-    """Ordinary catalog treated as containing every possible host."""
+    """Ordinary catalog treated as containing every possible host.
+
+    ``empty_policy`` selects what a galaxy-free catalog row contributes.
+    ``"zero"`` is the frozen default and follows from the completeness
+    assumption itself; ``"volume"`` is the opt-in robustness approximation
+    that gives such a row the normalized comoving-volume prior instead.
+    """
 
     catalog: Any
+    empty_policy: str = "zero"
 
 
 @dataclass(frozen=True)
@@ -124,9 +131,20 @@ def _resolve_redshift(
     catalog,
     completeness,
     *,
+    empty_policy=None,
     counterparts=None,
     counterpart_nside=None,
 ):
+    if empty_policy is not None and completeness != "complete":
+        raise ValueError(
+            "empty_policy applies only to completeness='complete', got "
+            f"completeness={completeness!r}"
+        )
+    if empty_policy is not None and empty_policy not in ("zero", "volume"):
+        raise ValueError(
+            f"empty_policy must be 'zero' or 'volume', got {empty_policy!r}"
+        )
+
     if counterparts is not None:
         if catalog is not None:
             raise ValueError("bright sirens do not take a galaxy catalog")
@@ -169,7 +187,10 @@ def _resolve_redshift(
     if completeness is None or completeness == "incomplete":
         return IncompleteCatalogRedshift(catalog), _INCOMPLETE_CATALOG_PRIORS
     if completeness == "complete":
-        return CompleteCatalogRedshift(catalog), _COMPLETE_CATALOG_PRIORS
+        return (
+            CompleteCatalogRedshift(catalog, empty_policy or "zero"),
+            _COMPLETE_CATALOG_PRIORS,
+        )
     raise ValueError("completeness must be None, 'incomplete', or 'complete'")
 
 
@@ -179,6 +200,7 @@ def model(
     population,
     catalog=None,
     completeness=None,
+    empty_policy=None,
     angular="isotropic",
     counterparts=None,
     counterpart_nside=None,
@@ -194,6 +216,10 @@ def model(
     objects and the HEALPix ``counterpart_nside`` defining their global pixel
     frame. They do not use a galaxy catalog or catalog-completeness nuisance
     block.
+
+    ``empty_policy`` is legal only with ``completeness='complete'`` and selects
+    the galaxy-free-row branch of that likelihood: ``'zero'`` (the default) or
+    the ``'volume'`` robustness approximation.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -209,6 +235,7 @@ def model(
     redshift, catalog_priors = _resolve_redshift(
         catalog,
         completeness,
+        empty_policy=empty_policy,
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
     )

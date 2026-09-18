@@ -14,6 +14,7 @@ from darksirens.catalog.counterparts import (
 from darksirens.catalog.models import (
     build_complete_catalog_prior_state,
     build_incomplete_catalog_prior_state,
+    eval_complete_catalog_prior_state,
     eval_complete_catalog_prior_state_vmap,
     eval_incomplete_catalog_prior_state_vmap,
 )
@@ -119,6 +120,25 @@ def test_complete_empty_policies_and_occupied_row():
 
     expected_volume = float(log_comoving_volume_prior(jnp.asarray(0.12), _cosmo()))
     np.testing.assert_allclose(volume[1], expected_volume, rtol=1e-12, atol=0.0)
+
+
+def test_complete_empty_policy_defaults_to_the_strict_branch():
+    cat = _catalog()
+    state = build_complete_catalog_prior_state(_cosmo(), _params(), cat)
+    z = jnp.asarray([0.12, 0.12, 0.34])
+    rows = jnp.asarray([0, 1, 2], dtype=jnp.int32)
+
+    default = np.asarray(eval_complete_catalog_prior_state_vmap(z, rows, state, cat))
+    zero = np.asarray(eval_complete_catalog_prior_state_vmap(
+        z, rows, state, cat, empty_policy="zero"
+    ))
+    np.testing.assert_array_equal(default, zero)
+    assert np.isneginf(default[1])
+
+    scalar = float(eval_complete_catalog_prior_state(
+        jnp.asarray(0.12), jnp.asarray(1, dtype=jnp.int32), state, cat
+    ))
+    assert np.isneginf(scalar)
 
 
 def test_complete_invalid_empty_policy_fails_loudly():

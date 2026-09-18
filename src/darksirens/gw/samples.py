@@ -6,7 +6,9 @@ LVK products remain an upstream concern (normally handled by ``gwcat``).
 
 from __future__ import annotations
 
+import json
 import os
+import warnings
 
 import h5py
 import numpy as np
@@ -412,6 +414,82 @@ def load_selection_samples(file, allow_invalid_spin_swap=False, fit_columns=None
         jnp.array(store.prior_wt),
         store.ndraw,
     )
+
+
+# Physical tolerances for "these two declared cosmologies are the same one".
+# Differences below these move nothing at the precision of the products.
+_COSMO_H0_TOL = 1.0
+_COSMO_OM0_TOL = 0.05
+
+
+def require_matching_contract(events: GWStore, injections: SelectionStore) -> None:
+    """Refuse a PE/selection pair declaring different gwcat pairing contracts.
+
+    The 2.1 ``contract_hash`` digests the pairing-critical declarations
+    (parameter space, fit/advisory columns, spin-basis kind, sky-measure
+    convention, source-class filter). A mismatched pair puts the numerator and
+    the denominator of one hierarchical likelihood on different estimands and
+    is silently wrong, so it is refused here with the field-by-field
+    difference rather than a bare hash. Stores predating the contract carry no
+    hash and stay exempt; the per-store basis gates still apply.
+    """
+    pe_hash = events.attrs.get("contract_hash")
+    sel_hash = injections.attrs.get("contract_hash")
+    if pe_hash is None or sel_hash is None:
+        return
+    if pe_hash == sel_hash:
+        return
+
+    diff = ""
+    try:
+        pe_contract = json.loads(events.attrs.get("contract", "{}"))
+        sel_contract = json.loads(injections.attrs.get("contract", "{}"))
+        fields = sorted(set(pe_contract) | set(sel_contract))
+        parts = [
+            f"{k}: PE={pe_contract.get(k)!r} vs selection={sel_contract.get(k)!r}"
+            for k in fields
+            if pe_contract.get(k) != sel_contract.get(k)
+        ]
+        diff = " Differing fields: " + "; ".join(parts) if parts else ""
+    except Exception:
+        pass
+    raise RuntimeError(
+        f"PE file {events.path!r} and selection file {injections.path!r} "
+        f"declare different pairing contracts (contract_hash {pe_hash} != "
+        f"{sel_hash}): the pair does not describe the same fit and cannot be "
+        f"combined in one likelihood.{diff}"
+    )
+
+
+def warn_pair_cosmology(events: GWStore, injections: SelectionStore) -> None:
+    """Surface a PE/selection fiducial-cosmology disagreement.
+
+    A warning, not a refusal: campaigns legitimately carry their own
+    generation cosmology, so difference alone is not an error. It is still
+    exactly the kind of quiet configuration drift an operator should see once.
+    """
+    pe_h0 = events.attrs.get("pe_cosmology_H0")
+    pe_om0 = events.attrs.get("pe_cosmology_Om0")
+    sel_h0 = injections.attrs.get("cosmology_H0")
+    sel_om0 = injections.attrs.get("cosmology_Om0")
+    if None in (pe_h0, pe_om0, sel_h0, sel_om0):
+        return
+    try:
+        mismatch = (
+            abs(float(pe_h0) - float(sel_h0)) >= _COSMO_H0_TOL
+            or abs(float(pe_om0) - float(sel_om0)) >= _COSMO_OM0_TOL
+        )
+    except (TypeError, ValueError):
+        return
+    if mismatch:
+        warnings.warn(
+            f"PE store {events.path!r} declares cosmology ({pe_h0}, {pe_om0}) "
+            f"but selection file {injections.path!r} declares "
+            f"({sel_h0}, {sel_om0}); campaigns may legitimately differ, but "
+            "verify this pair was built together.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 # Public user-language aliases. These remain low-level until the root API is frozen.
