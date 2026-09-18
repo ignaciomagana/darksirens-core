@@ -161,6 +161,36 @@ def test_batched_transform_matches_per_row_exactly(lower, upper, kinds, joint):
     np.testing.assert_array_equal(batched, looped)
 
 
+def test_unknown_prior_kind_raises_instead_of_sampling_uniform():
+    """A typo used to keep the affine uniform value with no error."""
+    for bad in ("gaussian", "loguniform", "delta", "Normal"):
+        with pytest.raises(ValueError, match="unknown prior kind"):
+            make_prior_transform([0.0], [10.0], [(bad, 5.0, 1.0)])
+    # Beta(1, 1) on the unit interval is still normalized to the uniform fast
+    # path rather than rejected.
+    transform = make_prior_transform([0.0], [1.0], [("beta", 1.0, 1.0)])
+    assert getattr(transform, "host_native", False) is True
+
+
+def test_unknown_joint_constraint_kind_raises_instead_of_folding_to_simplex():
+    """The bare ``else`` used to apply the simplex fold to any unknown kind."""
+    for bad in ("ordered_ge", "monotone"):
+        with pytest.raises(ValueError, match="unknown joint-prior constraint kind"):
+            make_prior_transform(
+                [0.0, 0.0], [1.0, 1.0], joint_constraints=[(bad, (0, 1))]
+            )
+    with pytest.raises(ValueError, match="takes 2 indices"):
+        make_prior_transform(
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            joint_constraints=[("simplex", (0, 1, 2))],
+        )
+    with pytest.raises(ValueError, match="takes 3 indices"):
+        make_prior_transform(
+            [0.0, 0.0], [1.0, 1.0], joint_constraints=[("ball3", (0, 1))]
+        )
+
+
 def test_uniform_module_import_and_construction_do_not_eagerly_load_jax_or_backends():
     code = (
         "import sys; from darksirens.inference.prior import make_prior_transform; "

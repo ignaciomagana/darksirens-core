@@ -438,13 +438,22 @@ def selection_reduce_from_ldw_provider(
     LSS-completion member marginalization uses this with a member-specific
     provider that reuses the precomputed observed-catalog part.  When batching,
     ``N_sel`` must already be a multiple of ``sel_batch_size`` (the caller pads
-    the injection arrays exactly as :func:`compute_selection_term` does).
+    the injection arrays exactly as :func:`compute_selection_term` does); both
+    are static ints, so a non-divisible pair raises here rather than silently
+    dropping the tail injections while ``Ndraw`` keeps the full normalization.
     """
     if sel_batch_size is None:
         ldw = ldw_provider(0, N_sel)
         lse = logsumexp_neginf_safe(ldw)
         lse2 = logsumexp_neginf_safe(2.0 * ldw)
     else:
+        if int(N_sel) % int(sel_batch_size) != 0:
+            raise ValueError(
+                f"N_sel ({int(N_sel)}) must be a multiple of sel_batch_size "
+                f"({int(sel_batch_size)}); pad the injection arrays with "
+                "invalid sentinel rows as compute_selection_term does, keeping "
+                "Ndraw the unpadded campaign size"
+            )
         N_batches = N_sel // sel_batch_size
 
         def _scan_fn(_, batch_idx):

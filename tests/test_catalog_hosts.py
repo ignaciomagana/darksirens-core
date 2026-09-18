@@ -181,3 +181,181 @@ def test_marked_hierarchy_diagnostics_recompose_total():
     assembled = d.selection_log_correction + jnp.sum(d.event_log_evidence)
     np.testing.assert_allclose(d.log_likelihood, assembled, rtol=1e-14, atol=0.0)
     assert np.isfinite(float(d.log_likelihood))
+    # Pinned on the pre-guard tree (git archive of HEAD, same interpreter): the
+    # cross-view and centering guards must not move the accepted numerics.
+    # rtol, not equality: the final reduction association moves by ~1 ulp with
+    # XLA compilation order (0.14353901064029806 standalone vs ...895 in-suite).
+    np.testing.assert_allclose(
+        float(d.log_likelihood), 0.14353901064029806, rtol=1e-12, atol=0.0
+    )
+
+
+def _events():
+    pe = make_gw_event(
+        m1det=np.array([36.0, 38.0]),
+        m2det=np.array([28.8, 30.4]),
+        dL=np.array([460.0, 500.0]),
+        chieff=np.array([0.0, 0.02]),
+        prior_wt=np.ones(2),
+        pixels=np.zeros(2, dtype=np.int32),
+    )
+    m1 = np.linspace(34.0, 40.0, 8)
+    sel = make_gw_event(
+        m1det=m1,
+        m2det=0.8 * m1,
+        dL=np.linspace(430.0, 530.0, 8),
+        chieff=np.zeros(8),
+        prior_wt=np.ones(8),
+        pixels=np.zeros(8, dtype=np.int32),
+    )
+    return pe, sel
+
+
+def _marked_likelihood(cat_pe, marks_pe, cat_sel, marks_sel, params=PARAMS):
+    pe, sel = _events()
+    return marked_dark_siren_log_likelihood(
+        COSMO,
+        params,
+        POP,
+        pe,
+        cat_pe,
+        build_observed_density_cache(cat_pe),
+        MODEL,
+        marks_pe,
+        jnp.asarray([1.5]),
+        sel,
+        cat_sel,
+        build_observed_density_cache(cat_sel),
+        marks_sel,
+        1,
+        2,
+        8.0,
+        pop_model="powerlaw+peak",
+        max_likelihood_variance=1.0e6,
+    )
+
+
+def _view(n_rows, pixels, mark_value):
+    """One compact catalog view plus its aligned mark table."""
+    z = np.zeros((n_rows, 3), dtype=float)
+    dz = np.full((n_rows, 3), 0.01, dtype=float)
+    w = np.zeros((n_rows, 3), dtype=float)
+    for row in range(n_rows):
+        z[row, 0] = 0.10 + 0.02 * row
+        z[row, 1] = 0.30 + 0.02 * row
+        w[row, :2] = [1.0, 3.0]
+    ng = np.full(n_rows, 2, dtype=np.int32)
+    cat = GalaxyCatalog(
+        apix=1.0e-4,
+        zgals=jnp.asarray(z),
+        dzgals=jnp.asarray(dz),
+        wgals=jnp.asarray(w),
+        ngals=jnp.asarray(ng),
+        unique_pixels=jnp.asarray(pixels, dtype=jnp.int32),
+    )
+    values = np.zeros((n_rows, 3, 1), dtype=float)
+    values[:, :2, 0] = mark_value
+    return cat, CenteredHostMarks(("logmstar",), jnp.asarray(values))
+
+
+def _reference_table(offset=0.0, n_gal=16):
+    z = np.linspace(0.05, 0.45, n_gal)
+    values = (np.linspace(-0.5, 0.5, n_gal) + offset)[:, None]
+    return jnp.asarray(z), jnp.asarray(values)
+
+
+def test_raw_zero_point_marks_are_rejected_through_the_marked_likelihood():
+    """The centering guard used to be dead code on the science path."""
+    cat, _ = _catalog()
+    raw = np.zeros((2, 3, 1), dtype=float)
+    raw[0, :2, 0] = [10.4, 10.7]
+    raw[1, 0, 0] = 10.5
+    marks = _marks(raw)
+    with pytest.raises(ValueError, match="z-centered"):
+        _marked_likelihood(cat, marks, cat, marks)
+    with pytest.raises(ValueError, match="z-centered"):
+        build_marked_incomplete_catalog_prior_state(
+            COSMO,
+            PARAMS,
+            cat,
+            build_observed_density_cache(cat),
+            MODEL,
+            marks,
+            jnp.asarray([1.5]),
+        )
+
+
+def test_uncentered_reference_table_is_rejected_with_per_mark_diagnostics():
+    """``reference_values`` feeds mu_miss through the same clip as the rows."""
+    cat, _ = _catalog()
+    ref_z, raw_ref = _reference_table(offset=10.5)
+    uncentered = CenteredHostMarks(
+        ("logmstar",), _marks().values, ref_z, raw_ref
+    )
+    with pytest.raises(ValueError, match="survey-wide reference galaxies"):
+        check_centered_marks(MODEL, uncentered, cat)
+    with pytest.raises(ValueError, match=r"logmstar: mean=\+10\.5"):
+        check_centered_marks(MODEL, uncentered, cat)
+    with pytest.raises(ValueError, match="survey-wide reference galaxies"):
+        _marked_likelihood(cat, uncentered, cat, uncentered)
+
+    centered = CenteredHostMarks(
+        ("logmstar",), _marks().values, *_reference_table()
+    )
+    check_centered_marks(MODEL, centered, cat)
+    assert np.isfinite(float(_marked_likelihood(cat, centered, cat, centered)))
+
+
+def test_differing_pe_and_selection_views_need_a_shared_reference_table():
+    """mu_miss is the one view-level aggregate in the marked prior."""
+    cat_pe, marks_pe = _view(2, [0, 1], 0.6)
+    cat_sel, marks_sel = _view(3, [0, 1, 2], -0.4)
+
+    with pytest.raises(ValueError, match="same catalog pixels"):
+        _marked_likelihood(cat_pe, marks_pe, cat_sel, marks_sel)
+
+    ref_z, ref_values = _reference_table()
+    shared_pe = CenteredHostMarks(("logmstar",), marks_pe.values, ref_z, ref_values)
+    shared_sel = CenteredHostMarks(("logmstar",), marks_sel.values, ref_z, ref_values)
+    assert np.isfinite(
+        float(_marked_likelihood(cat_pe, shared_pe, cat_sel, shared_sel))
+    )
+
+    other_z, other_values = _reference_table(offset=0.1)
+    mismatched = CenteredHostMarks(
+        ("logmstar",), marks_sel.values, other_z, other_values
+    )
+    with pytest.raises(ValueError, match="different survey-wide reference tables"):
+        _marked_likelihood(cat_pe, shared_pe, cat_sel, mismatched)
+
+
+def test_same_pixel_views_with_equal_mark_tables_are_accepted():
+    """Distinct-but-equal objects over one view stay on the accepted path."""
+    cat_pe, marks_pe = _view(2, [0, 1], 0.6)
+    cat_sel, marks_sel = _view(2, [0, 1], 0.6)
+    assert marks_pe is not marks_sel
+    assert np.isfinite(float(_marked_likelihood(cat_pe, marks_pe, cat_sel, marks_sel)))
+
+
+def test_marked_guards_refuse_traced_tables_instead_of_skipping():
+    cat, marks = _view(2, [0, 1], 0.6)
+    cache = build_observed_density_cache(cat)
+
+    def build(values):
+        return build_marked_incomplete_catalog_prior_state(
+            COSMO,
+            PARAMS,
+            cat,
+            cache,
+            MODEL,
+            CenteredHostMarks(("logmstar",), values),
+            jnp.asarray([1.5]),
+        )
+
+    with pytest.raises(TypeError, match="Close over the marks"):
+        jax.jit(build)(marks.values)
+    # Closing over the tables and tracing only eta stays supported.
+    state = jax.jit(lambda eta: build_marked_incomplete_catalog_prior_state(
+        COSMO, PARAMS, cat, cache, MODEL, marks, eta
+    ))(jnp.asarray([1.5]))
+    assert np.all(np.isfinite(np.asarray(state.log_Z)))

@@ -190,3 +190,185 @@ def test_target_contract_validates_sampler_coordinates():
             lambda theta: 0.0,
             _plan(joint_constraints=(("ball3", (0, 1, 2)),)),
         )
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ("normal", None, 1.0),
+        ("normal", 0.0, None),
+        ("normal", None, None),
+        ("lognormal", None, None),
+        ("lognormal", 0.0, None),
+        ("beta", None, None),
+        ("beta", 1.0, None),
+    ],
+)
+def test_non_uniform_prior_kinds_require_explicit_loc_and_scale(entry):
+    """ParamSpec's None means the (0, 1) defaults; the seam demands them spelled out.
+
+    make_prior_transform keeps the frozen default substitution (a whitened
+    latent declared through ParamSpec is a standard normal), but a companion
+    writes ParameterPlan triples by hand, where a missing value is an omission.
+    """
+    kind = entry[0]
+    with pytest.raises(ValueError, match=f"prior kind {kind!r} .* requires an explicit"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.0,),
+                upper=(1.0,),
+                prior_kinds=(entry,),
+            ),
+        )
+
+    # The transform consumes only beta's shape, so beta's loc stays optional.
+    InferenceTarget(
+        lambda theta: 0.0,
+        _plan(labels=("x",), lower=(0.0,), upper=(1.0,), prior_kinds=(("beta", None, 2.0),)),
+    )
+
+
+def test_prior_kind_vocabulary_fails_closed():
+    """An unrecognized kind used to sample uniform; a bad scale froze the axis."""
+    for bad in ("gaussian", "loguniform", "delta", "Normal"):
+        with pytest.raises(ValueError, match="unknown prior kind"):
+            InferenceTarget(
+                lambda theta: 0.0,
+                _plan(
+                    labels=("x",),
+                    lower=(0.0,),
+                    upper=(10.0,),
+                    prior_kinds=((bad, 5.0, 1.0),),
+                ),
+            )
+
+    for bad_scale in (0.0, -2.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="scale"):
+            InferenceTarget(
+                lambda theta: 0.0,
+                _plan(
+                    labels=("x",),
+                    lower=(0.0,),
+                    upper=(10.0,),
+                    prior_kinds=(("normal", 5.0, bad_scale),),
+                ),
+            )
+
+    with pytest.raises(ValueError, match="non-finite prior loc"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.0,),
+                upper=(10.0,),
+                prior_kinds=(("normal", float("nan"), 1.0),),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="triple"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.0,),
+                upper=(10.0,),
+                prior_kinds=(("normal", 5.0),),
+            ),
+        )
+
+    # Every implemented family, with and without an explicit loc/scale.
+    InferenceTarget(
+        lambda theta: 0.0,
+        _plan(
+            labels=("a", "b", "c", "d"),
+            lower=(0.0, 0.0, 0.1, 0.0),
+            upper=(1.0, 10.0, 10.0, 1.0),
+            prior_kinds=(
+                UNIFORM,
+                ("normal", 5.0, 1.0),
+                ("lognormal", 0.0, 0.5),
+                ("beta", 1.0, 2.0),
+            ),
+        ),
+    )
+
+
+def test_joint_constraint_vocabulary_and_arity_fail_closed():
+    """An unrecognized two-index kind used to take the simplex fold silently."""
+    for bad in ("ordered_ge", "monotone", "simplexx"):
+        with pytest.raises(ValueError, match="unknown joint-constraint kind"):
+            InferenceTarget(
+                lambda theta: 0.0, _plan(joint_constraints=((bad, (0, 1)),))
+            )
+
+    with pytest.raises(ValueError, match="takes 2 indices"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x", "y", "z"),
+                lower=(0.0, 0.0, 0.0),
+                upper=(1.0, 1.0, 1.0),
+                prior_kinds=(UNIFORM,) * 3,
+                joint_constraints=(("ordered_le", (0, 1, 2)),),
+            ),
+        )
+    with pytest.raises(ValueError, match="takes 3 indices"):
+        InferenceTarget(
+            lambda theta: 0.0, _plan(joint_constraints=(("ball3", (0, 1)),))
+        )
+    with pytest.raises(ValueError, match="distinct"):
+        InferenceTarget(
+            lambda theta: 0.0, _plan(joint_constraints=(("simplex", (1, 1)),))
+        )
+
+    # The four implemented maps stay accepted.
+    InferenceTarget(
+        lambda theta: 0.0,
+        _plan(
+            labels=("a", "b", "c"),
+            lower=(-1.0, -1.0, -1.0),
+            upper=(1.0, 1.0, 1.0),
+            prior_kinds=(UNIFORM,) * 3,
+            joint_constraints=(("ball3", (0, 1, 2)), ("ordered_le", (0, 1))),
+        ),
+    )
+
+
+@pytest.mark.parametrize("population", ["brokenpowerlaw+2peaks", "gp1d_m1"])
+def test_ordinary_analysis_plans_are_inside_the_accepted_vocabulary(population):
+    """``ds.model`` never calls the validator; its plans must still pass it."""
+    import darksirens as ds
+    from darksirens.inference.prior import make_prior_transform
+    from darksirens.inference.target import _validate_parameter_plan
+
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=0.3075),
+        population=ds.Population(population),
+    )
+    plan = analysis.parameters
+    _validate_parameter_plan(plan)
+    make_prior_transform(
+        plan.lower, plan.upper, plan.prior_kinds, plan.joint_constraints
+    )
+    assert {kind[0] for kind in plan.prior_kinds} <= {
+        "uniform",
+        "normal",
+        "lognormal",
+        "beta",
+    }
+
+
+def test_dipole_angular_plan_is_inside_the_accepted_vocabulary():
+    """The one in-core producer of a joint constraint must stay accepted."""
+    import darksirens as ds
+    from darksirens.inference.target import _validate_parameter_plan
+
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=0.3075),
+        population=ds.Population("powerlaw+peak", fixed=True),
+        angular="dipole",
+    )
+    assert analysis.parameters.joint_constraints[0][0] == "ball3"
+    _validate_parameter_plan(analysis.parameters)

@@ -8,6 +8,52 @@ from typing import Callable
 
 from darksirens.analysis import ParameterPlan
 
+# One source of truth with the transform that consumes them: an entry outside
+# these vocabularies is silently reinterpreted there (an unknown kind samples
+# uniform, an unknown two-index constraint applies the simplex fold), so the
+# seam rejects it here.  prior.py imports only numpy, so this does not widen
+# the dependency-light import surface.
+from .prior import JOINT_CONSTRAINT_ARITY, PRIOR_KINDS
+
+
+def _validate_prior_kind(label: str, entry) -> None:
+    is_triple = isinstance(entry, (tuple, list)) and len(entry) == 3
+    if isinstance(entry, str) or not is_triple:
+        raise ValueError(
+            f"prior_kinds entry for parameter {label!r} must be a "
+            f"(kind, loc, scale) triple, got {entry!r}"
+        )
+    kind, loc, scale = entry
+    if kind not in PRIOR_KINDS:
+        raise ValueError(
+            f"unknown prior kind {kind!r} for parameter {label!r}; accepted "
+            f"kinds are {PRIOR_KINDS}"
+        )
+    if kind == "uniform":
+        return
+    # This seam is stricter than ParamSpec, whose None means the standard (0, 1)
+    # defaults that core's own registries never rely on: a companion writes
+    # these triples by hand, so an unstated loc or scale is far more likely an
+    # omission than a request for the default. The transform consumes only the
+    # shape for "beta" (Beta(1, scale)), so beta's loc stays optional.
+    if kind != "beta" and loc is None:
+        raise ValueError(
+            f"prior kind {kind!r} for parameter {label!r} requires an explicit loc"
+        )
+    if scale is None:
+        raise ValueError(
+            f"prior kind {kind!r} for parameter {label!r} requires an explicit "
+            "scale"
+        )
+    if loc is not None and not math.isfinite(float(loc)):
+        raise ValueError(f"non-finite prior loc for parameter {label!r}")
+    width = float(scale)
+    if not math.isfinite(width) or not width > 0.0:
+        raise ValueError(
+            f"prior scale for parameter {label!r} must be finite and > 0, "
+            f"got {width!r}"
+        )
+
 
 def _validate_parameter_plan(plan: ParameterPlan) -> None:
     if not isinstance(plan, ParameterPlan):
@@ -31,9 +77,24 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
         if not lo < hi:
             raise ValueError(f"parameter {label!r} requires lower < upper")
 
+    for label, entry in zip(plan.labels, plan.prior_kinds):
+        _validate_prior_kind(label, entry)
+
     for kind, indices in plan.joint_constraints:
         if not isinstance(kind, str) or not kind:
             raise ValueError("joint-constraint kind must be a non-empty string")
+        arity = JOINT_CONSTRAINT_ARITY.get(kind)
+        if arity is None:
+            raise ValueError(
+                f"unknown joint-constraint kind {kind!r}; accepted kinds are "
+                f"{tuple(JOINT_CONSTRAINT_ARITY)}"
+            )
+        indices = tuple(indices)
+        if len(indices) != arity:
+            raise ValueError(
+                f"joint-constraint {kind!r} takes {arity} indices, got "
+                f"{len(indices)}"
+            )
         for index in indices:
             if not isinstance(index, int) or isinstance(index, bool):
                 raise TypeError("joint-constraint indices must be integers")
@@ -41,6 +102,10 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
                 raise ValueError(
                     f"joint-constraint index {index} lies outside {n} parameters"
                 )
+        if len(set(indices)) != arity:
+            raise ValueError(
+                f"joint-constraint {kind!r} indices must be distinct, got {indices}"
+            )
 
 
 def combine_parameter_plans(*plans: ParameterPlan) -> ParameterPlan:
