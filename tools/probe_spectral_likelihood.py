@@ -33,10 +33,15 @@ def _fixture(make_gw_event):
     p_pe = 0.85 + 0.25 * (1.0 + np.sin(0.37 * i_pe)) / 2.0
     valid_pe = np.ones(n_pe, dtype=bool)
     valid_pe[[4, 17]] = False
+    # A few distances past the tabulated dL(z) support (~4.8e4 Mpc at the
+    # fiducial H0) so the gate also covers the out-of-table sample mask, which
+    # must drop such samples rather than clamp them to the grid edge.
+    dL_pe = np.linspace(360.0, 1180.0, n_pe)
+    dL_pe[[7, 19]] = [120000.0, 130000.0]
     pe = make_gw_event(
         m1det=m1_pe,
         m2det=m1_pe * q_pe,
-        dL=np.linspace(360.0, 1180.0, n_pe),
+        dL=dL_pe,
         chieff=np.linspace(-0.16, 0.21, n_pe),
         prior_wt=p_pe,
         pixels=np.zeros(n_pe, dtype=np.int32),
@@ -49,10 +54,12 @@ def _fixture(make_gw_event):
     p_sel = 0.75 + 0.35 * (1.0 + np.cos(0.071 * i_sel)) / 2.0
     valid_sel = np.ones(N_SEL, dtype=bool)
     valid_sel[[13, 201]] = False
+    dL_sel = np.linspace(260.0, 1650.0, N_SEL)
+    dL_sel[[50, 150, 250]] = [120000.0, 132500.0, 145000.0]
     sel = make_gw_event(
         m1det=m1_sel,
         m2det=m1_sel * q_sel,
-        dL=np.linspace(260.0, 1650.0, N_SEL),
+        dL=dL_sel,
         chieff=np.linspace(-0.24, 0.28, N_SEL),
         prior_wt=p_sel,
         pixels=np.zeros(N_SEL, dtype=np.int32),
