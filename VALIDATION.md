@@ -202,11 +202,36 @@ Local measurement on the validated stack with every optional backend installed
 (TinyNS, Dynesty, NumPyro, healpy, Matplotlib), on the final tree of the stack:
 714 passed, 1 skipped (the golden-regeneration guard), against 543 passed,
 1 skipped before the stack. The reproducible record is the GitHub
-Actions runs on the accepted PR heads: `phase8-regression` now installs the
-same optional stack, and the dedicated `real-backends` workflow runs the
-end-to-end TinyNS, Dynesty and NumPyro tests, the real Dynesty checkpoint
-round-trip and the healpy parity suite and fails on any skip. Their run
-identifiers belong in the darksirens-rebuild Phase 12C acceptance record.
+Actions matrix on the PR heads. `phase8-regression` installs the same optional
+stack, and the dedicated `real-backends` workflow runs the end-to-end TinyNS,
+Dynesty and NumPyro tests, the real Dynesty checkpoint round-trip and the
+healpy parity suite and fails on any skip. Every PR-triggered workflow passed
+on every head below; the load-bearing runs:
+
+```text
+main after #10 (4c0e960)  reference-integrity          35326494368  SUCCESS
+main after #16 (8bb1fc2)  reference-integrity          35326699909  SUCCESS
+
+#12 head b7304ad          phase4-spectral-likelihood   35327465851  SUCCESS
+                          phase5-catalog-dark-bright   35327465922  SUCCESS
+                          phase8-regression            35327466013  SUCCESS
+#13 head 2c8e646          phase3-population            35327467822  SUCCESS
+                          phase4-spectral-likelihood   35327467787  SUCCESS
+                          phase5-catalog-dark-bright   35327467821  SUCCESS
+                          phase8-regression            35327467785  SUCCESS
+#14 head f5e070c          phase7c3-healpix-geometry    35327467109  SUCCESS
+                          phase8-regression            35327467040  SUCCESS  714 passed, 1 skipped
+                          real-backends                35327467082  SUCCESS
+#15 head 9a87ffb          phase2-foundation            35327952962  SUCCESS
+                          phase4-spectral-likelihood   35327952991  SUCCESS
+                          phase5-catalog-dark-bright   35327952955  SUCCESS
+                          phase7-regression            35327952966  SUCCESS
+                          phase8-regression            35327952967  SUCCESS  714 passed, 1 skipped
+                          real-backends                35327953066  SUCCESS  75 passed, 0 skipped
+```
+
+The commit that records this table changes no code, so the `9a87ffb` runs
+stand for the final tree of the stack.
 
 Deliberate numerics changes and their reach are recorded in `MIGRATION.md`.
 
