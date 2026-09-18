@@ -1,3 +1,7 @@
+from dataclasses import replace
+import json
+import warnings
+
 import numpy as np
 import pytest
 
@@ -219,6 +223,133 @@ def test_complete_catalog_binding_matches_direct_fixed_theta_exactly():
     actual = bound(theta)
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
     assert np.isfinite(float(actual))
+
+
+def test_complete_catalog_empty_policy_reaches_the_likelihood(monkeypatch):
+    import darksirens.runtime_binding as rb
+
+    events, injections = _stores()
+    captured = {}
+
+    def fake_complete(*args, **kwargs):
+        captured["empty_policy"] = kwargs["empty_policy"]
+        return 0.0
+
+    monkeypatch.setattr(rb, "complete_catalog_siren_log_likelihood", fake_complete)
+
+    for requested, expected in ((None, "zero"), ("volume", "volume"), ("zero", "zero")):
+        analysis = model(
+            cosmology=Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+            population=_fixed_pop(),
+            catalog=_catalog(),
+            completeness="complete",
+            empty_policy=requested,
+        )
+        bind_analysis(analysis, events=events, injections=injections)(
+            np.array([67.74, 0.0, 0.0])
+        )
+        assert captured["empty_policy"] == expected
+
+
+def test_likelihood_options_reach_the_likelihood_call(monkeypatch):
+    import darksirens.runtime_binding as rb
+
+    events, injections = _stores()
+    analysis = model(
+        cosmology=Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+    )
+    captured = {}
+
+    def fake_spectral(*args, **kwargs):
+        captured.update(kwargs)
+        return 0.0
+
+    monkeypatch.setattr(rb, "spectral_siren_log_likelihood", fake_spectral)
+
+    default = bind_analysis(analysis, events=events, injections=injections)
+    assert default.selection_neff_soft_guard is False
+    default(np.array([67.74]))
+    assert captured["selection_neff_soft_guard"] is False
+    assert captured["sel_batch_size"] is None
+    assert captured["pe_event_block"] is None
+
+    bound = bind_analysis(
+        analysis,
+        events=events,
+        injections=injections,
+        selection_neff_soft_guard=True,
+        max_likelihood_variance=0.005,
+        sel_batch_size=64,
+        pe_event_block=2,
+    )
+    bound(np.array([67.74]))
+    assert captured["selection_neff_soft_guard"] is True
+    assert captured["max_likelihood_variance"] == 0.005
+    assert captured["sel_batch_size"] == 64
+    assert captured["pe_event_block"] == 2
+
+
+def _paired(pe_attrs, sel_attrs):
+    events, injections = _stores()
+    return (
+        replace(events, attrs=pe_attrs),
+        replace(injections, attrs=sel_attrs),
+    )
+
+
+def _spectral():
+    return model(cosmology=Cosmology(H0=(60.0, 80.0)), population=_fixed_pop())
+
+
+def test_binding_refuses_a_mismatched_pairing_contract():
+    events, injections = _paired(
+        {
+            "contract_hash": "aaaa1111",
+            "contract": json.dumps({"source_class": "BBH", "sky_measure": "none"}),
+        },
+        {
+            "contract_hash": "bbbb2222",
+            "contract": json.dumps({"source_class": "ALL", "sky_measure": "none"}),
+        },
+    )
+    with pytest.raises(RuntimeError, match="different pairing contracts") as excinfo:
+        bind_analysis(_spectral(), events=events, injections=injections)
+    message = str(excinfo.value)
+    assert "source_class: PE='BBH' vs selection='ALL'" in message
+    assert "sky_measure" not in message
+
+
+def test_binding_accepts_matching_or_absent_pairing_contracts():
+    contract = json.dumps({"source_class": "BBH"})
+    for pe_attrs, sel_attrs in (
+        ({"contract_hash": "aaaa1111", "contract": contract},
+         {"contract_hash": "aaaa1111", "contract": contract}),
+        ({"contract_hash": "aaaa1111", "contract": contract}, {}),
+        ({}, {"contract_hash": "bbbb2222", "contract": contract}),
+        ({}, {}),
+    ):
+        events, injections = _paired(pe_attrs, sel_attrs)
+        bind_analysis(_spectral(), events=events, injections=injections)
+
+
+def test_binding_warns_on_a_pair_cosmology_disagreement():
+    events, injections = _paired(
+        {"pe_cosmology_H0": 67.66, "pe_cosmology_Om0": 0.30966},
+        {"cosmology_H0": 50.0, "cosmology_Om0": 0.5},
+    )
+    with pytest.warns(RuntimeWarning, match="declares cosmology"):
+        bind_analysis(_spectral(), events=events, injections=injections)
+
+
+def test_binding_is_quiet_when_the_pair_cosmologies_agree():
+    events, injections = _paired(
+        {"pe_cosmology_H0": 67.66, "pe_cosmology_Om0": 0.30966},
+        {"cosmology_H0": 67.0, "cosmology_Om0": 0.32},
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        bind_analysis(_spectral(), events=events, injections=injections)
 
 
 def test_binding_rejects_wrong_theta_shape():

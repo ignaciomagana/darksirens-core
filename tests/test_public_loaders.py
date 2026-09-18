@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
+import warnings
 
 import h5py
 import numpy as np
+import pytest
 
 
 def _write_catalog(path, *, with_depth=True):
@@ -102,3 +105,66 @@ def test_gw_facades_delegate_after_runtime_configuration(monkeypatch):
         "sel.h5", allow_invalid_spin_swap=True, fit_columns=("m1det",)
     ) == ("sel.h5", True, ("m1det",))
     assert calls == ["configure", "configure"]
+
+
+def _store(path, attrs):
+    return SimpleNamespace(path=path, attrs=attrs)
+
+
+def test_matching_contract_gate_reports_every_differing_field():
+    from darksirens.gw.samples import require_matching_contract
+
+    pe = _store(
+        "pe.h5",
+        {
+            "contract_hash": "aaaa1111",
+            "contract": json.dumps(
+                {"source_class": "BBH", "sky_measure": "per_steradian"}
+            ),
+        },
+    )
+    sel = _store(
+        "sel.h5",
+        {
+            "contract_hash": "bbbb2222",
+            "contract": json.dumps({"source_class": "ALL", "sky_measure": "none"}),
+        },
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        require_matching_contract(pe, sel)
+    message = str(excinfo.value)
+    assert "contract_hash aaaa1111 != bbbb2222" in message
+    assert "sky_measure: PE='per_steradian' vs selection='none'" in message
+    assert "source_class: PE='BBH' vs selection='ALL'" in message
+
+
+def test_matching_contract_gate_exempts_stores_without_a_hash():
+    from darksirens.gw.samples import require_matching_contract
+
+    pe = _store("pe.h5", {"contract_hash": "aaaa1111"})
+    sel = _store("sel.h5", {"contract_hash": "aaaa1111"})
+    require_matching_contract(pe, sel)
+    require_matching_contract(pe, _store("sel.h5", {}))
+    require_matching_contract(_store("pe.h5", {}), sel)
+
+
+def test_pair_cosmology_warning_uses_the_frozen_tolerances():
+    from darksirens.gw.samples import warn_pair_cosmology
+
+    pe = _store("pe.h5", {"pe_cosmology_H0": 67.66, "pe_cosmology_Om0": 0.30966})
+    with pytest.warns(RuntimeWarning, match="verify this pair was built together"):
+        warn_pair_cosmology(
+            pe, _store("sel.h5", {"cosmology_H0": 70.0, "cosmology_Om0": 0.30966})
+        )
+    with pytest.warns(RuntimeWarning):
+        warn_pair_cosmology(
+            pe, _store("sel.h5", {"cosmology_H0": 67.66, "cosmology_Om0": 0.25})
+        )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        # Just inside both tolerances, and the missing-attr exemption.
+        warn_pair_cosmology(
+            pe, _store("sel.h5", {"cosmology_H0": 67.0, "cosmology_Om0": 0.34})
+        )
+        warn_pair_cosmology(pe, _store("sel.h5", {}))
