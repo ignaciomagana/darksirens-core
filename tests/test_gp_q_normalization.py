@@ -30,13 +30,16 @@ import math
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+
+from darksirens.population.gp import (
+    build_gp_model, _coarse_axis_grid, _KD_N_M1COND_Q, _ZNORM_HI,
+)
+from darksirens.population.utils import get_chi_grid, get_q_grid
+from darksirens.cosmology._grid import zMax
 
 # numpy 1/2 compat: the validated env is numpy 1.26 (no np.trapezoid).
 _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-import pytest
-
-from darksirens.population.gp import build_gp_model, _ZNORM_HI
-from darksirens.cosmology._grid import zMax
 
 # Some parametric test modules insert a tinygp STUB into sys.modules; GP models
 # then cannot evaluate.  Follow the registry-golden convention: a stub (no
@@ -88,11 +91,31 @@ def test_conditional_q_integral_is_unity(name):
     chi_in = "chi" in model.gp_axes
     z_in = "z" in model.gp_axes
 
-    qg = jnp.linspace(0.0, 1.0, 400)
-    cg = jnp.linspace(-1.0, 1.0, 200)
+    # Integrate on the model's OWN probability-axis quadrature, which isolates
+    # the m1 tabulation this test is about from the lattice itself.  The GP
+    # normaliser uses a coarse (q, chi) lattice whenever the full tensor product
+    # would be intractable (``JointGPPopulation._normalise``); on the
+    # m1-conditional branch every model here takes, that lattice has no m1 axis
+    # and its q axis carries ``_KD_N_M1COND_Q`` nodes.  The lattice's own
+    # accuracy against an independent fine grid is
+    # ``test_conditional_q_integral_is_unity_on_an_independent_grid``.
+    coarse = (z_in and len(model._prob_gp) >= 2) or len(model._prob_gp) >= 3
+    qg = _coarse_axis_grid("q", n=_KD_N_M1COND_Q) if coarse else get_q_grid()
+    cg = _coarse_axis_grid("chi") if coarse else get_chi_grid()
     zs = (0.05, 1.0, 4.5) if z_in else (0.3,)
 
-    for m1v in (8.3, 21.7, 55.1):
+    # Probes ACROSS THE LOW-MASS TAPER TOE, where the q-normalisation table used
+    # to be a fixed 64-node log grid over [2, 200] that knew nothing about the
+    # sampled m_min/dm_min.  N(m1) turns on there like exp(-dm_min/(m1 - m_min)),
+    # so log-linear interpolation across one cell of that table was unrelated to
+    # the true value: measured for gp1d_q at the shipped fiducial, m1 = 6.5 gave
+    # int p_gp(q|m1) dq = 1.91, and at m_min = 8, dm_min = 2 (interior to the
+    # priors) m1 = 8.16 gave 2.4e+25.  With support-following nodes the same
+    # probes are 1.006 and 1.005.
+    m_min, dm_min = float(P("m_min")), float(P("dm_min"))
+    toe = [m_min + f * dm_min for f in (0.25, 0.5, 1.0, 2.0)]
+
+    for m1v in toe + [8.3, 21.7, 55.1]:
         mass = model._baseline_mass(m1v, P("alpha_mass"), P("m_min"),
                                     P("dm_min"), P("m_max"), P("dm_max"))
         for zv in zs:
@@ -113,11 +136,13 @@ def test_conditional_q_integral_is_unity(name):
                 pgp = dens / (rate * mass * spin)
                 integ = jnp.trapezoid(pgp, qg)
 
-            # Taper-toe pinch: at the lowest m1 the norm curves steeply in
-            # log-m1 as the q-support turns on, so the fixed 64-node log-m1
-            # interpolation carries a few-% residual there; m1 >= 20 is <1%.
-            rtol = 6e-2 if m1v < 12.0 else 2e-2
-            assert abs(float(integ) - 1.0) < rtol, (name, m1v, zv, float(integ))
+            # One tolerance everywhere now, toe included.  The old file granted
+            # rtol = 6e-2 below m1 = 12 and called the excess "a few-% residual
+            # at the taper toe"; it was up to 25 orders of magnitude at interior
+            # prior points, and the grant is what hid it.  Measured worst
+            # residual over these probes and all four models: 5.8e-3, at
+            # m1 = m_min + 0.25 dm_min.
+            assert abs(float(integ) - 1.0) < 2e-2, (name, m1v, zv, float(integ))
 
 
 @_NEED_TINYGP
@@ -262,3 +287,49 @@ def test_gradient_finite_including_taper_toe(name):
     grad = np.asarray(jax.grad(total)(theta))
     assert np.isfinite(val)
     assert np.all(np.isfinite(grad)), dict(enumerate(grad.tolist()))
+
+
+@_NEED_TINYGP
+@pytest.mark.parametrize("name", _Q_MODELS)
+def test_conditional_q_integral_is_unity_on_an_independent_grid(name):
+    """The same conditional integral on a grid the model does not own.
+
+    ``test_conditional_q_integral_is_unity`` integrates on the model's own
+    probability-axis quadrature, which isolates the m1 tabulation. This one
+    uses a fine independent (q, chi) grid, so it also sees the coarse k-D
+    lattice itself: with 24 q nodes over [0.02, 1] the q-support sliver just
+    above m_min was under-resolved (measured 0.876 at m1 = m_min + 0.25 dm_min
+    for gp3d_q_chi_z); the m1-conditional branch now tabulates q on 128 nodes.
+    """
+    model = build_gp_model(name)
+    theta = _seed_theta(model, seed=0, scale=0.6)
+    P = _params(model, theta)
+    chi_in = "chi" in model.gp_axes
+    z_in = "z" in model.gp_axes
+    m_min, dm_min = float(P("m_min")), float(P("dm_min"))
+
+    qg = jnp.linspace(0.0, 1.0, 401)
+    cg = jnp.linspace(-1.0, 1.0, 201)
+    zs = (0.1, 1.0) if z_in else (0.3,)
+
+    for m1v in (m_min + 0.25 * dm_min, m_min + 0.5 * dm_min,
+                m_min + 2.0 * dm_min, 21.7):
+        mass = model._baseline_mass(m1v, P("alpha_mass"), P("m_min"),
+                                    P("dm_min"), P("m_max"), P("dm_max"))
+        for zv in zs:
+            rate = (1.0 + zv) ** (P("gamma") - 1.0)
+            if chi_in:
+                Q, C = jnp.meshgrid(qg, cg, indexing="ij")
+                dens = jnp.exp(model.log_p_pop(
+                    jnp.full(Q.size, m1v), Q.ravel(),
+                    jnp.full(Q.size, zv), C.ravel(), theta)).reshape(Q.shape)
+                integ = jnp.trapezoid(
+                    jnp.trapezoid(dens / (rate * mass), cg, axis=-1), qg)
+            else:
+                chi0 = 0.1
+                spin = model._baseline_spin(chi0, P("mu_chi"), P("sigma_chi"))
+                dens = jnp.exp(model.log_p_pop(
+                    jnp.full_like(qg, m1v), qg,
+                    jnp.full_like(qg, zv), jnp.full_like(qg, chi0), theta))
+                integ = jnp.trapezoid(dens / (rate * mass * spin), qg)
+            assert abs(float(integ) - 1.0) < 2e-2, (name, m1v, zv, float(integ))

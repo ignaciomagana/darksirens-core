@@ -35,7 +35,7 @@ from darksirens.likelihood.hierarchical import (
     dark_siren_log_likelihood,
     spectral_siren_log_likelihood,
 )
-from darksirens.population import get_model
+from darksirens.population import ensure_pairing_grid_covers, get_model
 from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
 _CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
@@ -322,6 +322,14 @@ def bind_analysis(
         )
 
     required = required_fit_columns(analysis)
+    # The opt-in pairing m1 grid clamps above its ceiling; size and check it
+    # against this model's support once, here, before any likelihood traces.
+    ensure_pairing_grid_covers(
+        analysis.population.model_name,
+        shared_beta=analysis.population.shared_beta,
+        shared_spin=analysis.population.shared_spin,
+        shared_gamma=analysis.population.shared_gamma,
+    )
     _require_store_basis(events, required, kind="PE")
     _require_store_basis(injections, required, kind="selection")
     # Per-store gates only compare each file against the model. The pairing

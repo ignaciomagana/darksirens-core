@@ -5,9 +5,19 @@ import os
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import ensure_compile_time_eval, jit
+
+# Every scientific module that builds float64 module-level grids enables x64
+# locally before those arrays exist (cosmology/_grid.py, cosmology/distances.py,
+# catalog/*.py, selection/*.py).  This module was the one exception, and the
+# mass/q/chi grids at the bottom of the file are built AT IMPORT and latched
+# into lru_caches, so importing darksirens.population before the runtime is
+# configured froze them at float32 for the process lifetime while
+# jax.config.jax_enable_x64 went on reporting True.
+jax.config.update("jax_enable_x64", True)
 
 # ======================================================================
 # Configurable normalisation grids
@@ -147,14 +157,18 @@ class NormalizationGridSettings:
     the same by-construction argument below.  ``pairing_edge_nq`` therefore may
     not drop BELOW ``PAIRING_PANEL_NQ`` and ``__post_init__`` rejects a value
     that does: it is what makes "the grid branch is never worse than the exact
-    branch it approximates" (tests/test_pairing_edge_fix.py) hold BY
-    CONSTRUCTION for the samples that take this rule -- a strictly finer rule on
-    an identical panel split -- rather than by calibration; at 8 nodes per panel
-    it degrades to 6.2e-1 nats.  (For the TRUSTED samples, which take
-    ``jnp.interp`` of log I and are constrained by no node count, that invariant
-    holds by MEASUREMENT only: the smallest margin over that test's corners is
-    1.45x, at m_min = 2, dm_min = 10, beta = 0 with N_grid = 2048, against 199x
-    at the other end.)  Raising it costs ``2 * pairing_edge_nq``
+    branch it approximates" hold BY CONSTRUCTION for the samples that take this
+    rule -- a strictly finer rule on an identical panel split -- rather than by
+    calibration; at 8 nodes per panel it degrades to 6.2e-1 nats.  (For the
+    TRUSTED samples, which take ``jnp.interp`` of log I and are constrained by no
+    node count, that invariant holds by MEASUREMENT only: the smallest margin
+    measured over the corner sweep is 1.45x, at m_min = 2, dm_min = 10, beta = 0
+    with N_grid = 2048, against 199x at the other end.)  The invariant itself is
+    asserted in this tree by
+    ``tests/test_pairing_norm_grid.py::test_support_edge_cell_is_bounded_and_one_sided``
+    and its dense-sweep sibling; the coupling above is asserted by
+    ``test_settings_enforce_the_pairing_grid_q_grid_coupling``.  Raising it costs
+    ``2 * pairing_edge_nq``
     ``_eval_unnorm`` evaluations per sample (against ``2 * PAIRING_PANEL_NQ`` for
     the exact branch).  Lowering ``pairing_edge_tol`` routes more samples onto
     that rule, which since the panel split is no longer a trade: measured at
@@ -504,9 +518,12 @@ def get_pairing_panel_quadrature():
     GiB).  Spectral pays the larger FRACTION because that call has no catalog
     term for the pairing work to hide behind.  GL-48 (3.4e-09) and a 4x GL-16
     composite (64 nodes, 8.3e-07) buy accuracy nobody needs for roughly another
-    1.6 ms.  A maintainer lowering this constant must re-run that scan;
-    tests/test_pairing_panel_quadrature.py::test_worst_case_bound_over_the_full_prior_box
-    fails at 16.
+    1.6 ms.  A maintainer lowering this constant must re-run that scan: nothing
+    in this tree bounds this rule against a converged INDEPENDENT reference over
+    the prior box, so the node count is pinned only incidentally, by
+    ``tests/data/population_registry_golden.json`` (lowering it to 16 shifts
+    log_p_pop on the golden probes by 2.1e-9 nats and to 8 by 4.9e-6, both above
+    that file's 1e-12 rtol).
 
     The node set is static -- it depends on no setting -- so the quadrature is a
     compile-time constant and a proposal never retraces on it.
@@ -524,10 +541,12 @@ def get_pairing_edge_quadrature():
     (``PairingModel._panel_norm``), only at ``pairing_edge_nq`` nodes per panel
     instead of ``PAIRING_PANEL_NQ`` (``NormalizationGridSettings.__post_init__``
     rejects a smaller value) -- which is what makes the grid branch provably
-    never worse than the branch it approximates ON THE SAMPLES THAT TAKE IT, the
-    invariant tests/test_pairing_edge_fix.py asserts; the trusted, interpolated
-    samples that test also covers are constrained by measurement, not by node
-    count.
+    never worse than the branch it approximates ON THE SAMPLES THAT TAKE IT: a
+    strictly finer rule on an identical panel split cannot be the coarser of the
+    two.  The trusted, interpolated samples are constrained by measurement rather
+    than by node count.  Both halves are asserted in this tree by
+    ``tests/test_pairing_norm_grid.py::test_support_edge_cell_is_bounded_and_one_sided``
+    and ``::test_support_edge_dense_sweep_bounded_and_one_sided``.
 
     The integrand below the shoulder is the taper boundary layer
     ``S(m_min + t (m1 - m_min))``, of width ``A^-1 = (m1 - m_min)/dm_min`` in

@@ -126,8 +126,9 @@ def _exact_pairing_norm_powerlaw(m1, mmin, dmmin, beta):
     Since 2026-09-05 that rule is TWO Gauss-Legendre panels split at the taper
     shoulder ``q_a = (mmin + dmmin)/m1`` on the support-relative interval
     ``[q_cut, 1]``, ``PAIRING_PANEL_NQ`` nodes each -- not the historical
-    ``get_q_grid()`` trapezoid.  See tests/test_pairing_panel_quadrature.py for
-    the full pin of that rule."""
+    ``get_q_grid()`` trapezoid.  Nothing in this tree bounds that rule against a
+    converged independent reference over the prior box; this function is the
+    independent reimplementation of it."""
     x, w = np.polynomial.legendre.leggauss(PAIRING_PANEL_NQ)
     t, wt = 0.5 * (x + 1.0), 0.5 * w
     m1 = np.atleast_1d(np.asarray(m1, dtype=float))
@@ -527,6 +528,48 @@ def test_pairing_grid_validation_rejects_undersized_grid():
     assert_pairing_grid_covers_support(300.0)  # disabled -> exact path, no raise
 
 
+def test_ensure_pairing_grid_covers_sizes_the_grid_for_a_300_msun_model():
+    """The host-side seam that gives the two guards a caller.
+
+    ``size_pairing_grid_to_support`` / ``assert_pairing_grid_covers_support``
+    had no call site anywhere in ``src/``: the env opt-in
+    ``DARKSIRENS_GW_PAIRING_M1_GRID`` was live while the guard that keeps it
+    truthful was not.  ``ensure_pairing_grid_covers`` resolves the model by name
+    and runs both, so enabling the knob with a 300-Msun model can no longer clamp
+    the pairing normaliser inside the model's own support."""
+    from darksirens.population.registry import ensure_pairing_grid_covers
+
+    _set_pairing_grid(2048, m_hi=200.0)
+    before = normalization_grid_settings()
+    assert population_m1_support_max(get_model("gwtc5_fiducial_bpl2peaks")) == 300.0
+    with pytest.raises(ValueError, match="does not cover"):
+        assert_pairing_grid_covers_support(300.0, model_name="gwtc5_fiducial_bpl2peaks")
+
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
+    s = normalization_grid_settings()
+    assert s.pairing_m_hi >= 300.0, s
+    assert s.pairing_m1_grid > before.pairing_m1_grid, s   # density preserved
+    assert_pairing_grid_covers_support(300.0)              # now covered: no raise
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")  # idempotent
+    assert normalization_grid_settings() == s
+
+    # A model whose support fits under the default ceiling leaves it alone.
+    _set_pairing_grid(2048, m_hi=200.0)
+    before = normalization_grid_settings()
+    ensure_pairing_grid_covers("powerlaw+peak")
+    assert normalization_grid_settings() == before
+
+
+def test_ensure_pairing_grid_covers_is_a_noop_when_the_grid_is_disabled():
+    """Off by default: the exact per-sample branch ignores the bound entirely."""
+    from darksirens.population.registry import ensure_pairing_grid_covers
+
+    _set_pairing_grid(None, m_hi=200.0)
+    before = normalization_grid_settings()
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
+    assert normalization_grid_settings() == before
+
+
 def test_size_pairing_grid_scales_nodes_and_is_noop_when_covered():
     """Sizing preserves log spacing and scales the node count up so density does
     not drop; it is inert when the support already fits and when the grid is off."""
@@ -737,7 +780,8 @@ def test_support_edge_dense_sweep_bounded_and_one_sided(capsys):
     # at ``pairing_edge_nq`` nodes per panel against the exact branch's
     # ``PAIRING_PANEL_NQ`` -- so it is bounded by the exact branch's own
     # near-edge quadrature error, 7.6e-3 nats off a composite-GL reference
-    # (tests/test_pairing_panel_quadrature.py), and not by the interpolant.
+    # (measured when PAIRING_PANEL_NQ was 16; no test in this tree re-measures
+    # it), and not by the interpolant.
     # Measured worst over all 18 rows here: +4.2e-3, at mmin = 6, dm = 5.005,
     # beta = 2.5, N = 2048 (the widest taper of the set, where the interpolated
     # and per-sample rules disagree most).  The bound below is re-derived

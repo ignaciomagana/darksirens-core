@@ -79,7 +79,19 @@ _CUSTOM = [
     "gwtc3_fiducial_plpeak",
 ]
 
-LEGACY_NAMES = [b + s for b in _BASE_MIXTURES for s in _SUFFIXES] + _CUSTOM
+# The '@md' rate decoration.  It is reachable from the frozen public API and
+# feeds log_p_pop through log_p_massspin + log_rate_z, but no golden entry
+# covered it: a sign flip of the Madau-Dickinson turnover and a wholesale change
+# of MD_RATE_FIDUCIALS both left the suite green.  Appended by a re-record that
+# left every pre-existing entry byte-identical (verified by JSON diff), so the
+# golden still pins the pre-refactor physics for every name it already covered.
+_MD_DECORATED = [
+    "powerlaw+peak@md",
+    "brokenpowerlaw+2peaks@md",
+]
+
+LEGACY_NAMES = ([b + s for b in _BASE_MIXTURES for s in _SUFFIXES]
+                + _CUSTOM + _MD_DECORATED)
 
 # Fixed probe grid spanning the mass/spin support.
 _M1 = [6.0, 10.0, 35.0, 55.0, 75.0]

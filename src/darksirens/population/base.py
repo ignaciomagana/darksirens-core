@@ -474,9 +474,8 @@ class PairingModel(ABC):
         subclass that declares extra edges through :meth:`_panel_edges` above the
         shoulder: those are sorted into the edge list, so ``q_lo >= q_a`` always
         and the kernel is bare over the whole panel either way.  No shipped class
-        declares both hooks, so that composition is pinned by a subclass written
-        for it, in
-        ``tests/test_pairing_plateau_closed_form.py::test_extra_panel_edges_and_the_closed_plateau_compose``.
+        declares both hooks, so nothing in this tree exercises that composition:
+        an out-of-tree subclass that declares both must pin it itself.
 
         Worth doing because the plateau panel is half the per-sample quadrature
         and the more expensive half: a node there costs a ``log`` and two ``exp``
@@ -696,12 +695,14 @@ class PairingModel(ABC):
         # The SAME panel split as the exact branch, with pairing_edge_nq nodes
         # per panel instead of PAIRING_PANEL_NQ.  Sharing the split is what makes
         # "the grid branch is never worse than the exact branch it approximates"
-        # (tests/test_pairing_edge_fix.py) hold BY CONSTRUCTION for the samples
-        # that take this rule -- a strictly finer rule on an identical split --
+        # hold BY CONSTRUCTION for the samples that take this rule -- a strictly
+        # finer rule on an identical split cannot be the coarser of the two --
         # and by MEASUREMENT for the trusted ones, which take jnp.interp of
         # log I and are constrained by no node count at all: the smallest margin
-        # measured over that test's corners is 1.45x (m_min = 2, dm_min = 10,
-        # beta = 0 at N_grid = 2048), against 199x at the other end.
+        # measured over the corner sweep is 1.45x (m_min = 2, dm_min = 10,
+        # beta = 0 at N_grid = 2048), against 199x at the other end.  Both are
+        # asserted by tests/test_pairing_norm_grid.py, in
+        # test_support_edge_cell_is_bounded_and_one_sided and its dense sweep.
         n_sc_e, scale_e = self._panel_norm(m1_a, m_min, dm_min, theta, t_e, w_e)
         I_edge   = (n_sc_e * scale_e).reshape(jnp.shape(m1))
         edge_ok  = I_edge > 0
