@@ -114,6 +114,11 @@ parameter decoders or sampler adapters.
   max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None)` are
   likelihood options, never sampler options. `auto` resolves to `soft` for
   NumPyro and `hard` otherwise. They are refused for an `InferenceTarget`.
+- `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
+  `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
+  raises when none has a finite likelihood (and warns when very few do);
+  `"off"` skips it. When the check fails or warns, its advice names `infer`
+  keywords, not command-line flags.
 - Ordinary `infer` results carry `log_prior_volume_fraction` and, for a finite
   `logZ`, `logZ_corrected = logZ - log_prior_volume_fraction`. The raw `logZ`
   is exactly the sampler's number.
@@ -197,8 +202,11 @@ public function is called.
 - a complete-catalog row without galaxies contributes zero host mass unless the
   volume fallback is requested explicitly;
 - GP z-conditional and m1-conditional normalisers are tabulated in the GP
-  coordinate (`log1p(z)`) and on nodes that follow the sampled mass support, so
-  the conditional density integrates to one inside the prior box;
+  coordinate (`log1p(z)`) and on nodes that follow the sampled mass support, and
+  the mass-ratio normaliser at fixed primary mass integrates on nodes spanning
+  the allowed mass-ratio range and tabulates the normaliser divided by the
+  low-mass taper, so the conditional density integrates to one inside the prior
+  box, including just above `m_min`;
 - `ang2pix_ring` reproduces `healpy.ang2pix(..., nest=False)` exactly,
   including ring-boundary and polar-cap rounding;
 - marked-host PE and selection views share one catalog view and one mark table,
