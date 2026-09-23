@@ -104,6 +104,10 @@ scientific arithmetic change relative to accepted 8C. Its acceptance is recorded
 in the rebuild control repository; after merge, the resulting `main` tree is the
 core baseline from which companion repositories may begin.
 
+The release workflow's check that no science source changed since accepted 8C
+was retired once Phases 12A and 12B changed that source on purpose; the other
+release checks now run on every pull request (see `VALIDATION.md`).
+
 ## Post-freeze work
 
 Phases 12A and 12B added two narrow composition seams (completion curves;
@@ -122,10 +126,12 @@ behavior for a stated reason:
 - the GP z-conditional normaliser is tabulated in `log1p(z)` on 145 nodes
   instead of uniformly in z on 40, and the m1-conditional q-normaliser follows
   the sampled taper toe, and the coarse (q, chi) lattice on the m1-conditional
-  branch tabulates q on 128 nodes instead of 24 so the q-support sliver just
-  above `m_min` is resolved. All three defects are inherited from the
-  reference; the z-node change costs roughly 3x per proposal on z-conditioned
-  GP models, the other two nothing measurable;
+  branch tabulates q on 128 nodes instead of 24. All three defects are
+  inherited from the reference; the z-node change costs roughly 3x per
+  proposal on z-conditioned GP models, the other two nothing measurable. The
+  128-node lattice fixed the recorded point (m1 = m_min + 0.25 dm_min at the
+  fiducial taper) but not the narrow allowed mass-ratio range just above
+  `m_min` in general; the second follow-up below fixes that;
 - `ang2pix_ring` now matches healpy at ring boundaries, the polar caps and
   right ascensions just below a multiple of 2 pi;
 - inputs the reference refused and the reconstruction had silently accepted
@@ -138,3 +144,54 @@ astropy, healpy, scipy quadrature and hand-computed expectations; real TinyNS,
 Dynesty and NumPyro runs; a Phase 4 spectral probe that now covers the
 out-of-table distance mask; and coverage for the `@md` rate evolution and the
 `in_prior_v2` fiducial set.
+
+### Second review follow-up
+
+A second stack of PRs (#17 to #23, merged in order) finished the items the
+first follow-up had left open. Only one of them changes numerics:
+
+- **GP mass-ratio normaliser just above the minimum mass (changes numerics).**
+  For `gp1d_q`, `gp2d_q_chi`, `gp2d_q_z` and `gp3d_q_chi_z` the density over
+  mass ratio (and spin) at fixed primary mass must integrate to 1. The 128-node
+  mass-ratio lattice gave 1.0005 at the recorded point, but closer to `m_min`
+  (0.81, and 0.58 for `gp3d_q_chi_z`, at m_min + 0.05 dm_min) and for a narrow
+  taper inside the priors (m_min = 10, dm_min = 0.05: 0.055 to 0.085 at
+  m_min + 0.25 dm_min) all four models were wrong. Two errors of opposite sign
+  were at work: a fixed mass-ratio grid cannot follow the narrow allowed range
+  just above `m_min`, and interpolating the log-normaliser across the sharp
+  low-mass taper was inaccurate. The normaliser now integrates mass ratio on
+  nodes that span the allowed range itself and tabulates the normaliser divided
+  by the taper, which is smooth. Every probe at m_min + 0.1 dm_min or above is
+  now within 0.4% of 1 (m_min + 0.05 dm_min: within 1.1% at the fiducial taper,
+  3.9% at dm_min = 0.05). Values away from the taper move at the 1e-4 level.
+  `gp1d_q` is about 2.5 times slower on the value alone (a few milliseconds for
+  20,000 queries on CPU) and about 1.3 times on value plus gradient; the other
+  three models cost about the same or less.
+- **Run fingerprints (no likelihood change).** Fingerprints now hash a canonical
+  form of the semantic block: arrays as dtype, shape and every value at full
+  precision, tuples as lists, numpy scalars as Python scalars, NaN and infinity
+  written out, and anything else refused instead of hashed as text. The old
+  rule hashed arrays at print precision, so the resume gate could accept a
+  different target. The schema moves from 3 to 4 and older checkpoints are
+  refused with a message saying why. Plain-JSON semantic blocks hash exactly as
+  before. Semantic blocks with non-string keys, sets, complex numbers,
+  datetimes or bytes now raise. `core_numerics_semantic()` and
+  `core_environment_advisory()` record the settings core resolved at import
+  from `DARKSIRENS_*` variables; `infer()` calls neither, nor the resume gate.
+- **Missing-galaxy budget count check (no likelihood change).**
+  `darksirens.selection.catalog.selection_budget_audit` ports the frozen
+  reference's diagnostic: under parametric magnitude selection it compares the
+  catalogued count the model predicts with the real count. It is not exported
+  from the package root and nothing calls it.
+- **Nested-sampler startup check message (no numerics change).** Its advice now
+  names `infer(..., selection_neff_guard="soft")`,
+  `infer(..., max_likelihood_variance=<cap>)` and
+  `infer(..., sampler_preflight="off")` instead of the old command-line flags,
+  and no longer points to a diagnostic script core does not ship.
+- **Release checks and parity probes (no numerics change).** The release
+  workflow runs again, on every pull request, against the installed wheel. The
+  angular-wiring and sampler-dispatch parity probes now run the frozen
+  reference code on the reference side instead of a copy written in the probe.
+
+None of the items was found already fixed: the mass-ratio normaliser was
+fixed only at the recorded point, and the other items were open.

@@ -153,8 +153,18 @@ and the seam imports no companion package.
 The final core-freeze workflow builds a wheel and installs it into a clean Python
 3.11 environment. It checks package metadata, light root import, base runtime
 dependencies, the pinned TinyNS default backend, public examples, default
-zero-dimensional target dispatch, and that no scientific source file changed
-relative to accepted 8C.
+zero-dimensional target dispatch, and, at the time of 8D, that no scientific
+source file changed relative to accepted 8C.
+
+That last check was retired in the second review follow-up: Phases 12A and 12B
+changed the science source on purpose, so it failed on every later tree and the
+checks behind it stopped running. It was not moved to a newer pinned commit,
+which would go stale at the next accepted science change. The workflow
+(`phase8d-final-freeze.yml`) now runs on pull requests, pushes to `main` and
+manual dispatch, and runs `tests/test_packaging_contract.py` and
+`tests/test_examples.py` against the installed wheel, failing on any failure or
+skip. Both public examples execute: `custom_target.py` against its analytic
+evidence and `ordinary_catalog.py` on tiny stores with a reduced sampler.
 
 Phase 8D acceptance and the final post-merge integrity run are recorded in
 `ignaciomagana/darksirens-rebuild`; this document intentionally does not predict
@@ -234,6 +244,59 @@ The commit that records this table changes no code, so the `9a87ffb` runs
 stand for the final tree of the stack.
 
 Deliberate numerics changes and their reach are recorded in `MIGRATION.md`.
+
+### Second review follow-up
+
+The stacked PRs #17 to #23 finish the items the first follow-up left open. Only
+the GP mass-ratio normaliser changes numerics; the rest are a diagnostic, a
+provenance fix, a message fix and stronger gates. As before, each ships with a
+check that fails on a mutant:
+
+```text
+package-root name renamed                 5 wheel-mode packaging/example tests fail;
+                                          the release job now fails with them
+PE sample mask removed from core          angular-wiring probe fails; old probe passed
+NumPyro plan/initialisation dropped       sampler-dispatch probe fails; old probe passed
+preflight text reworded outside the map   nested-preflight comparison fails
+fingerprint hashed via json default=str   12 of 34 fingerprint tests fail
+budget audit without completeness         scipy anchor fails, 1041.25 against 2.656
+previous GP mass-ratio normaliser         8 of 8 near-minimum-mass cases fail
+                                          (0.81 / 0.58 at m_min + 0.05 dm_min)
+```
+
+What each gate now checks:
+
+- The angular-wiring probe (`tools/probe_angular_wiring.py`) runs the frozen
+  likelihood module's own per-event PE reduction on the reference side, and its
+  data include an invalid PE sample, a zero-prior-weight sample and `-inf`
+  population weights, so the PE sample mask matters.
+- The sampler-dispatch probe (`tools/probe_sampler_dispatch.py`) runs the frozen
+  `run_sampler` end to end on the reference side and core's real dispatcher,
+  adapters and NumPyro preparation on the other. Only the external backends are
+  replaced, by the same recording fakes on both sides; the checkpoint plan and
+  nested preflight are the same stubs on both sides, so the checkpointing
+  branches are not covered by this probe.
+- The nested-preflight comparison is word for word except for a documented
+  table (`LEGACY_REMEDY_MAP` in `tools/probe_nested_sampler_preflight.py`) that
+  maps the old command-line advice to the `infer` keywords.
+- The fingerprint parity check in `phase6-inference-io.yml` allows exactly the
+  schema change from 3 to 4 and the reworded schema-mismatch line; every other
+  part of the probe output, including the plain-JSON digests, must match.
+- `selection_budget_audit` matches the frozen function to 1e-12 and an
+  independent scipy quadrature to 1e-5.
+- The GP mass-ratio check integrates on a grid spanning only the allowed
+  mass-ratio range, for the fiducial and a narrow taper; the registry golden
+  file holds only parametric models and does not cover this change.
+
+Known gaps kept on purpose: `real-backends.yml` still pipes pytest into `tee`
+without `pipefail`, so a failing test there does not by itself fail that job; only the names of the package-root API are frozen, not their
+signatures; the example checks are smoke checks, not numerical anchors.
+
+Local measurement on the final code tree of the stack (`519100d`, the head of
+#22), with the same optional backends as above: 759 passed, 1 skipped (the
+golden-regeneration guard), against 714 passed, 1 skipped before the stack. The
+45 new tests are 11 packaging and example tests, 2 preflight-message tests, 19
+fingerprint tests, 5 budget-audit tests and 8 GP mass-ratio cases.
 
 ## Permanent firewall
 
