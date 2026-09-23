@@ -38,13 +38,14 @@ def _fp(seed=17, *, advisory=None):
 
 
 def test_canonical_digest_matches_frozen_json_rule():
+    # For plain JSON values the canonical form is the value itself, so the
+    # digest is still the frozen sorted-key compact-JSON sha256.
     semantic = _semantic()
     expected = hashlib.sha256(
         json.dumps(
             semantic,
             sort_keys=True,
             separators=(",", ":"),
-            default=str,
         ).encode("utf-8")
     ).hexdigest()
     fp = fingerprint_from_semantic(semantic, advisory={"code": {"git_sha": "abc"}})
@@ -54,7 +55,7 @@ def test_canonical_digest_matches_frozen_json_rule():
         "semantic": semantic,
         "advisory": {"code": {"git_sha": "abc"}},
     }
-    assert FINGERPRINT_SCHEMA_VERSION == 3
+    assert FINGERPRINT_SCHEMA_VERSION == 4
     assert FINGERPRINT_BASENAME == "run_fingerprint.json"
     assert FINGERPRINT_BASENAME_STEM == "run_fingerprint"
 
