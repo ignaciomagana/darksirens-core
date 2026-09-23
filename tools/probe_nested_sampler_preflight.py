@@ -17,6 +17,88 @@ import jax.numpy as jnp
 import numpy as np
 
 
+# The only sanctioned difference between the pinned legacy preflight text and
+# core's.  The legacy remedies name command-line flags of the legacy
+# ``darksirens_inference`` CLI and a diagnostic script, none of which exist in
+# core; core names the public ``infer`` keywords a user actually sets.  Each
+# legacy string is replaced by its core wording in the LEGACY record before the
+# verbatim comparison.  Nothing else is rewritten, every entry must occur in the
+# legacy record (a stale entry fails), and no legacy string may survive in the
+# candidate record, so any other drift in the message still fails the gate.
+# Core ships no selection-guard diagnostic script, so that remedy is dropped.
+LEGACY_REMEDY_MAP = (
+    (
+        "--selection_neff_guard soft",
+        'infer(..., selection_neff_guard="soft")',
+    ),
+    (
+        "--max_likelihood_variance <cap>",
+        "infer(..., max_likelihood_variance=<cap>)",
+    ),
+    (
+        "; python scripts/diagnose_selection_guard.py -- <your "
+        "darksirens_inference args> (measure sigma^2_lnL on your data and "
+        "report the smallest admitting cap)",
+        "",
+    ),
+    (
+        "--sampler_preflight off",
+        'infer(..., sampler_preflight="off")',
+    ),
+)
+
+
+def _map_strings(value, fn):
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {k: _map_strings(v, fn) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_map_strings(v, fn) for v in value]
+    return value
+
+
+def _collect_strings(value, out):
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _collect_strings(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            _collect_strings(v, out)
+    return out
+
+
+def map_legacy_remedies(legacy):
+    """Apply ``LEGACY_REMEDY_MAP`` to every string of a legacy behavior record."""
+    text = "\n".join(_collect_strings(legacy, []))
+    stale = [old for old, _ in LEGACY_REMEDY_MAP if old not in text]
+    if stale:
+        raise SystemExit(f"remedy map entries absent from legacy record: {stale!r}")
+
+    def apply(s):
+        for old, new in LEGACY_REMEDY_MAP:
+            s = s.replace(old, new)
+        return s
+
+    return _map_strings(legacy, apply)
+
+
+def compare(legacy, candidate):
+    """Require candidate == legacy after the documented remedy mapping only."""
+    text = "\n".join(_collect_strings(candidate, []))
+    leaked = [old for old, _ in LEGACY_REMEDY_MAP if old in text]
+    if leaked:
+        raise SystemExit(f"legacy remedy strings in candidate record: {leaked!r}")
+    expected = map_legacy_remedies(legacy)
+    if expected != candidate:
+        raise SystemExit(
+            "nested-preflight parity failure:\n"
+            f"legacy (remedies mapped)={expected!r}\ncandidate={candidate!r}"
+        )
+
+
 def _load(implementation):
     if implementation == "legacy":
         from darksirens.inference.sampling import _nested_sampler_preflight
@@ -199,9 +281,25 @@ def behavior(implementation):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--implementation", choices=("legacy", "candidate"), required=True)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("--implementation", choices=("legacy", "candidate"))
+    parser.add_argument("--out")
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("LEGACY_JSON", "CANDIDATE_JSON"),
+        help="compare two probe records under LEGACY_REMEDY_MAP only",
+    )
     args = parser.parse_args()
+    if args.compare:
+        legacy_path, candidate_path = args.compare
+        legacy = json.loads(Path(legacy_path).read_text())["behavior"]
+        candidate = json.loads(Path(candidate_path).read_text())["behavior"]
+        compare(legacy, candidate)
+        print("Phase 6G legacy/new nested-preflight behavior is exact "
+              "(legacy CLI remedies mapped to core keywords)")
+        return
+    if not (args.implementation and args.out):
+        parser.error("--implementation and --out are required without --compare")
     payload = {"implementation": args.implementation, "behavior": behavior(args.implementation)}
     Path(args.out).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(args.out)

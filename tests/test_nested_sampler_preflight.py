@@ -68,15 +68,91 @@ def test_all_minus_inf_raises_frozen_error(monkeypatch, capsys):
         "variance guard (GWTC-4.0/5.0 total-log-likelihood variance: -inf when "
         "sigma^2_lnL = sum_i sigma_i^2 + N_obs^2/Neff_sel > "
         "max_likelihood_variance, plus the Vitale Neff > 5*N_obs floor). "
-        "Remedies: --selection_neff_guard soft (finite penalized wall — the "
-        "sampler initializes and is pushed toward the region satisfying the "
-        "criterion); --max_likelihood_variance <cap> (accept a larger MC "
-        "variance — the measured sigma^2 at your best-fit point must be below "
-        "<cap>); python scripts/diagnose_selection_guard.py -- <your "
-        "darksirens_inference args> (measure sigma^2_lnL on your data and "
-        "report the smallest admitting cap). --sampler_preflight off skips this "
-        "probe."
+        + CORE_REMEDIES
     )
+
+
+# The frozen legacy remedy text, kept verbatim so the Phase 6G remedy map is
+# checked against it without the legacy tree.
+LEGACY_REMEDIES = (
+    "Remedies: --selection_neff_guard soft (finite penalized wall — the "
+    "sampler initializes and is pushed toward the region satisfying the "
+    "criterion); --max_likelihood_variance <cap> (accept a larger MC "
+    "variance — the measured sigma^2 at your best-fit point must be below "
+    "<cap>); python scripts/diagnose_selection_guard.py -- <your "
+    "darksirens_inference args> (measure sigma^2_lnL on your data and "
+    "report the smallest admitting cap). --sampler_preflight off skips this "
+    "probe."
+)
+
+CORE_REMEDIES = (
+    'Remedies: infer(..., selection_neff_guard="soft") (finite penalized wall '
+    "— the sampler initializes and is pushed toward the region satisfying the "
+    "criterion); infer(..., max_likelihood_variance=<cap>) (accept a larger MC "
+    "variance — the measured sigma^2 at your best-fit point must be below "
+    '<cap>). infer(..., sampler_preflight="off") skips this probe.'
+)
+
+LEGACY_FLAG_STRINGS = (
+    "--selection_neff_guard",
+    "--max_likelihood_variance",
+    "--sampler_preflight",
+    "scripts/diagnose_selection_guard.py",
+    "darksirens_inference",
+)
+
+
+def _load_probe():
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "tools"
+        / "probe_nested_sampler_preflight.py"
+    )
+    spec = importlib.util.spec_from_file_location("_preflight_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_remedies_name_public_infer_keywords_not_legacy_flags(monkeypatch, capsys):
+    _fixed_clock(monkeypatch)
+    like, _ = _counter_likelihood(set())
+    with pytest.raises(RuntimeError) as excinfo:
+        nested_sampler_preflight(like, lambda u: u, 2, seed=7, nlive=100, n_probe=5)
+    message = str(excinfo.value)
+    assert message.endswith(CORE_REMEDIES)
+
+    _fixed_clock(monkeypatch)
+    capsys.readouterr()
+    like, _ = _counter_likelihood({1}, {1: 3.5})
+    nested_sampler_preflight(like, lambda u: u, 2, seed=9, nlive=100, n_probe=5)
+    warning = capsys.readouterr().out
+    assert warning.endswith("If it stalls, consider: " + CORE_REMEDIES + "\n")
+
+    for text in (message, warning):
+        for legacy in LEGACY_FLAG_STRINGS:
+            assert legacy not in text
+
+
+def test_phase6g_remedy_map_turns_legacy_text_into_core_text_only():
+    probe = _load_probe()
+    prefix = "If it stalls, consider: "
+    legacy = {"case": {"stdout": prefix + LEGACY_REMEDIES + "\n", "error": None}}
+    mapped = probe.map_legacy_remedies(legacy)
+    assert mapped == {"case": {"stdout": prefix + CORE_REMEDIES + "\n", "error": None}}
+    probe.compare(legacy, mapped)
+
+    drifted = {"case": {"stdout": "If it halts, consider: " + CORE_REMEDIES + "\n",
+                        "error": None}}
+    with pytest.raises(SystemExit, match="parity failure"):
+        probe.compare(legacy, drifted)
+    with pytest.raises(SystemExit, match="legacy remedy strings"):
+        probe.compare(legacy, legacy)
+    with pytest.raises(SystemExit, match="absent from legacy record"):
+        probe.compare(mapped, mapped)
 
 
 def test_one_finite_draw_warns_and_estimates_initialization(monkeypatch, capsys):
