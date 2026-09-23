@@ -167,6 +167,9 @@ jobs:
 
       - name: Run the packaging contract and every public example against the wheel
         run: |
+          # The default step shell is `bash -e` without pipefail, so without this
+          # the pipe into tee would hide a pytest failure and the job would pass.
+          set -o pipefail
           /tmp/darksirens-phase8d/bin/python -m pip install "pytest==8.3.4"
           /tmp/darksirens-phase8d/bin/python -c "import darksirens; assert 'site-packages' in darksirens.__file__, darksirens.__file__"
           /tmp/darksirens-phase8d/bin/pytest -q -rs \
