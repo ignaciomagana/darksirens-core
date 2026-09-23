@@ -129,19 +129,11 @@ jobs:
         run: |
           PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" python candidate/tools/probe_nested_sampler_preflight.py --implementation candidate --out /tmp/preflight-candidate.json
 
+      # Verbatim except LEGACY_REMEDY_MAP in the probe: the legacy remedies
+      # name legacy CLI flags, core names the public infer keywords.
       - name: Require exact Phase 6G nested-preflight parity
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          legacy = json.loads(Path('/tmp/preflight-legacy.json').read_text())['behavior']
-          candidate = json.loads(Path('/tmp/preflight-candidate.json').read_text())['behavior']
-          if legacy != candidate:
-              raise SystemExit(
-                  f"nested-preflight parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}"
-              )
-          print("Phase 6G legacy/new nested-preflight behavior is exact")
-          PY
+          python candidate/tools/probe_nested_sampler_preflight.py --compare /tmp/preflight-legacy.json /tmp/preflight-candidate.json
 
       - name: Evaluate pinned legacy zero-free behavior
         run: |

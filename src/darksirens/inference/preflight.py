@@ -25,8 +25,10 @@ def nested_sampler_preflight(
     """Probe prior draws and fail fast when a nested sampler cannot initialize.
 
     The numerical and message contract is the frozen legacy
-    ``_nested_sampler_preflight`` behavior.  Runtime policy is explicit here:
-    callers decide whether this fresh-run guard is enabled before calling it.
+    ``_nested_sampler_preflight`` behavior, except that the remedies name the
+    public ``infer`` keywords instead of legacy command-line flags.  Runtime
+    policy is explicit here: callers decide whether this fresh-run guard is
+    enabled before calling it.
     The probe owns an RNG derived from ``seed`` and never touches a sampler RNG
     stream or NumPy's global RNG state.
     """
@@ -36,14 +38,16 @@ def nested_sampler_preflight(
 
     import jax.numpy as jnp
 
+    # The remedies name core's public ``infer`` keywords. The frozen legacy
+    # text named command-line flags and a diagnostic script core does not
+    # ship; the Phase 6G probe maps those strings explicitly before its
+    # otherwise verbatim comparison.
     remedies = (
-        "Remedies: --selection_neff_guard soft (finite penalized wall — the "
-        "sampler initializes and is pushed toward the region satisfying the "
-        "criterion); --max_likelihood_variance <cap> (accept a larger MC "
-        "variance — the measured sigma^2 at your best-fit point must be below "
-        "<cap>); python scripts/diagnose_selection_guard.py -- <your "
-        "darksirens_inference args> (measure sigma^2_lnL on your data and "
-        "report the smallest admitting cap). --sampler_preflight off skips "
+        'Remedies: infer(..., selection_neff_guard="soft") (finite penalized '
+        "wall — the sampler initializes and is pushed toward the region "
+        "satisfying the criterion); infer(..., max_likelihood_variance=<cap>) "
+        "(accept a larger MC variance — the measured sigma^2 at your best-fit "
+        'point must be below <cap>). infer(..., sampler_preflight="off") skips '
         "this probe."
     )
     criterion = (
