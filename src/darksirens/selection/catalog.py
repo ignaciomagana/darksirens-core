@@ -397,6 +397,84 @@ def selection_completion_curves(
         return _selection_completion_curves_impl(cosmo, params, catalog, model)
 
 
+def selection_budget_audit(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    model,
+    *,
+    N_obs_total=None,
+    n_occupied=None,
+    n_pix_total=None,
+    distance_table=None,
+) -> dict[str, float]:
+    """Host-side check of the selection missing budget against the catalog counts.
+
+    Under :func:`selection_completion_curves` no galaxy count enters the
+    completeness, so the missing budget ``(1 - C_sel) n0 apix dV_c/dz
+    (1+z)^delta`` is linear in ``n0`` (and scales as ``H0^-3``) with nothing in
+    the likelihood calibrating it.  This reports the consistency the likelihood
+    never imposes,
+
+        N_obs_total  ~  n_occupied * integral C_sel(z) dN_exp(z) dz,
+
+    at the given ``(cosmo, params, model)``.  A ``model_over_observed`` far from
+    1 means the budget amplitude disagrees with the catalog it completes and the
+    in-/out-of-catalog odds are set by the ``n0`` prior, not by the data.
+
+    It is a diagnostic only: nothing here feeds any likelihood value.  The
+    definitions are those of the frozen legacy ``selection_budget_audit``
+    (single-curve branch): ``C_sel`` is the raw clipped selection curve, not
+    relaxed above ``z_depth``, and the integral runs over the whole redshift
+    grid.  Defaults: ``N_obs_total`` is the catalog's real-galaxy count,
+    ``n_occupied`` the number of rows holding at least one galaxy, and
+    ``n_pix_total`` the whole sky, ``round(4 pi / apix)``.
+
+    Returns a flat float dict (legacy key in brackets):
+
+    - ``N_obs_total``
+    - ``model_N_obs``: predicted catalogued count over the occupied footprint
+      [``selection_model_N_obs_footprint``]
+    - ``model_N_obs_sky``: the same over ``n_pix_total`` pixels
+      [``selection_model_N_obs_sky``]
+    - ``model_over_observed``: ``model_N_obs / N_obs_total`` (``inf`` for an
+      empty catalog) [``selection_model_over_observed_footprint``]
+    - ``implied_completeness``: ``N_obs_total / (n_pix_total * integral
+      dN_exp dz)``
+    """
+
+    validate_catalog_selection(model)
+    ng = np.asarray(catalog.ngals).reshape(-1)
+    if N_obs_total is None:
+        N_obs_total = int(ng.sum())
+    if n_occupied is None:
+        n_occupied = int((ng > 0).sum())
+    if n_pix_total is None:
+        n_pix_total = int(np.round(4.0 * np.pi / float(np.asarray(catalog.apix))))
+    N_obs_total = float(N_obs_total)
+
+    with bound_distance_table(distance_table):
+        state = build_completion_state(cosmo, params, catalog)
+        C = jnp.clip(_selection_curve_impl(zgrid, cosmo, model), 0.0, 1.0)
+        obs_per_pix = float(jnp.trapezoid(C * state.dN_exp, zgrid))
+        exp_per_pix = float(jnp.trapezoid(state.dN_exp, zgrid))
+
+    model_footprint = float(n_occupied) * obs_per_pix
+    model_sky = float(n_pix_total) * obs_per_pix
+    N_exp_sky = float(n_pix_total) * exp_per_pix
+    return {
+        "N_obs_total": N_obs_total,
+        "model_N_obs": model_footprint,
+        "model_N_obs_sky": model_sky,
+        "model_over_observed": (
+            model_footprint / N_obs_total if N_obs_total > 0 else float("inf")
+        ),
+        "implied_completeness": (
+            N_obs_total / N_exp_sky if N_exp_sky > 0 else float("nan")
+        ),
+    }
+
+
 __all__ = [
     "ALPHA_MIN",
     "A_NEAR_ZERO",
@@ -410,6 +488,7 @@ __all__ = [
     "c_sel_schechter",
     "k_of_z",
     "m0_absolute",
+    "selection_budget_audit",
     "selection_completion_curves",
     "selection_curve",
     "selection_from_mapping",
