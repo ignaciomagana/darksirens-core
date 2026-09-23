@@ -250,8 +250,31 @@ jobs:
           from pathlib import Path
           legacy = json.loads(Path('/tmp/fingerprint-gate-legacy.json').read_text())['behavior']
           candidate = json.loads(Path('/tmp/fingerprint-gate-candidate.json').read_text())['behavior']
+          # Documented post-freeze difference: core hashes semantic values
+          # canonically (exact array values, not their printed form), so the
+          # fingerprint schema moved from 3 to 4 and the schema-mismatch line
+          # says why. Check exactly that delta, normalise it away, then require
+          # every other probe key (plain-JSON digests included) to be exact.
+          LEGACY_SCHEMA, CANDIDATE_SCHEMA = 3, 4
+          legacy_line = f"- fingerprint schema_version: {LEGACY_SCHEMA - 1} vs {LEGACY_SCHEMA}\n"
+          candidate_line = (
+              f"- fingerprint schema_version: {CANDIDATE_SCHEMA - 1} (checkpointed run) "
+              f"vs {CANDIDATE_SCHEMA} (this run); the checkpoint was fingerprinted under "
+              "a different schema (schema 3 and earlier hashed array values at print "
+              "precision), so its digest cannot be compared with this run's\n"
+          )
+          def swap(text, line, side):
+              if text.count(line) != 1: raise SystemExit(f"fingerprint-gate schema delta: {side} text lacks {line!r}:\n{text!r}")
+              return text.replace(line, "<SCHEMA-MISMATCH-LINE>\n")
+          for side, behavior, schema, line in (("legacy", legacy, LEGACY_SCHEMA, legacy_line), ("candidate", candidate, CANDIDATE_SCHEMA, candidate_line)):
+              if behavior['constants']['schema'] != schema: raise SystemExit(f"fingerprint-gate schema delta: {side} schema {behavior['constants']['schema']!r} != {schema}")
+              if behavior['schema_force']['returned_schema'] != schema - 1: raise SystemExit(f"fingerprint-gate schema delta: {side} forced resume returned schema {behavior['schema_force']['returned_schema']!r} != {schema - 1}")
+              behavior['constants']['schema'] = '<SCHEMA>'
+              behavior['schema_force']['returned_schema'] = '<SCHEMA-1>'
+              behavior['schema_error'][1] = swap(behavior['schema_error'][1], line, side)
+              for warning in behavior['schema_force']['warnings']: warning[1] = swap(warning[1], line, side)
           if legacy != candidate: raise SystemExit(f"fingerprint-gate parity failure:\nlegacy={legacy!r}\ncandidate={candidate!r}")
-          print("Phase 6C1 legacy/new fingerprint-gate behavior is exact")
+          print("Phase 6C1 legacy/new fingerprint-gate behavior is exact apart from the documented schema 3 -> 4 bump")
           PY
 
       - name: Evaluate pinned legacy prior-transform behavior
