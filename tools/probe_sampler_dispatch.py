@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""Separate-process parity probe for Phase 6T sampler orchestration."""
+"""Separate-process parity probe for Phase 6T sampler orchestration.
+
+Both arms execute their real ``run_sampler`` end to end: the legacy arm imports
+the frozen ``darksirens.inference.sampling`` from ``--legacy-root`` and the
+candidate arm imports the reconstructed module (with its backend adapters and
+NumPyro static-plan/initialization preparation).  Only the external sampler
+packages (tinyns, numpyro, dynesty, and matplotlib, which the frozen dynesty
+branch imports) are replaced, by the same recording fakes in both arms.  The
+checkpoint plan and the nested preflight are the same recording stubs in both
+arms, so resume cases need no checkpoint files.
+"""
 
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
 import io
 import json
+import math
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
@@ -18,118 +29,235 @@ import numpy as np
 _EVENTS = []
 
 
-def _method_compare(node, method):
-    test = getattr(node, "test", None)
-    return (
-        isinstance(test, ast.Compare)
-        and isinstance(test.left, ast.Name)
-        and test.left.id == "method"
-        and len(test.ops) == 1
-        and isinstance(test.ops[0], ast.Eq)
-        and len(test.comparators) == 1
-        and isinstance(test.comparators[0], ast.Constant)
-        and test.comparators[0].value == method
-    )
+def _jsonable(value):
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        return _jsonable(value.item())
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return value
+    try:
+        arr = np.asarray(value)
+    except Exception:
+        return type(value).__name__
+    if arr.dtype == object:
+        return type(value).__name__
+    if arr.shape == ():
+        return _jsonable(arr.item())
+    return _jsonable(arr.tolist())
 
 
-def _is_zero_if(node):
-    test = getattr(node, "test", None)
-    return (
-        isinstance(node, ast.If)
-        and isinstance(test, ast.Compare)
-        and isinstance(test.left, ast.Name)
-        and test.left.id == "ndims"
-        and len(test.ops) == 1
-        and isinstance(test.ops[0], ast.Eq)
-        and len(test.comparators) == 1
-        and isinstance(test.comparators[0], ast.Constant)
-        and test.comparators[0].value == 0
-    )
+def _record(*event):
+    _EVENTS.append(_jsonable(list(event)))
 
 
-def _is_nested_preflight_if(node):
-    test = getattr(node, "test", None)
-    return (
-        isinstance(node, ast.If)
-        and isinstance(test, ast.Compare)
-        and isinstance(test.left, ast.Name)
-        and test.left.id == "method"
-        and len(test.ops) == 1
-        and isinstance(test.ops[0], ast.In)
-    )
+# --------------------------------------------------------------------------
+# Recording fakes for the external sampler packages (identical in both arms)
+# --------------------------------------------------------------------------
 
 
-def _load_legacy_dispatcher(root: Path):
-    source = root / "darksirens" / "inference" / "sampling.py"
-    tree = ast.parse(source.read_text(), filename=str(source))
-    funcs = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "run_sampler"
-    ]
-    if len(funcs) != 1:
-        raise RuntimeError(f"expected one run_sampler in {source}; found {len(funcs)}")
-    body = funcs[0].body
-    ndim_stmt = next(
-        node
-        for node in body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "ndims"
-    )
-    zero_stmt = next(node for node in body if _is_zero_if(node))
-    preflight_stmt = next(node for node in body if _is_nested_preflight_if(node))
-    backend_tail = ast.parse(
-        """
-if method == "tinyns":
-    return _backend("tinyns", ndims)
-elif method == "numpyro":
-    return _backend("numpyro", ndims)
-elif method == "dynesty":
-    return _backend("dynesty", ndims)
-else:
-    raise ValueError(f"Unknown sampler: {method}")
-"""
-    ).body[0]
-    args = [
-        "method",
-        "likelihood",
-        "prior_transform",
-        "labels",
-        "lower_bound",
-        "upper_bound",
-        "opts",
-        "prior_kinds",
-        "joint_constraints",
-    ]
-    fn = ast.FunctionDef(
-        name="legacy_dispatcher",
-        args=ast.arguments(
-            posonlyargs=[],
-            args=[ast.arg(arg=name) for name in args],
-            kwonlyargs=[],
-            kw_defaults=[],
-            defaults=[],
+class _TinyNSResult:
+    logz = -1.5
+    logzerr = 0.25
+    logl = np.array([-3.0, -2.0, -1.0])
+    logwt = np.array([-2.0, -1.5, -1.2])
+    nlive = 2
+
+    def resample_equal(self, key):
+        _record("tinyns.resample_equal", key)
+        return np.array([[0.25], [0.75]])
+
+
+class _TinyNSSampler:
+    def __init__(self, loglike, ptform, ndim, nlive, **kwargs):
+        u = jnp.full((int(ndim),), 0.5)
+        _record("tinyns.NestedSampler", ndim, nlive, kwargs, loglike(ptform(u)))
+
+    def run(self, key, **kwargs):
+        _record("tinyns.run", key, kwargs)
+        return _TinyNSResult()
+
+    def resume(self, path, **kwargs):
+        _record("tinyns.resume", path, kwargs)
+        return _TinyNSResult()
+
+
+class _DynestyResults(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class _DynestySampler:
+    def __init__(self, loglike, ptform, ndim, bound=None, sample=None,
+                 nlive=None, rstate=None):
+        u = np.full(int(ndim), 0.5)
+        _record("dynesty.NestedSampler", ndim, bound, sample, nlive,
+                loglike(ptform(u)))
+        self.ndim = ndim
+        self.nlive = nlive
+        self.rstate = rstate
+        self.loglikelihood = SimpleNamespace(loglikelihood=loglike)
+        self.prior_transform = ptform
+
+    @classmethod
+    def restore(cls, path):
+        _record("dynesty.restore", path)
+        sampler = cls.__new__(cls)
+        sampler.ndim = 1
+        sampler.nlive = 48
+        sampler.rstate = np.random.default_rng(3)
+        sampler.it = 5
+        sampler.ncall = 40
+        sampler.loglikelihood = SimpleNamespace(loglikelihood=None)
+        sampler.prior_transform = None
+        return sampler
+
+    def run_nested(self, **kwargs):
+        u = np.full(int(self.ndim), 0.5)
+        value = self.loglikelihood.loglikelihood(self.prior_transform(u))
+        _record("dynesty.run_nested", kwargs, value)
+
+    @property
+    def results(self):
+        return _DynestyResults(
+            logwt=np.array([-2.0, -1.5, -1.2]),
+            logl=np.array([-3.0, -2.0, -1.0]),
+            samples=np.array([[0.2], [0.5], [0.8]]),
+            logz=np.array([-2.0, -1.4]),
+            logzerr=np.array([0.3, 0.2]),
+            nlive=2,
+        )
+
+
+def _dynesty_resample_equal(samples, weights, rstate=None):
+    _record("dynesty.resample_equal", weights)
+    return np.asarray(samples)
+
+
+class _Distribution:
+    def __init__(self, kind, *args, **kwargs):
+        self.kind = kind
+        self.args = args
+        self.kwargs = kwargs
+
+    def describe(self):
+        if self.kind == "TransformedDistribution":
+            return [self.kind, self.args[0].describe(), str(self.args[1])]
+        return [self.kind, self.args, self.kwargs]
+
+    def value(self):
+        if self.kind == "Uniform":
+            low, high = self.kwargs["low"], self.kwargs["high"]
+            return low + 0.5 * (high - low)
+        if self.kind == "TruncatedNormal":
+            return jnp.clip(jnp.asarray(self.kwargs["loc"]),
+                            self.kwargs["low"], self.kwargs["high"])
+        if self.kind == "Beta":
+            a, b = self.args
+            return jnp.asarray(a / (a + b))
+        if self.kind == "TransformedDistribution":
+            return jnp.exp(self.args[0].value())
+        raise AssertionError(self.kind)
+
+
+class _NUTS:
+    def __init__(self, model, **kwargs):
+        self.model = model
+        _record("numpyro.NUTS", kwargs)
+
+
+class _MCMC:
+    def __init__(self, kernel, **kwargs):
+        self.kernel = kernel
+        _record("numpyro.MCMC", kwargs)
+
+    def run(self, key, *, extra_fields):
+        _record("numpyro.run", key, extra_fields)
+        self.kernel.model()
+
+    def get_samples(self, *, group_by_chain):
+        _record("numpyro.get_samples", group_by_chain)
+        return {"x": np.array([0.25, 0.5, 0.75])}
+
+    def get_extra_fields(self, *, group_by_chain):
+        _record("numpyro.get_extra_fields", group_by_chain)
+        return {
+            "diverging": np.array([False, True, False]),
+            "num_steps": np.array([3, 7, 1023]),
+            "accept_prob": np.array([0.8, 0.9, 0.7]),
+        }
+
+
+def _install_fake_backends():
+    def module(name, **attrs):
+        mod = ModuleType(name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        sys.modules[name] = mod
+        return mod
+
+    module("tinyns", NestedSampler=_TinyNSSampler)
+
+    dynesty_utils = module("dynesty.utils", resample_equal=_dynesty_resample_equal)
+    dynesty_plotting = module("dynesty.plotting")
+    module("dynesty", NestedSampler=_DynestySampler, utils=dynesty_utils,
+           plotting=dynesty_plotting)
+    pyplot = module("matplotlib.pyplot")
+    module("matplotlib", use=lambda *args, **kwargs: None, pyplot=pyplot)
+
+    def sample(name, distribution):
+        _record("numpyro.sample", name, distribution.describe())
+        return distribution.value()
+
+    def factor(name, value):
+        _record("numpyro.factor", name, value)
+
+    def init_to_value(*, values):
+        _record("numpyro.init_to_value", values)
+        return ["init_to_value", _jsonable(values)]
+
+    dist = module(
+        "numpyro.distributions",
+        Uniform=lambda *a, **kw: _Distribution("Uniform", *a, **kw),
+        TruncatedNormal=lambda *a, **kw: _Distribution("TruncatedNormal", *a, **kw),
+        Beta=lambda *a, **kw: _Distribution("Beta", *a, **kw),
+        TransformedDistribution=lambda *a, **kw: _Distribution(
+            "TransformedDistribution", *a, **kw
         ),
-        body=[ndim_stmt, zero_stmt, preflight_stmt, backend_tail],
-        decorator_list=[],
+        transforms=SimpleNamespace(ExpTransform=lambda: "ExpTransform"),
     )
-    module = ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[]))
-    namespace = {
-        "np": np,
-        "jnp": jnp,
-        "plan_from_opts": _plan_from_opts,
-        "_nested_sampler_preflight": _legacy_preflight,
-        "_backend": _backend,
-    }
-    exec(compile(module, str(source), "exec"), namespace)
-    return namespace["legacy_dispatcher"]
+    initialization = module("numpyro.infer.initialization", init_to_value=init_to_value)
+    infer = module("numpyro.infer", MCMC=_MCMC, NUTS=_NUTS,
+                   initialization=initialization)
+    module("numpyro", sample=sample, factor=factor, distributions=dist, infer=infer)
+
+
+# --------------------------------------------------------------------------
+# Shared stubs for the checkpoint plan and nested preflight (both arms)
+# --------------------------------------------------------------------------
 
 
 def _plan_from_opts(opts, method):
     _EVENTS.append(["plan", method])
-    return SimpleNamespace(resuming=bool(getattr(opts, "_resuming", False)))
+    resuming = bool(getattr(opts, "_resuming", False))
+    return SimpleNamespace(
+        resuming=resuming,
+        enabled=False,
+        path=None,
+        resume_from=f"checkpoint.{method}" if resuming else None,
+        interval_seconds=0.0,
+    )
 
 
 def _legacy_preflight(likelihood, prior_transform, ndims, opts, n_probe=32):
@@ -140,33 +268,34 @@ def _candidate_preflight(likelihood, prior_transform, ndims, opts):
     _EVENTS.append(["preflight", int(ndims)])
 
 
-def _backend(method, ndims):
-    _EVENTS.append(["backend", method, int(ndims)])
-    return {"backend": method, "ndims": int(ndims)}
+def _load_legacy_dispatcher(root: Path):
+    root = Path(root).resolve()
+    expected = root / "darksirens" / "inference" / "sampling.py"
+    if not expected.is_file():
+        raise RuntimeError(f"frozen sampling module not found at {expected}")
+    if "darksirens" in sys.modules:
+        raise RuntimeError("darksirens was imported before the frozen root was selected")
+    sys.path.insert(0, str(root))
+    _install_fake_backends()
+    import darksirens.inference.sampling as sampling
+
+    if Path(sampling.__file__).resolve() != expected:
+        raise RuntimeError(f"imported {sampling.__file__}, expected {expected}")
+    sampling.plan_from_opts = _plan_from_opts
+    sampling._nested_sampler_preflight = _legacy_preflight
+    return sampling.run_sampler
 
 
 def _load_candidate_dispatcher():
+    _install_fake_backends()
+    import darksirens.inference.dynesty_adapter as dynesty_adapter
     import darksirens.inference.sampling as sampling
+    import darksirens.inference.tinyns_adapter as tinyns_adapter
 
     sampling._checkpoint_plan = _plan_from_opts
     sampling._nested_preflight = _candidate_preflight
-    sampling._run_tinyns = (
-        lambda likelihood, prior_transform, ndims, opts: _backend("tinyns", ndims)
-    )
-    sampling._run_dynesty = (
-        lambda likelihood, prior_transform, labels, opts: _backend(
-            "dynesty", len(labels)
-        )
-    )
-    fake_plan = object()
-    fake_initialization = object()
-    sampling._prepare_numpyro_static = lambda *args, **kwargs: fake_plan
-    sampling._prepare_numpyro_init = lambda *args, **kwargs: fake_initialization
-    sampling._run_numpyro = (
-        lambda likelihood, labels, opts, plan, initialization, prior_kinds=None: _backend(
-            "numpyro", len(labels)
-        )
-    )
+    tinyns_adapter.plan_from_opts = _plan_from_opts
+    dynesty_adapter.plan_from_opts = _plan_from_opts
     return sampling.run_sampler
 
 
@@ -178,18 +307,6 @@ def _prior_transform(u):
     return u
 
 
-def _jsonable(value):
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
-
 def _run_case(fn, case):
     _EVENTS.clear()
     opts = SimpleNamespace(
@@ -198,6 +315,8 @@ def _run_case(fn, case):
         _resuming=bool(case.get("resuming", False)),
         seed=17,
         nlive=64,
+        dlogz=0.1,
+        show_progress=False,
     )
     labels = list(case.get("labels", ["x"]))
     stream = io.StringIO()
