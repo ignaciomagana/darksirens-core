@@ -633,8 +633,11 @@ class JointGPPopulation:
             # that 24 nodes over [0.02, 1] cannot resolve: measured on an
             # independent 801 x 401 (q, chi) grid, int p_gp(q, chi | m1, z) for
             # gp3d_q_chi_z was 0.876 at m1 = m_min + 0.25 dm_min and 1.001 with
-            # 128 q nodes. On the m1-conditional branch the lattice has no m1
-            # axis, so the finer q axis costs nothing measurable; the k-D models
+            # 128 q nodes (closer to m_min the sliver is handled by the
+            # support-relative q nodes below; this lattice now only has to carry
+            # the field they interpolate). On the m1-conditional branch the
+            # lattice has no m1 axis, so the finer q axis costs nothing
+            # measurable; the k-D models
             # with m1 in the GP keep the coarse q axis their memory budget
             # (see _znorm_interp) was sized for.
             grids = [
@@ -655,10 +658,53 @@ class JointGPPopulation:
         if m1_cond:
             m1g = _m1norm_grid(m_min, dm_min)                # (Nm1,), support-following
             grid_shape = [g.shape[0] for g in grids]
+            # Just above m_min the q-support [m_min/m1, 1] is a sliver, and the
+            # m2 = q*m1 taper inside it is a boundary layer at q = 1 of width
+            # ~ (m1 - m_min)/dm_min in units of the sliver.  A fixed q lattice
+            # cannot follow it (the sliver is a node or two wide), and log N(m1)
+            # carries the taper's exp(-dm_min/(m1 - m_min)) singularity, which
+            # no log-m1 interpolant follows.  The two errors have opposite signs:
+            # measured for gp3d_q_chi_z at the fiducial, int p_gp dq dchi was 0.943
+            # at m1 = m_min + 0.1 dm_min and 0.579 at m_min + 0.05 dm_min, and at
+            # m_min = 10, dm_min = 0.05 (support narrower than one lattice cell)
+            # the m1-conditional models gave 0.055-0.085 at m_min + 0.25 dm_min.  So
+            # (1) q is integrated on nodes spanning the support itself, with the
+            # m1-independent field read off the q lattice by linear interpolation,
+            # and (2) what is tabulated is N(m1)/S(m1), S(m1) = the taper at q = 1
+            # (its maximum), which is smooth and multiplied back per query.
+            # Both steps are linear in the field and z-independent, so they fold
+            # into one (Nm1, Nq) weight matrix per proposal; each z node is then
+            # a single matmul against the field on the q lattice.
+            iq = self._prob_gp.index("q")
+            qn = grids[iq]
+            nq = qn.shape[0]
+            rest = [g for k, g in enumerate(grids) if k != iq]
+            t = jnp.linspace(0.0, 1.0, nq)
+            tw = jnp.full(nq, t[1] - t[0]).at[jnp.array([0, -1])].multiply(0.5)
+            q_lo = jnp.clip(m_min / m1g, qn[0], qn[-1])                    # (Nm1,)
+            q_w = qn[-1] - q_lo                                             # (Nm1,)
+            q_sup = q_lo[:, None] + q_w[:, None] * t[None, :]               # (Nm1, Nt)
+            jq = jnp.clip(jnp.searchsorted(qn, q_sup) - 1, 0, nq - 2)
+            wq = (q_sup - qn[jq]) / (qn[jq + 1] - qn[jq])                   # (Nm1, Nt)
+            s_m1g = sfilter_low(m1g, m_min, dm_min)
+            cut = (self._taper_cut(m1g[:, None], q_sup, m_min, dm_min, m_max, dm_max)
+                   / jnp.where(s_m1g > 0, s_m1g, 1.0)[:, None])            # (Nm1, Nt)
+            c = cut * tw * q_w[:, None]                                     # (Nm1, Nt)
+            rows = jnp.broadcast_to(jnp.arange(m1g.shape[0])[:, None], jq.shape)
+            qweights = (jnp.zeros((m1g.shape[0], nq), dtype=c.dtype)
+                        .at[rows, jq].add(c * (1.0 - wq))
+                        .at[rows, jq + 1].add(c * wq))                      # (Nm1, Nq)
+
+            def _ratio_table(tab):
+                # Node 0 is m1 = m_min (empty support, ratio 0).  N/S grows with
+                # m1 there, so inheriting node 1 over-states N in the first cell:
+                # the density can only be UNDER-estimated, never blow up.
+                tab = tab.at[..., 0].set(tab[..., 1])
+                return jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
 
             def _eval_norm(zval):
                 # Field is m1-independent on this branch: evaluate it once as
-                # (G,), then broadcast against the m1-dependent m2 = q*m1 cut.
+                # (G,), then contract its q axis with the m1-dependent weights.
                 cols = []
                 for a in self.gp_axes:
                     if a == "z":
@@ -669,14 +715,14 @@ class JointGPPopulation:
                 fg = _eval_field_clipped(coords, kern, self._Z, alpha,
                                          self._mean_on_coords(coords, alpha_gp, beta_gp))
                 exp_field = jnp.exp(fg)                                        # (G,)
-                # m1 not in gp_axes -> _taper_cut skips its m1 branch and the q
-                # branch computes m2 = q*m1 on the (Nm1, G) lattice.
-                cut = self._taper_cut(m1g[:, None], phys["q"][None, :],
-                                      m_min, dm_min, m_max, dm_max)            # (Nm1, G)
-                val = exp_field[None, :] * cut                                 # (Nm1, G)
-                val = val.reshape([m1g.shape[0], *grid_shape])
-                return _grid_integrate(val, grids)                            # (Nm1,)
+                # q axis first, the other probability axes flattened: (Nq, R).
+                fq = jnp.moveaxis(exp_field.reshape(grid_shape), iq, 0)
+                fq = fq.reshape(nq, -1)
+                val = (qweights @ fq).reshape(
+                    [m1g.shape[0], *[g.shape[0] for g in rest]])               # (Nm1, ...)
+                return _grid_integrate(val, rest)                             # (Nm1,) N/S
 
+            s_q = sfilter_low(m1, m_min, dm_min)                              # (Nquery,)
             if self._z_in_gp:
                 import jax
                 zg = _znorm_nodes()
@@ -684,12 +730,10 @@ class JointGPPopulation:
                 # AND the (G, M) cross-kernel inside over all z nodes at once is
                 # what made gp4d need 52.7 GiB of scratch (see _znorm_interp).
                 tab = jax.lax.map(jax.checkpoint(_eval_norm), zg)              # (Nz, Nm1)
-                ltab = jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
-                return _interp2_log(ltab, zg, m1g, z, m1)                     # (Nquery,)
-            tab = _eval_norm(0.0)                                             # (Nm1,)
-            ltab = jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
+                return _interp2_log(_ratio_table(tab), zg, m1g, z, m1) * s_q  # (Nquery,)
+            ltab = _ratio_table(_eval_norm(0.0))                              # (Nm1,)
             return jnp.exp(jnp.interp(
-                jnp.log(jnp.clip(m1, _LOGSAFE, None)), jnp.log(m1g), ltab))   # (Nquery,)
+                jnp.log(jnp.clip(m1, _LOGSAFE, None)), jnp.log(m1g), ltab)) * s_q
 
         def _eval_norm(zval):
             cols = []

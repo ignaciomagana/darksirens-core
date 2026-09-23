@@ -333,3 +333,57 @@ def test_conditional_q_integral_is_unity_on_an_independent_grid(name):
                     jnp.full_like(qg, zv), jnp.full_like(qg, chi0), theta))
                 integ = jnp.trapezoid(dens / (rate * mass * spin), qg)
             assert abs(float(integ) - 1.0) < 2e-2, (name, m1v, zv, float(integ))
+
+
+@_NEED_TINYGP
+@pytest.mark.parametrize("overrides, fs", [
+    ({}, (0.05, 0.1, 0.25)),
+    ({"m_min": 10.0, "dm_min": 0.05}, (0.1, 0.25, 1.0)),
+], ids=["fiducial-taper", "narrow-taper"])
+@pytest.mark.parametrize("name", _Q_MODELS)
+def test_conditional_q_integral_is_unity_deep_in_the_taper_toe(name, overrides, fs):
+    """Same integral closer to m_min, on a grid that spans only the q-support.
+
+    At m1 = m_min + f dm_min the support is [m_min/m1, 1] and the m2 = q*m1
+    taper inside it is a boundary layer at q = 1 about f of the support wide,
+    so this test integrates on 2001 nodes spanning the support itself (a
+    uniform [0, 1] grid would not resolve it either).  A fixed q lattice in the
+    normaliser over-states N(m1) there, while the log-m1 interpolation of
+    log N(m1) across the taper singularity under-states it.  Measured before
+    the support-relative q nodes and the N/S table: at the fiducial taper,
+    gp3d_q_chi_z 0.943 / 0.579 and gp1d_q 0.999 / 0.812 at f = 0.1 / 0.05; at
+    m_min = 10, dm_min = 0.05 (interior to the priors) the whole support is
+    narrower than one lattice cell: 0.018 / 0.085 / 0.98 at f = 0.1 / 0.25 / 1
+    for the three full-grid models and 0.012 / 0.055 / 0.64 for gp3d_q_chi_z.
+    """
+    model = build_gp_model(name)
+    theta = _seed_theta(model, seed=0, scale=0.6, overrides=overrides)
+    P = _params(model, theta)
+    chi_in = "chi" in model.gp_axes
+    z_in = "z" in model.gp_axes
+    m_min, dm_min = float(P("m_min")), float(P("dm_min"))
+
+    cg = jnp.linspace(-1.0, 1.0, 201)
+    zs = (0.1, 4.5) if z_in else (0.3,)
+    for f in fs:
+        m1v = m_min + f * dm_min
+        qg = jnp.linspace(m_min / m1v, 1.0, 2001)
+        mass = model._baseline_mass(m1v, P("alpha_mass"), P("m_min"),
+                                    P("dm_min"), P("m_max"), P("dm_max"))
+        for zv in zs:
+            rate = (1.0 + zv) ** (P("gamma") - 1.0)
+            if chi_in:
+                Q, C = jnp.meshgrid(qg, cg, indexing="ij")
+                dens = jnp.exp(model.log_p_pop(
+                    jnp.full(Q.size, m1v), Q.ravel(),
+                    jnp.full(Q.size, zv), C.ravel(), theta)).reshape(Q.shape)
+                integ = jnp.trapezoid(
+                    jnp.trapezoid(dens / (rate * mass), cg, axis=-1), qg)
+            else:
+                chi0 = 0.1
+                spin = model._baseline_spin(chi0, P("mu_chi"), P("sigma_chi"))
+                dens = jnp.exp(model.log_p_pop(
+                    jnp.full_like(qg, m1v), qg,
+                    jnp.full_like(qg, zv), jnp.full_like(qg, chi0), theta))
+                integ = jnp.trapezoid(dens / (rate * mass * spin), qg)
+            assert abs(float(integ) - 1.0) < 2e-2, (name, f, zv, float(integ))
