@@ -25,14 +25,20 @@ def _fixture(n):
 
 def _event(n, dL):
     nx, ny, nz = _fixture(n)
+    # One structurally invalid sample (first event) and one zero-prior-weight
+    # sample (last event), so the structural PE sample mask is exercised.
+    valid = np.ones(n, dtype=bool)
+    valid[1] = False
+    prior_wt = np.ones(n, dtype=np.float64)
+    prior_wt[n - 2] = 0.0
     return SimpleNamespace(
         m1det=np.linspace(30.0, 42.0, n, dtype=np.float64),
         q=np.linspace(0.65, 0.9, n, dtype=np.float64),
         dL=np.asarray(dL, dtype=np.float64),
         chieff=np.zeros(n, dtype=np.float64),
         pixels=np.zeros(n, dtype=np.int32),
-        prior_wt=np.ones(n, dtype=np.float64),
-        valid=np.ones(n, dtype=bool),
+        prior_wt=prior_wt,
+        valid=valid,
         nx=nx,
         ny=ny,
         nz=nz,
@@ -41,16 +47,71 @@ def _event(n, dL):
 
 
 def _base_weight(m1det, q, dL, chieff, pix, prior_wt, catalog=None, spin=None):
-    del m1det, q, chieff, pix, prior_wt, catalog, spin
-    return np.zeros_like(dL)
+    """Non-constant population stand-in with finite and -inf entries."""
+    import jax.numpy as jnp
+
+    del chieff, pix, prior_wt, catalog, spin
+    finite = -0.5 * ((m1det - 36.0) / 3.0) ** 2 + jnp.log(q)
+    return jnp.where(dL < 880.0, finite, -jnp.inf)
+
+
+def _frozen_pe_reduction():
+    """Return the frozen catalog-free PE reduction, executed from frozen source.
+
+    The per-event PE reduction in the frozen reference is a closure inside
+    ``darksiren_log_likelihood`` (``_pe_chunk_ldw`` plus the block-vectorized
+    branch of ``if has_counterpart``).  Those statements are taken verbatim
+    from the imported frozen ``darksirens.likelihood.core`` and run against
+    that module's own globals; only the enclosing closure variables are
+    supplied as arguments.
+    """
+    import ast
+
+    import darksirens.likelihood.core as core
+
+    source = Path(core.__file__)
+    tree = ast.parse(source.read_text(), filename=str(source))
+
+    def _one(nodes, pred, what):
+        found = [node for node in nodes if pred(node)]
+        if len(found) != 1:
+            raise RuntimeError(f"expected one {what} in {source}; found {len(found)}")
+        return found[0]
+
+    def _func(nodes, name):
+        return _one(
+            nodes,
+            lambda n: isinstance(n, ast.FunctionDef) and n.name == name,
+            f"def {name}",
+        )
+
+    outer = _func(tree.body, "darksiren_log_likelihood")
+    inner = _func(outer.body, "_ll_given_states")
+    chunk = _func(inner.body, "_pe_chunk_ldw")
+    branch = _one(
+        inner.body,
+        lambda n: isinstance(n, ast.If)
+        and isinstance(n.test, ast.Name)
+        and n.test.id == "has_counterpart",
+        "if has_counterpart",
+    )
+    template = ast.parse(
+        "def frozen_pe_reduction(gw_pe, nEvents, nsamp, pe_block, log_weight_ev,"
+        " catalogs_pe_all, frozen, frozen_prior, _frozen_mix, apply_sky,"
+        " log_g_sky, sky_params, _dL_lo, _dL_hi, _dL_grid):\n"
+        "    return event_lls, event_vars\n"
+    )
+    fn = template.body[0]
+    fn.body = [chunk] + list(branch.orelse) + fn.body
+    module = ast.fix_missing_locations(template)
+    namespace = dict(vars(core))
+    exec(compile(module, str(source), "exec"), namespace)
+    return namespace["frozen_pe_reduction"]
 
 
 def _legacy():
     import jax.numpy as jnp
-    from darksirens.likelihood.selection import (
-        compute_selection_term,
-        log_evidence_and_mc_variance,
-    )
+    from darksirens.likelihood.selection import compute_selection_term
     from darksirens.sky import sky_model_parser
     from darksirens.utils.cosmology import (
         H0Planck,
@@ -71,14 +132,30 @@ def _legacy():
         z = z_of_dL_precomputed(jnp.clip(dL, lo, hi), dL_grid)
         return log_g(nx, ny, nz, z, theta)
 
+    def log_weight_ev(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=None,
+                      log_prior_vals=None):
+        assert log_prior_vals is None
+        return _base_weight(m1det, q, dL, chieff, pix, prior_wt, catalogs, spin=spin)
+
     pe = _event(8, np.linspace(350.0, 900.0, 8))
-    ldw = sky(
-        jnp.asarray(pe.nx), jnp.asarray(pe.ny), jnp.asarray(pe.nz),
-        jnp.asarray(pe.dL),
-    ).reshape(2, 4)
-    event = [log_evidence_and_mc_variance(row, 4) for row in ldw]
-    event_ll = jnp.stack([x[0] for x in event])
-    event_var = jnp.stack([x[1] for x in event])
+    pe = SimpleNamespace(**{k: jnp.asarray(v) if v is not None else None for k, v in vars(pe).items()})
+    event_ll, event_var = _frozen_pe_reduction()(
+        gw_pe=pe,
+        nEvents=2,
+        nsamp=4,
+        pe_block=2,
+        log_weight_ev=log_weight_ev,
+        catalogs_pe_all=(None,),
+        frozen=False,
+        frozen_prior=None,
+        _frozen_mix=None,
+        apply_sky=True,
+        log_g_sky=log_g,
+        sky_params=theta,
+        _dL_lo=lo,
+        _dL_hi=hi,
+        _dL_grid=dL_grid,
+    )
 
     sel = _event(12, np.linspace(300.0, 1200.0, 12))
     sel = SimpleNamespace(**{k: jnp.asarray(v) if v is not None else None for k, v in vars(sel).items()})
