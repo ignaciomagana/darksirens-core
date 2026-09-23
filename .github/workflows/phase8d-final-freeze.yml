@@ -1,34 +1,43 @@
-name: phase8d-final-freeze
+name: phase8d-release-contract
+
+# Builds the wheel, installs it into a clean environment and checks the frozen
+# package-root API, the pinned runtime and TinyNS metadata, default dispatch,
+# and that every public example still runs.
+#
+# This job used to open with "no scientific source change since accepted 8C"
+# (a diff of src/darksirens against 875a949). That freeze ended when Phases
+# 12A/12B changed src/darksirens, so the step failed on every later tree and
+# stopped every check behind it from running. It is retired rather than
+# re-pointed: a pinned-commit baseline goes stale at the next accepted science
+# change. Scientific parity is guarded by the regression suite and its
+# reference anchors, not by this job.
 
 on:
   push:
-    branches:
-      - rebuild/phase8-core-freeze
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  final-freeze:
+  release-contract:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       JAX_PLATFORMS: cpu
       DARKSIRENS_ZMAX: "5.0"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
     steps:
       - name: Check out candidate
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Require no scientific source change after accepted 8C
-        run: |
-          git diff --exit-code \
-            875a949d5a9f5ffb89f3a64cad030dcfc6daf6a2 HEAD \
-            -- src/darksirens
 
       - name: Build wheel
         run: |
@@ -156,20 +165,18 @@ jobs:
           print("default zero-dimensional dispatch: PASS")
           PY
 
-      - name: Compile public examples and reject private imports
+      - name: Run the packaging contract and every public example against the wheel
         run: |
-          /tmp/darksirens-phase8d/bin/python -m compileall -q examples
-          /tmp/darksirens-phase8d/bin/python - <<'PY'
-          import ast
-          from pathlib import Path
-
-          for path in Path("examples").glob("*.py"):
-              tree = ast.parse(path.read_text())
-              for node in ast.walk(tree):
-                  if isinstance(node, ast.ImportFrom) and node.module:
-                      assert not node.module.startswith("darksirens."), (path, node.module)
-          print("public examples: PASS")
-          PY
+          /tmp/darksirens-phase8d/bin/python -m pip install "pytest==8.3.4"
+          /tmp/darksirens-phase8d/bin/python -c "import darksirens; assert 'site-packages' in darksirens.__file__, darksirens.__file__"
+          /tmp/darksirens-phase8d/bin/pytest -q -rs \
+            tests/test_packaging_contract.py \
+            tests/test_examples.py \
+            2>&1 | tee /tmp/release-contract.log
+          if grep -q "skipped" /tmp/release-contract.log; then
+            echo "a packaging or example test skipped against the installed wheel"
+            exit 1
+          fi
 
       - name: Reject stale reconstruction docs
         run: |

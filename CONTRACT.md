@@ -58,9 +58,10 @@ Core does not own:
 
 ## Frozen package-root API
 
-The ordinary package-root surface is:
+The ordinary package-root surface (`darksirens.__all__`) is:
 
 ```python
+__version__
 configure_jax_runtime
 Cosmology
 Population
