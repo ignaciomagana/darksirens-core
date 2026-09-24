@@ -7,7 +7,7 @@ parameter-plan coordinates.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import jax.numpy as jnp
@@ -24,6 +24,7 @@ from darksirens.catalog.compact import compact_pe_selection_catalog
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
+from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.runtime import make_gw_event
 from darksirens.gw.samples import require_matching_contract, warn_pair_cosmology
@@ -212,12 +213,43 @@ class BoundAnalysis:
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE
     sel_batch_size: int | None = None
     pe_event_block: int | None = None
+    _log_likelihood: Any = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        # One jitted evaluation per binding, built here and reused by every
+        # call. Evaluated eagerly, each call rebuilt the likelihood's Python
+        # closures, and eager ``lax.scan`` traces per body-function object, so
+        # an explicit ``sel_batch_size`` or ``pe_event_block`` re-traced and
+        # re-compiled the scans on every call and JAX's primitive-dispatch
+        # cache kept every new executable. Under one jit they trace once.
+        object.__setattr__(self, "_log_likelihood", _jit_log_likelihood(self))
+
+    def __getstate__(self):
+        # The jitted closure does not pickle; it is rebuilt on unpickling.
+        state = dict(self.__dict__)
+        state.pop("_log_likelihood", None)
+        return state
+
+    def __setstate__(self, state):
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        self.__post_init__()
 
     @property
     def labels(self) -> tuple[str, ...]:
         return self.analysis.parameters.labels
 
     def __call__(self, theta):
+        return self._log_likelihood(
+            jnp.asarray(theta),
+            self.gw_pe,
+            self.gw_selection,
+            self.catalog,
+            self.observed_density_cache,
+        )
+
+    def _evaluate(self, theta, gw_pe, gw_selection, catalog, observed_density_cache):
+        """Evaluate at ``theta`` with the data operands passed explicitly."""
         cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
         )
@@ -244,8 +276,8 @@ class BoundAnalysis:
             return spectral_siren_log_likelihood(
                 cosmology,
                 population,
-                self.gw_pe,
-                self.gw_selection,
+                gw_pe,
+                gw_selection,
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
@@ -256,10 +288,10 @@ class BoundAnalysis:
             return bright_siren_log_likelihood(
                 cosmology,
                 population,
-                self.gw_pe,
-                self.catalog,
+                gw_pe,
+                catalog,
                 self.analysis.redshift.counterparts,
-                self.gw_selection,
+                gw_selection,
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
@@ -271,12 +303,12 @@ class BoundAnalysis:
                 cosmology,
                 catalog_params,
                 population,
-                self.gw_pe,
-                self.catalog,
-                self.observed_density_cache,
-                self.gw_selection,
-                self.catalog,
-                self.observed_density_cache,
+                gw_pe,
+                catalog,
+                observed_density_cache,
+                gw_selection,
+                catalog,
+                observed_density_cache,
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
@@ -288,10 +320,10 @@ class BoundAnalysis:
                 cosmology,
                 catalog_params,
                 population,
-                self.gw_pe,
-                self.catalog,
-                self.gw_selection,
-                self.catalog,
+                gw_pe,
+                catalog,
+                gw_selection,
+                catalog,
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
@@ -300,6 +332,31 @@ class BoundAnalysis:
             )
 
         raise TypeError(f"unsupported analysis redshift type {type(self.analysis.redshift)!r}")
+
+
+def _jit_log_likelihood(bound: BoundAnalysis):
+    """Return ``bound._evaluate`` as one ``jax.jit`` over its data operands.
+
+    The coordinate, the PE and selection samples, the compact catalog, the
+    observed-density cache, the distance table and the ambient jit channels
+    are jit arguments, never HLO constants; ``bound`` supplies only the static
+    configuration (analysis, sizes, guard and block settings).
+    """
+
+    @threads_distance_table()
+    def log_likelihood(
+        theta,
+        gw_pe,
+        gw_selection,
+        catalog,
+        observed_density_cache,
+        distance_table=None,
+    ):
+        return bound._evaluate(
+            theta, gw_pe, gw_selection, catalog, observed_density_cache
+        )
+
+    return log_likelihood
 
 
 def bind_analysis(
