@@ -45,6 +45,9 @@ jobs:
 
       - name: Real backend runs, checkpoint round-trip and healpy parity
         run: |
+          # The default step shell is `bash -e` without pipefail, so without this
+          # the pipe into tee would hide a pytest failure and the job would pass.
+          set -o pipefail
           python -m pytest -q -rs \
             tests/test_real_backends.py \
             tests/test_dynesty_checkpoint_state.py \
