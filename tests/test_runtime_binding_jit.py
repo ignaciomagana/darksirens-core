@@ -50,7 +50,7 @@ def _jax_events():
         _ACTIVE_COUNTERS.remove(counts)
 
 
-def _stores(n_events=3, nsamp=4, n_sel=128):
+def _stores(n_events=9, nsamp=4, n_sel=128):
     n_pe = n_events * nsamp
     pe_m1 = np.linspace(36.0, 39.0, n_pe)
     pe_columns = {
@@ -135,9 +135,9 @@ def _analysis(kind):
 
 
 KINDS = ("spectral", "incomplete", "complete")
-# (sel_batch_size, pe_event_block): single pass, and explicit blocks that make
-# both reducers scan (128 injections in 4 batches, 3 events in 3 blocks) plus
-# a padded selection batch (128 -> 3 x 48) with an overlapping PE tail.
+# (sel_batch_size, pe_event_block): single pass; 4 selection batches of 32 and
+# 9 one-event PE blocks, both scanned; 128 injections padded to 3 batches of
+# 48 and 4 two-event PE blocks plus the overlapping tail block.
 BLOCKS = ((None, None), (32, 1), (48, 2))
 
 
