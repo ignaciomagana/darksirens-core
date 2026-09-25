@@ -177,6 +177,9 @@ def parameter_plan_semantic(plan) -> dict:
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
     semantic["parameters"] = parameter_plan_semantic(analysis.parameters).
+    Pass each ordinary analysis's own plan: the plan combine_parameter_plans
+    returns for an InferenceTarget keeps only the sampled coordinates, so its
+    block carries no fixed values.
     """
 
     def _kind(entry):
