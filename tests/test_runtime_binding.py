@@ -137,7 +137,12 @@ def test_spectral_binding_matches_direct_fixed_theta_exactly():
         pop_model=analysis.population.model_name,
     )
     actual = bound(theta)
-    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    # The bound analysis is one XLA-fused program (PR #25); it equals the eager
+    # op-by-op evaluation only to a few ulp across CPUs (bitwise on some hosts,
+    # 1-2 ulp on GitHub's runner).
+    np.testing.assert_allclose(
+        np.asarray(actual), np.asarray(expected), rtol=1e-14, atol=0.0
+    )
     assert np.isfinite(float(actual))
 
 
@@ -221,7 +226,12 @@ def test_complete_catalog_binding_matches_direct_fixed_theta_exactly():
         pop_model=analysis.population.model_name,
     )
     actual = bound(theta)
-    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    # The bound analysis is one XLA-fused program (PR #25); it equals the eager
+    # op-by-op evaluation only to a few ulp across CPUs (bitwise on some hosts,
+    # 1-2 ulp on GitHub's runner).
+    np.testing.assert_allclose(
+        np.asarray(actual), np.asarray(expected), rtol=1e-14, atol=0.0
+    )
     assert np.isfinite(float(actual))
 
 
