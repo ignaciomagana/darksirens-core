@@ -6,11 +6,13 @@ load GW data, build runtime likelihood state, or run a sampler.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import operator
 from typing import Any
+import warnings
 
-from darksirens._specs import Cosmology, Population
+from darksirens._specs import Cosmology, Population, fixed_scalar
 from darksirens.inference.joint_prior import resolve_joint_prior_constraints
 
 
@@ -74,6 +76,15 @@ class ParameterPlan:
     ordinary analyses and :class:`darksirens.InferenceTarget`. The remaining
     fields describe ordinary core composition and default to neutral values so
     specialized companions never have to fabricate ordinary dark-siren state.
+
+    ``n_population`` and ``n_catalog`` count sampled coordinates only.
+    ``population_labels`` always lists every population parameter.
+    ``fixed_population`` is the whole population vector when none of it is
+    sampled (a preset, or a ``fixed`` mapping naming every parameter).
+    ``fixed_population_values`` holds the ``(label, value)`` pairs of a
+    ``Population(fixed={...})`` mapping, in model order, and ``fixed_survey``
+    the ``(name, value)`` pairs of ``model(fixed_survey={...})``, in block
+    order. Fixed values never enter the sampled coordinates.
     """
 
     labels: tuple[str, ...]
@@ -89,6 +100,8 @@ class ParameterPlan:
     population_labels: tuple[str, ...] = ()
     fixed_population: tuple[float, ...] | None = None
     angular_labels: tuple[str, ...] = ()
+    fixed_population_values: tuple[tuple[str, float], ...] = ()
+    fixed_survey: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -194,6 +207,112 @@ def _resolve_redshift(
     raise ValueError("completeness must be None, 'incomplete', or 'complete'")
 
 
+def _resolve_fixed_survey(fixed_survey, catalog_priors) -> dict[str, float]:
+    """Check ``model(fixed_survey={name: value})`` against the survey block."""
+    if fixed_survey is None:
+        return {}
+    if not isinstance(fixed_survey, Mapping):
+        raise TypeError("fixed_survey must be a mapping {parameter: value}")
+    if not fixed_survey:
+        return {}
+    if not catalog_priors:
+        raise ValueError(
+            "fixed_survey applies only to a catalog analysis; spectral and "
+            "bright-siren analyses have no survey parameters"
+        )
+    bounds = {name: (lo, hi) for name, lo, hi in catalog_priors}
+    unknown = [key for key in fixed_survey if key not in bounds]
+    if unknown:
+        raise ValueError(
+            f"unknown survey parameter(s) {unknown}; this analysis samples "
+            f"{list(bounds)}"
+        )
+    out = {}
+    for name, lo, hi in catalog_priors:
+        if name not in fixed_survey:
+            continue
+        value = fixed_scalar(f"survey parameter {name!r}", fixed_survey[name])
+        if not lo <= value <= hi:
+            raise ValueError(
+                f"survey parameter {name!r} fixed at {value} lies outside its "
+                f"prior bounds [{lo}, {hi}]"
+            )
+        out[name] = value
+    return out
+
+
+def _resolve_fixed_population(
+    population, model_obj, labels, lower, upper
+) -> dict[str, float]:
+    """Map ``Population(fixed={...})`` onto the model's labels, in model order.
+
+    A key is a label or, where the model declares one, a parameter's ASCII
+    name. Each value must lie inside that parameter's prior bounds.
+    """
+    requested = population.fixed_values
+    if not requested:
+        return {}
+    names = [str(getattr(spec, "name", "") or "") for spec in model_obj.param_specs]
+    if len(names) != len(labels):
+        raise RuntimeError("population parameter names do not match the labels")
+    by_key: dict[str, set[int]] = {}
+    for index, label in enumerate(labels):
+        by_key.setdefault(label, set()).add(index)
+    for index, name in enumerate(names):
+        if name:
+            by_key.setdefault(name, set()).add(index)
+
+    resolved: dict[int, float] = {}
+    unknown = []
+    for key, value in requested.items():
+        hits = by_key.get(key)
+        if not hits:
+            unknown.append(key)
+            continue
+        if len(hits) > 1:
+            raise ValueError(
+                f"population key {key!r} is ambiguous for "
+                f"{population.model_name!r}: it names "
+                f"{[labels[i] for i in sorted(hits)]}"
+            )
+        (index,) = hits
+        if index in resolved:
+            raise ValueError(
+                f"population parameter {labels[index]!r} is fixed twice "
+                "(by its label and by its name)"
+            )
+        lo, hi = float(lower[index]), float(upper[index])
+        if not lo <= value <= hi:
+            raise ValueError(
+                f"population parameter {labels[index]!r} fixed at {value} lies "
+                f"outside its prior bounds [{lo}, {hi}]"
+            )
+        resolved[index] = value
+    if unknown:
+        raise ValueError(
+            f"unknown population parameter(s) {unknown} for "
+            f"{population.model_name!r}; use a label from {list(labels)} or a "
+            f"name from {[name for name in names if name]}"
+        )
+    return {labels[i]: resolved[i] for i in sorted(resolved)}
+
+
+def _warn_partially_fixed_constraints(model_obj, fixed_labels) -> None:
+    """A joint prior with a fixed member cannot be a cube map any more."""
+    for kind, group in getattr(model_obj, "constraint_groups", None) or ():
+        members = [str(label) for label in group]
+        fixed = [label for label in members if label in fixed_labels]
+        if fixed and len(fixed) < len(members):
+            warnings.warn(
+                f"joint prior constraint {kind}{tuple(members)} has fixed "
+                f"member(s) {fixed}; the sampled member(s) keep its "
+                "likelihood-side rejection (the invalid region keeps zero "
+                "likelihood, and logZ carries the log prior-fraction offset).",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+
 def model(
     *,
     cosmology=None,
@@ -204,6 +323,7 @@ def model(
     angular="isotropic",
     counterparts=None,
     counterpart_nside=None,
+    fixed_survey=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -220,6 +340,13 @@ def model(
     ``empty_policy`` is legal only with ``completeness='complete'`` and selects
     the galaxy-free-row branch of that likelihood: ``'zero'`` (the default) or
     the ``'volume'`` robustness approximation.
+
+    ``fixed_survey={name: value}`` fixes the named survey parameters of a
+    catalog analysis (``log10n0``, ``delta``, ``sigma_kde``; the complete
+    catalog has no ``log10n0``) at the given values, each inside its prior
+    bounds, and samples the rest. ``Population(fixed={...})`` does the same
+    for population parameters. Fixed values are constants of the bound
+    likelihood, not sampled coordinates.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -239,6 +366,7 @@ def model(
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
     )
+    survey_fixed = _resolve_fixed_survey(fixed_survey, catalog_priors)
     if isinstance(redshift, BrightRedshift) and angular != "isotropic":
         raise ValueError(
             "bright-siren angular composition is not part of the frozen public "
@@ -247,6 +375,7 @@ def model(
 
     from darksirens.population import (
         get_fixed_population_params,
+        get_model,
         pop_model_prior_parser,
     )
     from darksirens.population.angular import (
@@ -286,7 +415,31 @@ def model(
     n_cosmology = len(labels)
 
     fixed_population = None
-    if population.is_fixed:
+    population_fixed: dict[str, float] = {}
+    if population.fixed_values:
+        population_model = get_model(
+            population.model_name,
+            shared_beta=population.shared_beta,
+            shared_spin=population.shared_spin,
+            shared_gamma=population.shared_gamma,
+        )
+        population_fixed = _resolve_fixed_population(
+            population, population_model, pop_labels, pop_lower, pop_upper
+        )
+        _warn_partially_fixed_constraints(population_model, population_fixed)
+    if population_fixed and len(population_fixed) == len(pop_labels):
+        fixed_population = tuple(population_fixed[label] for label in pop_labels)
+        n_population = 0
+    elif population_fixed:
+        for label, lo, hi, kind in zip(pop_labels, pop_lower, pop_upper, pop_kinds):
+            if label in population_fixed:
+                continue
+            labels.append(label)
+            lower.append(float(lo))
+            upper.append(float(hi))
+            prior_kinds.append(tuple(kind))
+        n_population = len(pop_labels) - len(population_fixed)
+    elif population.is_fixed:
         fixed = get_fixed_population_params(
             population.model_name,
             shared_beta=population.shared_beta,
@@ -308,11 +461,13 @@ def model(
         n_population = len(pop_labels)
 
     for name, lo, hi in catalog_priors:
+        if name in survey_fixed:
+            continue
         labels.append(name)
         lower.append(float(lo))
         upper.append(float(hi))
         prior_kinds.append(_UNIFORM)
-    n_catalog = len(catalog_priors)
+    n_catalog = len(catalog_priors) - len(survey_fixed)
 
     labels.extend(angular_labels)
     lower.extend(float(value) for value in angular_lower)
@@ -352,6 +507,8 @@ def model(
         population_labels=pop_labels,
         fixed_population=fixed_population,
         angular_labels=angular_labels,
+        fixed_population_values=tuple(population_fixed.items()),
+        fixed_survey=tuple(survey_fixed.items()),
     )
     return Analysis(
         cosmology=cosmology,

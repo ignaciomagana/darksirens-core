@@ -71,6 +71,7 @@ def model(
     angular="isotropic",
     counterparts=None,
     counterpart_nside=None,
+    fixed_survey=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -85,6 +86,7 @@ def model(
         angular=angular,
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
+        fixed_survey=fixed_survey,
     )
 
 

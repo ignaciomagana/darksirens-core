@@ -106,6 +106,20 @@ parameter decoders or sampler adapters.
   distance-grid support (`Om0` [0.1575, 0.4575], `w0` [-2.25, 0.25], `wa`
   [-2.5, 2.5], closed intervals); `H0` is unrestricted. Out-of-grid values or
   bounds raise at construction.
+- `Population(name, fixed={parameter: value, ...})` fixes only the named
+  population parameters, at the given values, and samples the rest. A key is
+  the model's label (`analysis.parameters.population_labels`) or its ASCII name
+  where the model declares one (`"PL.alpha"`). `model(..., fixed_survey={name:
+  value})` does the same for the survey parameters of a catalog analysis
+  (`log10n0`, `delta`, `sigma_kde`; no `log10n0` for `completeness="complete"`)
+  and is refused for spectral and bright sirens. Unknown names, and values
+  outside the parameter's prior bounds, raise `ValueError`. Fixed parameters
+  leave `ParameterPlan.labels`; `ParameterPlan.fixed_population_values` and
+  `ParameterPlan.fixed_survey` record them, the bound likelihood reads them as
+  constants, and `parameter_plan_semantic(plan)` in
+  `darksirens.inference.run_fingerprint` puts them in a run fingerprint.
+  Fixing one member of a joint prior pair warns: the other member keeps the
+  likelihood-side rejection.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other

@@ -6,8 +6,13 @@ population globals, flow directories, survey/LSS/lensing state, CLI options, or
 sampler configuration.  Those owners must construct and pass their semantic
 identity explicitly.
 
-Two opt-in helpers (never called automatically) cover the settings core
-itself resolves at import:
+Three opt-in helpers (never called automatically) cover state core itself
+resolves. parameter_plan_semantic(plan) is the sampled coordinates, their
+priors and every fixed value of a ParameterPlan (fixed cosmology, a fixed
+or partially fixed population, fixed survey parameters) and belongs inside the
+caller's semantic mapping, e.g. semantic["parameters"] =
+parameter_plan_semantic(analysis.parameters). The other two cover the
+settings core resolves at import:
 ``core_numerics_semantic()`` returns the target-setting numerics (redshift
 grids, GP/angular redshift-normaliser ranges, GP-population bin edges, the
 GW-population normalisation grids) and belongs INSIDE the caller's
@@ -161,6 +166,62 @@ def fingerprint_from_semantic(semantic, *, advisory=None) -> dict:
         "semantic": canonical,
         "advisory": {} if advisory is None else advisory,
     }
+
+
+def parameter_plan_semantic(plan) -> dict:
+    """Canonical semantic block of a ParameterPlan, fixed values included.
+
+    Two plans that sample the same labels but fix different parameters, or
+    the same parameters at different values, have different blocks, so a run
+    fingerprint built from it refuses to resume across them. Fixed values are
+    keyed by name, so the order in which they were declared does not matter.
+    It belongs in the fingerprint's semantic block, e.g.
+    semantic["parameters"] = parameter_plan_semantic(analysis.parameters).
+    """
+
+    def _kind(entry):
+        kind, loc, scale = entry
+        return [
+            str(kind),
+            None if loc is None else float(loc),
+            None if scale is None else float(scale),
+        ]
+
+    return canonical_semantic({
+        "labels": [str(label) for label in plan.labels],
+        "lower": [float(value) for value in plan.lower],
+        "upper": [float(value) for value in plan.upper],
+        "prior_kinds": [_kind(entry) for entry in plan.prior_kinds],
+        "joint_constraints": [
+            [str(kind), [int(i) for i in indices]]
+            for kind, indices in plan.joint_constraints
+        ],
+        "blocks": {
+            "n_cosmology": int(plan.n_cosmology),
+            "n_population": int(plan.n_population),
+            "n_catalog": int(plan.n_catalog),
+            "n_angular": int(plan.n_angular),
+        },
+        "population_labels": [str(label) for label in plan.population_labels],
+        "angular_labels": [str(label) for label in plan.angular_labels],
+        "fixed": {
+            "cosmology": {
+                str(name): float(value) for name, value in plan.fixed_cosmology
+            },
+            "population": (
+                None
+                if plan.fixed_population is None
+                else [float(value) for value in plan.fixed_population]
+            ),
+            "population_values": {
+                str(name): float(value)
+                for name, value in plan.fixed_population_values
+            },
+            "survey": {
+                str(name): float(value) for name, value in plan.fixed_survey
+            },
+        },
+    })
 
 
 def core_numerics_semantic() -> dict:
@@ -473,6 +534,7 @@ __all__ = [
     "core_numerics_semantic",
     "fingerprint_from_semantic",
     "gate_and_stamp_resume_fingerprint",
+    "parameter_plan_semantic",
     "resume_provenance_attrs",
     "save_run_fingerprint",
 ]
