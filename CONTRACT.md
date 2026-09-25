@@ -119,7 +119,9 @@ parameter decoders or sampler adapters.
   constants, and `parameter_plan_semantic(plan)` in
   `darksirens.inference.run_fingerprint` puts them in a run fingerprint.
   Fixing one member of a joint prior pair warns: the other member keeps the
-  likelihood-side rejection.
+  likelihood-side rejection. Fixed values that violate a model's joint prior
+  constraint (for example `lambda_0 + lambda_1 <= 1`), or leave the pair's
+  sampled member no prior support, raise `ValueError`.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other

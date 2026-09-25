@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import re
 import warnings
 
 import jax
@@ -321,6 +322,55 @@ def test_fixing_one_member_of_a_joint_prior_warns_and_keeps_the_other():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         model(cosmology=COSMOLOGY, population=Population(name, fixed={r"$\alpha_1$": 1.5}))
+
+
+_GWTC5 = "gwtc5_fiducial_bpl2peaks"
+_L0, _L1 = r"$\lambda_0$", r"$\lambda_1$"
+_M1L, _M2L = r"$m_{1,{\rm low}}$", r"$m_{2,{\rm low}}$"
+
+
+@pytest.mark.parametrize(
+    "fixed,match",
+    [
+        # Both members fixed where the model's own mask is false: zero likelihood everywhere.
+        ({_L0: 0.7, _L1: 0.6}, "violate the model's joint prior constraint simplex"),
+        ({_M1L: 4.0, _M2L: 6.0}, "violate the model's joint prior constraint conditional_upper"),
+        # One member fixed so that the sampled partner keeps a zero-width interval.
+        ({_L0: 1.0}, "leaves " + re.escape(repr(_L1)) + " no prior support"),
+        ({_M1L: 3.0}, "leaves " + re.escape(repr(_M2L)) + " no prior support"),
+        ({_M2L: 10.0}, "leaves " + re.escape(repr(_M1L)) + " no prior support"),
+    ],
+)
+def test_fixed_values_must_leave_the_joint_prior_support(fixed, match):
+    with pytest.raises(ValueError, match=match):
+        model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed=fixed))
+
+
+def test_every_parameter_fixed_is_checked_against_the_joint_prior():
+    _, _, labels, _, _ = pop_model_prior_parser(_GWTC5)
+    values = dict(
+        zip((str(label) for label in labels), get_fixed_population_params(_GWTC5))
+    )
+    values = {label: float(value) for label, value in values.items()}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        preset_like = model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed=values))
+    assert preset_like.parameters.n_population == 0
+    with pytest.raises(ValueError, match="conditional_upper"):
+        model(
+            cosmology=COSMOLOGY,
+            population=Population(_GWTC5, fixed=dict(values, **{_M1L: 4.0, _M2L: 6.0})),
+        )
+
+
+def test_fixed_values_on_the_joint_prior_boundary_are_accepted():
+    # The model's mask is inclusive (lambda0 + lambda1 <= 1, m2_low <= m1_low).
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed={_L0: 0.25, _L1: 0.75}))
+        model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed={_M1L: 5.0, _M2L: 5.0}))
+    with pytest.warns(RuntimeWarning, match="fixed member"):
+        model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed={_M2L: 9.5}))
 
 
 # ---------------------------------------------------------------------------

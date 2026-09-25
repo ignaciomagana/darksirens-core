@@ -297,20 +297,75 @@ def _resolve_fixed_population(
     return {labels[i]: resolved[i] for i in sorted(resolved)}
 
 
-def _warn_partially_fixed_constraints(model_obj, fixed_labels) -> None:
-    """A joint prior with a fixed member cannot be a cube map any more."""
+def _constraint_holds(kind, values) -> bool:
+    """Whether fixed values satisfy a joint constraint (the model's own mask)."""
+    if kind in ("ordered_le", "conditional_upper"):
+        return values[0] <= values[1]
+    if kind == "simplex":
+        return values[0] + values[1] <= 1.0
+    if kind == "ball3":
+        return sum(value * value for value in values) <= 1.0
+    return True
+
+
+def _partner_support(kind, members, fixed, bounds):
+    """The interval a pair's sampled member keeps once the other is fixed."""
+    (free,) = [label for label in members if label not in fixed]
+    lo, hi = bounds[free]
+    if kind in ("ordered_le", "conditional_upper"):
+        # members[0] <= members[1]
+        if members[0] in fixed:
+            lo = max(lo, fixed[members[0]])
+        else:
+            hi = min(hi, fixed[members[1]])
+    elif kind == "simplex":
+        (other,) = [label for label in members if label in fixed]
+        hi = min(hi, 1.0 - fixed[other])
+    return free, lo, hi
+
+
+def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
+    """Check fixed values against the model's joint prior constraints.
+
+    Fixed values that violate a constraint, or leave the pair's sampled member
+    no prior support, would give zero likelihood everywhere, so they raise. A
+    partially fixed pair otherwise warns: it cannot be a cube map any more.
+    """
     for kind, group in getattr(model_obj, "constraint_groups", None) or ():
         members = [str(label) for label in group]
-        fixed = [label for label in members if label in fixed_labels]
-        if fixed and len(fixed) < len(members):
-            warnings.warn(
-                f"joint prior constraint {kind}{tuple(members)} has fixed "
-                f"member(s) {fixed}; the sampled member(s) keep its "
-                "likelihood-side rejection (the invalid region keeps zero "
-                "likelihood, and logZ carries the log prior-fraction offset).",
-                RuntimeWarning,
-                stacklevel=4,
-            )
+        fixed_members = [label for label in members if label in fixed]
+        if not fixed_members:
+            continue
+        if len(fixed_members) == len(members):
+            values = [fixed[label] for label in members]
+            if not _constraint_holds(kind, values):
+                raise ValueError(
+                    f"fixed values {dict(zip(members, values))} violate the "
+                    f"model's joint prior constraint {kind}{tuple(members)}; "
+                    "the likelihood would be zero everywhere"
+                )
+            continue
+        if (
+            len(members) == 2
+            and kind in ("ordered_le", "conditional_upper", "simplex")
+            and all(label in bounds for label in members)
+        ):
+            free, lo, hi = _partner_support(kind, members, fixed, bounds)
+            if not lo < hi:
+                raise ValueError(
+                    f"fixing {fixed_members} leaves {free!r} no prior support "
+                    f"under the joint prior constraint {kind}{tuple(members)} "
+                    f"(interval [{lo}, {hi}]); fix {free!r} as well or move "
+                    "the fixed value"
+                )
+        warnings.warn(
+            f"joint prior constraint {kind}{tuple(members)} has fixed "
+            f"member(s) {fixed_members}; the sampled member(s) keep its "
+            "likelihood-side rejection (the invalid region keeps zero "
+            "likelihood, and logZ carries the log prior-fraction offset).",
+            RuntimeWarning,
+            stacklevel=4,
+        )
 
 
 def model(
@@ -426,7 +481,14 @@ def model(
         population_fixed = _resolve_fixed_population(
             population, population_model, pop_labels, pop_lower, pop_upper
         )
-        _warn_partially_fixed_constraints(population_model, population_fixed)
+        _check_fixed_constraints(
+            population_model,
+            population_fixed,
+            {
+                label: (float(lo), float(hi))
+                for label, lo, hi in zip(pop_labels, pop_lower, pop_upper)
+            },
+        )
     if population_fixed and len(population_fixed) == len(pop_labels):
         fixed_population = tuple(population_fixed[label] for label in pop_labels)
         n_population = 0
