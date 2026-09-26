@@ -133,7 +133,8 @@ parameter decoders or sampler adapters.
   exact scalar `3 ln(H0 / H0_ref)` to it, as the frozen reference's H0 kernel
   pin does. The likelihood agrees with the per-call quadrature to rounding,
   not bit for bit (on the benchmark fixtures, within 1e-15 relative on the
-  total and 1e-13 on every per-event term). `"off"` keeps the per-call
+  total and on each event's log evidence, and 1.2e-13 on the Monte Carlo
+  variance diagnostics). `"off"` keeps the per-call
   quadrature, and its bound program is unchanged. `ParameterPlan.kernel_pin`
   and `ParameterPlan.kernel_pin_active` record the setting and whether it
   applies, and `parameter_plan_semantic(plan)` puts both in a run fingerprint.

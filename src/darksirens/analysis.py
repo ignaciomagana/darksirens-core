@@ -500,8 +500,9 @@ def model(
     at bind time, at ``H0_ref = 67.74``; each call then adds the exact scalar
     ``3 ln(H0 / H0_ref)``, as the frozen legacy H0 kernel pin does. The
     result agrees with the per-call quadrature to rounding, not bit for bit
-    (on the benchmark fixtures, within 1e-15 relative on the total and 1e-13
-    on every per-event term). ``kernel_pin="off"`` keeps the per-call
+    (on the benchmark fixtures, within 1e-15 relative on the total and on
+    each event's log evidence, and 1.2e-13 on the Monte Carlo variance
+    diagnostics). ``kernel_pin="off"`` keeps the per-call
     quadrature. The plan records the setting and whether the
     pin applies (``ParameterPlan.kernel_pin``,
     ``ParameterPlan.kernel_pin_active``). It has no effect on spectral,

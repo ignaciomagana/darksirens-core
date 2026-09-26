@@ -239,8 +239,9 @@ turns the likelihood into `-inf` if they disagree with the pin by more than
 The pinned likelihood is not bit-identical to the per-call quadrature: the two
 round differently. On the harness fixtures T and S (plans `dark_H0`,
 `dark_pop`, `dark_joint_cosmo_pop`, single pass and blocked) the total log
-likelihood agrees to 7.6e-16 relative, every gate field to 6.7e-14 relative
-and every per-sample catalog log-density to 5.7e-14 absolute; against the
+likelihood agrees to 7.6e-16 relative, each event's log evidence to 4.4e-16,
+the Monte Carlo variance diagnostics to 1.2e-13 relative and every
+per-sample catalog log-density to 5.7e-14 absolute; against the
 reference, which pins, the total agrees to 2.9e-16 relative (bit for bit in 8
 of 12 cells, against 4 of 12 unpinned). On CPU a call is 1.4 to 6.7 times
 faster (T `dark_H0`: 15.8 ms against 105.7 ms), for about 1 s more at bind.
