@@ -10,6 +10,15 @@ Each real galaxy contributes a unit-mass redshift kernel
 with ``sigma_i = max(sqrt(dz_i**2 + sigma_kde**2), 1e-4)``.  The galaxy
 measure tilts each uncertain redshift kernel but does not change that galaxy's
 total host weight.
+
+When ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are all fixed, the
+kernel state depends on the proposal only through ``H0``, and only as a
+scalar: ``g(z; H0) = (H0_ref / H0)^3 g(z; H0_ref)``, so every ``log Z_i``
+moves by ``-3 ln(H0 / H0_ref)`` and ``log_kw`` by ``+3 ln(H0 / H0_ref)``.
+:func:`build_pinned_catalog_kernel` evaluates the state once at
+``KERNEL_PIN_H0_REF`` (bind time) and :func:`pinned_catalog_kernel_state`
+serves it per proposal with that shift, as the frozen legacy H0 kernel pin
+does (legacy ``redshift/catalog.py:990-1360``).
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ from jax.scipy.stats import norm
 
 from darksirens.cosmology._grid import log_interp_zgrid, zgrid
 from darksirens.cosmology.distances import dV_of_z, threads_distance_table
-from darksirens.cosmology.parameters import CosmologyParameters
+from darksirens.cosmology.parameters import H0_FID, CosmologyParameters
 
 from .types import CatalogParameters, GalaxyCatalog
 
@@ -50,7 +59,14 @@ _ROW_CHUNK_SIZE: int = 512
 
 
 class CatalogKernelState(NamedTuple):
-    """Per-proposal ordinary observed-catalog kernel state."""
+    """Per-proposal ordinary observed-catalog kernel state.
+
+    A state served from a kernel pin (:func:`pinned_catalog_kernel_state`)
+    carries ``None`` for ``log_kw``, ``sig_eff`` and ``log_sig_eff``: the
+    evaluator reads only the fused leaves (``log_kw_eff``,
+    ``log_kw_eff_rowmax``, ``inv_sig_eff``, ``row_empty``) and the prior state
+    reads ``log_depth_mass``, so the pin does not keep the other three.
+    """
 
     log_g_grid: Any
     log_kw: Any
@@ -285,6 +301,168 @@ def build_catalog_kernel_state(
     )
 
 
+# ------------------------------------------------------------------------
+# Kernel pin: the state evaluated once, at bind time, when only H0 moves it
+# ------------------------------------------------------------------------
+#: Reference H0 of the pin: the distance table's own scale (legacy
+#: ``KERNEL_PIN_H0_REF = H0Planck``, ``redshift/catalog.py:995``).
+KERNEL_PIN_H0_REF: float = float(H0_FID)
+
+#: Occupied rows rebuilt from the live proposal on every call and compared with
+#: the pin (legacy ``KERNEL_PIN_PROBE_ROWS``, ``redshift/catalog.py:999``).
+KERNEL_PIN_PROBE_ROWS: int = 8
+
+#: Absolute tolerance of that comparison (legacy ``KERNEL_PIN_TOL``,
+#: ``redshift/catalog.py:1006``): the premise holds to ~1e-14 over H0 in
+#: [20, 140]; the smallest violation legacy measured is 3.9e-2.
+KERNEL_PIN_TOL: float = 1.0e-9
+
+
+class PinnedCatalogKernel(NamedTuple):
+    """The catalog kernel state at ``H0_ref``, for a fixed kernel z-dependence.
+
+    Valid when ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed:
+
+        r(z; H0)  = r_tab(z; Om0, w0, wa) H0_FID / H0     (cosmology.r_of_z)
+        g(z; H0)  = c r^2 / (H0 E(z)) (1 + z)^delta = (H0_ref / H0)^3 g(z; H0_ref)
+        sig_eff_i = max(sqrt(dz_i^2 + sigma_kde^2), 1e-4)  (no theta)
+
+    The Gauss-Legendre nodes of ``Z_i`` then carry no theta, so exactly
+    ``log_kw(H0) = log_kw(H0_ref) + 3 ln(H0 / H0_ref)`` for every galaxy, the
+    row maximum of ``log_kw_eff`` moves by the same scalar, and
+    ``log_depth_mass`` does not move (the factor cancels in its ratio).  Only
+    the leaves the likelihood reads are kept.  ``probe_rows`` are occupied
+    rows the per-call state rebuilds from the live proposal to check the
+    premise (legacy ``PinnedKernelQuadrature``, ``redshift/catalog.py:1013-1076``).
+    """
+
+    H0_ref: Any  # 0-d, the H0 the pin was evaluated at
+    log_kw_eff: Any  # (N_rows, N_max) at H0_ref, padding at -1e30
+    log_kw_eff_rowmax: Any  # (N_rows,) at H0_ref, 0.0 on an empty row
+    inv_sig_eff: Any  # (N_rows, N_max) theta-invariant, 0.0 on padding
+    row_empty: Any  # (N_rows,) theta-invariant
+    log_depth_mass: Any  # (N_rows,) or 0-d, H0-invariant
+    probe_rows: Any  # (P,) int32 occupied rows
+
+
+def _spread_probe_rows(ngals, n_probe: int) -> np.ndarray:
+    """``n_probe`` occupied rows spread evenly over the catalog (host side).
+
+    Occupied rows are the ones the probe can compare: an empty row has no
+    kernel weight to check (legacy ``_spread_probe_rows``,
+    ``redshift/catalog.py:1079-1094``).
+    """
+
+    ngals = np.asarray(ngals)
+    if ngals.shape[0] == 0:
+        return np.zeros(0, dtype=np.int32)
+    occupied = np.flatnonzero(ngals > 0)
+    if occupied.size == 0:
+        occupied = np.arange(ngals.shape[0])
+    n_probe = max(1, min(int(n_probe), int(occupied.size)))
+    pick = np.unique(
+        np.linspace(0, occupied.size - 1, n_probe).round().astype(np.int64)
+    )
+    return occupied[pick].astype(np.int32)
+
+
+def build_pinned_catalog_kernel(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    *,
+    n_probe: int = KERNEL_PIN_PROBE_ROWS,
+) -> PinnedCatalogKernel:
+    """Evaluate the catalog kernel state once, at ``KERNEL_PIN_H0_REF``.
+
+    ``cosmo`` and ``params`` must carry the run's fixed ``Om0``, ``w0``,
+    ``wa``, ``delta``, ``sigma_kde`` and ``z_depth``; ``cosmo.H0`` is replaced
+    by the reference.  The state is :func:`build_catalog_kernel_state`
+    itself, the per-proposal builder, run once under one jit with the catalog
+    and the distance table as arguments.  Call it outside any trace, with
+    concrete catalog arrays.
+    """
+
+    ref = cosmo._replace(
+        H0=jnp.asarray(KERNEL_PIN_H0_REF, dtype=zgrid.dtype)
+    )
+
+    @threads_distance_table()
+    def _state(catalog, distance_table=None):
+        return build_catalog_kernel_state(ref, params, catalog)
+
+    state = _state(catalog)
+    return PinnedCatalogKernel(
+        H0_ref=ref.H0,
+        log_kw_eff=state.log_kw_eff,
+        log_kw_eff_rowmax=state.log_kw_eff_rowmax,
+        inv_sig_eff=state.inv_sig_eff,
+        row_empty=state.row_empty,
+        log_depth_mass=state.log_depth_mass,
+        probe_rows=jnp.asarray(_spread_probe_rows(catalog.ngals, n_probe)),
+    )
+
+
+def pinned_catalog_kernel_state(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    pinned: PinnedCatalogKernel,
+):
+    """This proposal's kernel state from the pin, and the probe's verdict.
+
+    Adds ``3 ln(H0 / H0_ref)`` to ``log_kw_eff`` and to its row maximum and
+    reuses every other leaf; ``log_g_grid`` is the live proposal's, which the
+    evaluator's front factor reads (legacy ``_pinned_kernel_state``,
+    ``redshift/catalog.py:1154-1221``).  The probe rebuilds
+    ``pinned.probe_rows`` from the live ``H0``, ``Om0``, ``w0``, ``wa``,
+    ``delta``, ``sigma_kde`` and ``z_depth`` with the per-proposal builder and
+    returns ``True`` when every slot live in both agrees with the shifted pin
+    to ``KERNEL_PIN_TOL``.  The caller spends a ``False`` verdict on the prior
+    normaliser (see :func:`darksirens.catalog.models.build_incomplete_catalog_prior_state_from_curves`).
+    """
+
+    log_g_grid = log_galaxy_measure_grid(cosmo, params)
+    shift = 3.0 * (jnp.log(cosmo.H0) - jnp.log(pinned.H0_ref))
+
+    rows = pinned.probe_rows
+    probe_kw, probe_sig, _ = vmap(
+        lambda zs, dzs, ws, ngal: _row_kernel_state(
+            zs, dzs, ws, ngal, params.sigma_kde, log_g_grid, params.z_depth
+        )
+    )(
+        catalog.zgals[rows],
+        catalog.dzgals[rows],
+        catalog.wgals[rows],
+        catalog.ngals[rows],
+    )
+    probe_eff = _fused_log_kw_eff(
+        jnp.where(jnp.isfinite(probe_kw), probe_kw, -1.0e30), probe_sig
+    )
+    ref_eff = pinned.log_kw_eff[rows]
+    compared = (probe_eff > _KERNEL_SENTINEL_CUT) & (ref_eff > _KERNEL_SENTINEL_CUT)
+    ok = jnp.all(
+        jnp.where(compared, jnp.abs(probe_eff - (ref_eff + shift)), 0.0)
+        <= KERNEL_PIN_TOL
+    )
+
+    # -1e30 + shift is exactly -1e30 in f64 (|shift| < 10): padding stays
+    # padding, and the row maximum moves with the row.
+    state = CatalogKernelState(
+        log_g_grid=log_g_grid,
+        log_kw=None,
+        sig_eff=None,
+        log_sig_eff=None,
+        log_depth_mass=pinned.log_depth_mass,
+        z_depth=params.z_depth,
+        row_empty=pinned.row_empty,
+        log_kw_eff=pinned.log_kw_eff + shift,
+        log_kw_eff_rowmax=pinned.log_kw_eff_rowmax + shift,
+        inv_sig_eff=pinned.inv_sig_eff,
+    )
+    return state, ok
+
+
 def eval_log_catalog_prior_state(
     z,
     row,
@@ -388,11 +566,17 @@ def log_catalog_prior_vmap(
 
 __all__ = [
     "CatalogKernelState",
+    "KERNEL_PIN_H0_REF",
+    "KERNEL_PIN_PROBE_ROWS",
+    "KERNEL_PIN_TOL",
+    "PinnedCatalogKernel",
     "SIGMA_EFF_FLOOR",
     "build_catalog_kernel_state",
+    "build_pinned_catalog_kernel",
     "eval_log_catalog_prior_state",
     "eval_log_catalog_prior_state_vmap",
     "log_catalog_prior",
     "log_catalog_prior_vmap",
     "log_galaxy_measure_grid",
+    "pinned_catalog_kernel_state",
 ]

@@ -19,10 +19,12 @@ from darksirens.analysis import (
     CompleteCatalogRedshift,
     IncompleteCatalogRedshift,
     SpectralRedshift,
+    kernel_pin_applies,
 )
 from darksirens.catalog.compact import compact_pe_selection_catalog
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.geometry import ang2pix_ring
+from darksirens.catalog.redshift import build_pinned_catalog_kernel
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
@@ -232,6 +234,7 @@ class BoundAnalysis:
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE
     sel_batch_size: int | None = None
     pe_event_block: int | None = None
+    kernel_pin: Any = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -259,15 +262,28 @@ class BoundAnalysis:
         return self.analysis.parameters.labels
 
     def __call__(self, theta):
-        return self._log_likelihood(
+        operands = (
             jnp.asarray(theta),
             self.gw_pe,
             self.gw_selection,
             self.catalog,
             self.observed_density_cache,
         )
+        # The kernel pin is a data operand too; without one the call, and so
+        # the traced program, is exactly the unpinned one.
+        if self.kernel_pin is not None:
+            operands += (self.kernel_pin,)
+        return self._log_likelihood(*operands)
 
-    def _evaluate(self, theta, gw_pe, gw_selection, catalog, observed_density_cache):
+    def _evaluate(
+        self,
+        theta,
+        gw_pe,
+        gw_selection,
+        catalog,
+        observed_density_cache,
+        kernel_pin=None,
+    ):
         """Evaluate at ``theta`` with the data operands passed explicitly."""
         cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
@@ -331,6 +347,8 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
+                pinned_kernel_pe=kernel_pin,
+                pinned_kernel_sel=kernel_pin,
                 **ordinary_common,
             )
 
@@ -357,9 +375,10 @@ def _jit_log_likelihood(bound: BoundAnalysis):
     """Return ``bound._evaluate`` as one ``jax.jit`` over its data operands.
 
     The coordinate, the PE and selection samples, the compact catalog, the
-    observed-density cache, the distance table and the ambient jit channels
-    are jit arguments, never HLO constants; ``bound`` supplies only the static
-    configuration (analysis, sizes, guard and block settings).
+    observed-density cache, the kernel pin (when there is one), the distance
+    table and the ambient jit channels are jit arguments, never HLO
+    constants; ``bound`` supplies only the static configuration (analysis,
+    sizes, guard and block settings).
     """
 
     @threads_distance_table()
@@ -369,13 +388,40 @@ def _jit_log_likelihood(bound: BoundAnalysis):
         gw_selection,
         catalog,
         observed_density_cache,
+        kernel_pin=None,
         distance_table=None,
     ):
         return bound._evaluate(
-            theta, gw_pe, gw_selection, catalog, observed_density_cache
+            theta, gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin
         )
 
     return log_likelihood
+
+
+def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
+    """The bind-time catalog kernel pin of a plan that admits one, else None.
+
+    The reference cosmology and catalog parameters come from the run's own
+    decoder at an arbitrary coordinate, so the pin sees exactly the fixed
+    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde`` and ``z_depth`` every
+    call will (legacy ``_reference_params``, ``likelihood/factory.py:1054-1070``);
+    ``ParameterPlan.kernel_pin_active`` guarantees none of them is sampled.
+    """
+    plan = analysis.parameters
+    if not plan.kernel_pin_active:
+        return None
+    if not kernel_pin_applies(analysis.redshift, plan.labels, plan.kernel_pin):
+        raise RuntimeError(
+            "ParameterPlan.kernel_pin_active is set, but the analysis is not an "
+            "incomplete-catalog analysis with Om0, w0, wa, delta and sigma_kde fixed "
+            "under kernel_pin='auto'; build the plan with ds.model"
+        )
+    cosmology, _, catalog_params, _ = _decode_theta(
+        analysis,
+        jnp.full((len(plan.labels),), 0.5, dtype=jnp.float64),
+        z_depth=z_depth,
+    )
+    return build_pinned_catalog_kernel(cosmology, catalog_params, catalog)
 
 
 def bind_analysis(
@@ -467,6 +513,9 @@ def bind_analysis(
         )
         z_depth = catalog_store.z_depth
 
+    kernel_pin = (
+        None if catalog is None else _build_kernel_pin(analysis, catalog, z_depth)
+    )
     return BoundAnalysis(
         analysis=analysis,
         gw_pe=_make_runtime_event(events, pe_pixels, required),
@@ -482,6 +531,7 @@ def bind_analysis(
         max_likelihood_variance=float(max_likelihood_variance),
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
+        kernel_pin=kernel_pin,
     )
 
 

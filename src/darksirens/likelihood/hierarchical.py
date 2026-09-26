@@ -358,8 +358,16 @@ def dark_siren_log_likelihood(
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
+    pinned_kernel_pe=None,
+    pinned_kernel_sel=None,
 ):
-    """Ordinary incomplete-catalog conditional dark-siren likelihood."""
+    """Ordinary incomplete-catalog conditional dark-siren likelihood.
+
+    ``pinned_kernel_pe`` / ``pinned_kernel_sel`` are optional bind-time kernel
+    pins of the PE and selection catalog views
+    (:func:`darksirens.catalog.redshift.build_pinned_catalog_kernel`), valid
+    only while ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed.
+    """
 
     from darksirens.catalog.models import (
         build_incomplete_catalog_prior_state,
@@ -367,10 +375,12 @@ def dark_siren_log_likelihood(
     )
 
     state_pe = build_incomplete_catalog_prior_state(
-        cosmology, catalog_params, catalog_pe, observed_cache_pe
+        cosmology, catalog_params, catalog_pe, observed_cache_pe,
+        pinned_kernel=pinned_kernel_pe,
     )
     state_sel = build_incomplete_catalog_prior_state(
-        cosmology, catalog_params, catalog_sel, observed_cache_sel
+        cosmology, catalog_params, catalog_sel, observed_cache_sel,
+        pinned_kernel=pinned_kernel_sel,
     )
 
     def prior_pe(z, pix, catalog):

@@ -126,6 +126,21 @@ parameter decoders or sampler adapters.
   that violate a model's joint prior constraint (for example
   `lambda_0 + lambda_1 <= 1`), or leave the pair's sampled member no prior
   support, raise `ValueError` with or without `allow_out_of_prior`.
+- `model(..., kernel_pin="auto"|"off")` (default `"auto"`): an
+  incomplete-catalog analysis that samples none of `Om0`, `w0`, `wa`, `delta`,
+  `sigma_kde` (`H0` may be sampled) evaluates the per-galaxy catalog kernel
+  quadrature once, at bind time, at `H0_ref = 67.74`, and each call adds the
+  exact scalar `3 ln(H0 / H0_ref)` to it, as the frozen reference's H0 kernel
+  pin does. The likelihood agrees with the per-call quadrature to rounding,
+  not bit for bit (on the benchmark fixtures, within 1e-15 relative on the
+  total and on each event's log evidence, and 1.2e-13 on the Monte Carlo
+  variance diagnostics). `"off"` keeps the per-call
+  quadrature, and its bound program is unchanged. `ParameterPlan.kernel_pin`
+  and `ParameterPlan.kernel_pin_active` record the setting and whether it
+  applies, and `parameter_plan_semantic(plan)` puts both in a run fingerprint.
+  The setting has no effect on spectral, bright-siren or complete-catalog
+  analyses. Each call re-derives eight catalog rows from the live parameters
+  and returns `-inf` if they disagree with the pin by more than 1e-9.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other
