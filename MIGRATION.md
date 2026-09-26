@@ -245,9 +245,13 @@ reference, which pins, the total agrees to 2.9e-16 relative (bit for bit in 8
 of 12 cells, against 4 of 12 unpinned). On CPU a call is 1.4 to 6.7 times
 faster (T `dark_H0`: 15.8 ms against 105.7 ms), for about 1 s more at bind.
 The pin keeps two `(n_rows, n_max)` float64 arrays (the fused kernel
-log-weights and the inverse widths) and four per-row vectors; the reference
-keeps five such arrays. Complete-catalog analyses are not pinned, as in the
-reference. `kernel_pin="off"` keeps the per-call quadrature, and the bound
-program is then byte-identical to the previous release's. `ParameterPlan`
-gains `kernel_pin` and `kernel_pin_active`, and
+log-weights and the inverse widths) and four per-row vectors (224 MB on a
+196,608 x 70 catalog); the reference keeps five such arrays. The pin is built
+by the per-call kernel builder, run once at bind, so binding needs the
+transient memory of one unpinned kernel build: on that catalog the CPU
+compiler gives the build 14.9 GB of scratch, while the per-call catalog terms
+need 3.2 GB pinned against 15.4 GB unpinned. Complete-catalog analyses are
+not pinned, as in the reference. `kernel_pin="off"` keeps the per-call
+quadrature, and the bound program is then byte-identical to the previous
+release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
 `run_fingerprint.parameter_plan_semantic(plan)` records both.
