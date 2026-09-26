@@ -85,6 +85,8 @@ class ParameterPlan:
     ``Population(fixed={...})`` mapping, in model order, and ``fixed_survey``
     the ``(name, value)`` pairs of ``model(fixed_survey={...})``, in block
     order. Fixed values never enter the sampled coordinates.
+    ``allow_out_of_prior`` records ``model(..., allow_out_of_prior=...)``,
+    whether fixed values were accepted outside their prior bounds.
     """
 
     labels: tuple[str, ...]
@@ -102,6 +104,7 @@ class ParameterPlan:
     angular_labels: tuple[str, ...] = ()
     fixed_population_values: tuple[tuple[str, float], ...] = ()
     fixed_survey: tuple[tuple[str, float], ...] = ()
+    allow_out_of_prior: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,7 +210,34 @@ def _resolve_redshift(
     raise ValueError("completeness must be None, 'incomplete', or 'complete'")
 
 
-def _resolve_fixed_survey(fixed_survey, catalog_priors) -> dict[str, float]:
+def _check_fixed_in_prior(what, value, lo, hi, allow_out_of_prior) -> None:
+    """Refuse a fixed value outside its prior bounds, or warn under the opt-out.
+
+    The bounds are inclusive. ``allow_out_of_prior=True`` accepts the value
+    with a ``UserWarning`` that repeats the error's text.
+    """
+    if lo <= value <= hi:
+        return
+    text = (
+        f"Fixed value for {what} ({value!r}) is outside its prior bounds "
+        f"[{lo}, {hi}]"
+    )
+    if not allow_out_of_prior:
+        raise ValueError(
+            f"{text}. Pass allow_out_of_prior=True to ds.model to accept it."
+        )
+    warnings.warn(
+        f"{text}; accepted because allow_out_of_prior=True. The parameter is "
+        "fixed, not sampled; check that this is a deliberate ablation, not a "
+        "sign or unit slip.",
+        UserWarning,
+        stacklevel=5,
+    )
+
+
+def _resolve_fixed_survey(
+    fixed_survey, catalog_priors, allow_out_of_prior=False
+) -> dict[str, float]:
     """Check ``model(fixed_survey={name: value})`` against the survey block."""
     if fixed_survey is None:
         return {}
@@ -232,22 +262,21 @@ def _resolve_fixed_survey(fixed_survey, catalog_priors) -> dict[str, float]:
         if name not in fixed_survey:
             continue
         value = fixed_scalar(f"survey parameter {name!r}", fixed_survey[name])
-        if not lo <= value <= hi:
-            raise ValueError(
-                f"survey parameter {name!r} fixed at {value} lies outside its "
-                f"prior bounds [{lo}, {hi}]"
-            )
+        _check_fixed_in_prior(
+            f"survey parameter {name!r}", value, lo, hi, allow_out_of_prior
+        )
         out[name] = value
     return out
 
 
 def _resolve_fixed_population(
-    population, model_obj, labels, lower, upper
+    population, model_obj, labels, lower, upper, allow_out_of_prior=False
 ) -> dict[str, float]:
     """Map ``Population(fixed={...})`` onto the model's labels, in model order.
 
     A key is a label or, where the model declares one, a parameter's ASCII
-    name. Each value must lie inside that parameter's prior bounds.
+    name. Each value must lie inside that parameter's prior bounds unless
+    ``allow_out_of_prior`` is true.
     """
     requested = population.fixed_values
     if not requested:
@@ -282,11 +311,10 @@ def _resolve_fixed_population(
                 "(by its label and by its name)"
             )
         lo, hi = float(lower[index]), float(upper[index])
-        if not lo <= value <= hi:
-            raise ValueError(
-                f"population parameter {labels[index]!r} fixed at {value} lies "
-                f"outside its prior bounds [{lo}, {hi}]"
-            )
+        _check_fixed_in_prior(
+            f"population parameter {labels[index]!r}", value, lo, hi,
+            allow_out_of_prior,
+        )
         resolved[index] = value
     if unknown:
         raise ValueError(
@@ -328,8 +356,10 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
     """Check fixed values against the model's joint prior constraints.
 
     Fixed values that violate a constraint, or leave the pair's sampled member
-    no prior support, would give zero likelihood everywhere, so they raise. A
-    partially fixed pair otherwise warns: it cannot be a cube map any more.
+    no prior support, would give zero likelihood everywhere, so they raise
+    whatever ``allow_out_of_prior`` says: that opt-out concerns a parameter's
+    own prior bounds, not the support of a joint prior. A partially fixed pair
+    otherwise warns: it cannot be a cube map any more.
     """
     for kind, group in getattr(model_obj, "constraint_groups", None) or ():
         members = [str(label) for label in group]
@@ -379,6 +409,7 @@ def model(
     counterparts=None,
     counterpart_nside=None,
     fixed_survey=None,
+    allow_out_of_prior=False,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -398,10 +429,23 @@ def model(
 
     ``fixed_survey={name: value}`` fixes the named survey parameters of a
     catalog analysis (``log10n0``, ``delta``, ``sigma_kde``; the complete
-    catalog has no ``log10n0``) at the given values, each inside its prior
-    bounds, and samples the rest. ``Population(fixed={...})`` does the same
-    for population parameters. Fixed values are constants of the bound
-    likelihood, not sampled coordinates.
+    catalog has no ``log10n0``) at the given values and samples the rest.
+    ``Population(fixed={...})`` does the same for population parameters.
+    Fixed values are constants of the bound likelihood, not sampled
+    coordinates.
+
+    A fixed value outside its parameter's prior bounds (inclusive) raises
+    ``ValueError`` naming the parameter, the value and the bounds.
+    ``allow_out_of_prior=True`` accepts such values, in either block, with a
+    ``UserWarning`` per value (an ablation such as ``log10n0 = log10(5e-5)``,
+    below the ``[-4, -1]`` prior). The plan records the setting
+    (``ParameterPlan.allow_out_of_prior``), so a run fingerprint built with
+    ``parameter_plan_semantic`` changes with it. The opt-out lifts only that
+    bounds check. Fixed values that violate one of the model's joint prior
+    constraints, or leave the sampled member of a joint prior pair no
+    support, still raise: the likelihood would be zero everywhere, which is
+    not a question of prior bounds. Nor does it check that the model is
+    defined at the value.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -413,6 +457,8 @@ def model(
         angular = "isotropic"
     if not isinstance(angular, str):
         raise TypeError("angular must be an angular model name")
+    if not isinstance(allow_out_of_prior, bool):
+        raise TypeError("allow_out_of_prior must be True or False")
 
     redshift, catalog_priors = _resolve_redshift(
         catalog,
@@ -421,7 +467,9 @@ def model(
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
     )
-    survey_fixed = _resolve_fixed_survey(fixed_survey, catalog_priors)
+    survey_fixed = _resolve_fixed_survey(
+        fixed_survey, catalog_priors, allow_out_of_prior
+    )
     if isinstance(redshift, BrightRedshift) and angular != "isotropic":
         raise ValueError(
             "bright-siren angular composition is not part of the frozen public "
@@ -479,7 +527,8 @@ def model(
             shared_gamma=population.shared_gamma,
         )
         population_fixed = _resolve_fixed_population(
-            population, population_model, pop_labels, pop_lower, pop_upper
+            population, population_model, pop_labels, pop_lower, pop_upper,
+            allow_out_of_prior,
         )
         _check_fixed_constraints(
             population_model,
@@ -571,6 +620,7 @@ def model(
         angular_labels=angular_labels,
         fixed_population_values=tuple(population_fixed.items()),
         fixed_survey=tuple(survey_fixed.items()),
+        allow_out_of_prior=allow_out_of_prior,
     )
     return Analysis(
         cosmology=cosmology,

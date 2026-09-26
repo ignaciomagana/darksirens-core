@@ -210,7 +210,11 @@ The jitted likelihood agrees with the all-sampled one to a few ulp (at most
 4.5e-15 relative on the test fixtures), because XLA may fold the constants;
 evaluated op by op it is bit-identical. Keys are the plan labels, as in the
 reference, or a parameter's ASCII name. Unlike the reference, a fixed value
-outside the parameter's prior bounds raises instead of warning.
-`ParameterPlan` gains `fixed_population_values` and `fixed_survey`, and
-`run_fingerprint.parameter_plan_semantic(plan)` records them for the resume
-gate.
+outside the parameter's prior bounds raises by default;
+`model(..., allow_out_of_prior=True)` gives the reference's behavior for
+default bounds (accept and warn), for ablations such as
+`log10n0 = log10(5e-5)`. With or without it, fixed values that leave a joint
+prior no support raise.
+`ParameterPlan` gains `fixed_population_values`, `fixed_survey` and
+`allow_out_of_prior`, and `run_fingerprint.parameter_plan_semantic(plan)`
+records them for the resume gate.

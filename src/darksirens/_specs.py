@@ -192,7 +192,9 @@ class Population:
     given values, and samples the rest. A key is the parameter's label as
     ``ds.model(...).parameters.population_labels`` reports it, or its ASCII
     name where the model declares one (``"PL.alpha"``). ``ds.model`` checks
-    the names and requires each value inside that parameter's prior bounds.
+    the names and requires each value inside that parameter's prior bounds
+    (``ds.model(..., allow_out_of_prior=True)`` accepts one outside them,
+    with a warning).
     The mapping is stored as ``(key, value)`` pairs sorted by key;
     ``fixed_values`` returns it as a dict. A mapping that names every
     parameter fixes the whole population at those values. ``is_fixed`` and

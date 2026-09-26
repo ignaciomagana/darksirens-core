@@ -75,6 +75,10 @@ analysis = ds.model(
 )
 ```
 
+A fixed value must lie inside its parameter's prior bounds;
+`ds.model(..., allow_out_of_prior=True)` accepts one outside them, such as
+`log10n0 = log10(5e-5)` below the `[-4, -1]` prior, with a warning.
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog

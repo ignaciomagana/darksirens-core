@@ -5,12 +5,15 @@ value})`` remove the named parameters from the sampled plan. The bound
 likelihood then reads them as constants, so at the same point it must equal
 the all-sampled likelihood: the decode bit for bit, the jitted value to 1e-12.
 The fixed set is part of the plan's fingerprint block, so the resume gate
-refuses a checkpoint written under a different one.
+refuses a checkpoint written under a different one. A value outside its prior
+bounds raises unless ``model(..., allow_out_of_prior=True)``, which accepts it
+with a warning and is part of the fingerprint too.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import math
 import pickle
 import re
 import warnings
@@ -21,8 +24,9 @@ import numpy as np
 import pytest
 
 from darksirens import Cosmology, Population, model
+from darksirens import runtime_binding
 from darksirens.catalog.io import CatalogStore
-from darksirens.catalog.types import GalaxyCatalog
+from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.gw.types import GWStore, SelectionStore
 from darksirens.inference.run_fingerprint import (
     ResumeFingerprintError,
@@ -112,7 +116,7 @@ def _catalog():
 COSMOLOGY = Cosmology(H0=(60.0, 80.0), Om0=0.3075)
 
 
-def _pair(kind, *, population_fixed=TAIL, survey_fixed=None):
+def _pair(kind, *, population_fixed=TAIL, survey_fixed=None, allow_out_of_prior=False):
     """(all-sampled analysis, partially fixed analysis, fixed values)."""
     kwargs = {}
     if kind == "incomplete":
@@ -126,6 +130,7 @@ def _pair(kind, *, population_fixed=TAIL, survey_fixed=None):
         cosmology=COSMOLOGY,
         population=Population(MODEL, fixed=population_fixed),
         fixed_survey=survey_fixed,
+        allow_out_of_prior=allow_out_of_prior,
         **kwargs,
     )
     fixed = dict(population_fixed or {})
@@ -503,6 +508,7 @@ def test_fingerprint_records_the_fixed_set():
     assert block["fixed"]["survey"] == {"log10n0": -2.5, "sigma_kde": 0.01}
     assert block["fixed"]["cosmology"] == {"Om0": 0.3075, "w0": -1.0, "wa": 0.0}
     assert block["fixed"]["population"] is None
+    assert block["fixed"]["allow_out_of_prior"] is False
 
     reordered = dict(reversed(list(TAIL.items())))
     _, same, _ = _pair("incomplete", population_fixed=reordered)
@@ -537,3 +543,198 @@ def test_resume_gate_refuses_a_different_fixed_set(tmp_path):
     _, other, _ = _pair("incomplete", population_fixed=moved)
     with pytest.raises(ResumeFingerprintError, match=r"parameters\.fixed\.population_values"):
         check_resume_fingerprint(str(tmp_path), _fingerprint(other))
+
+
+# ---------------------------------------------------------------------------
+# Values outside the prior bounds: refused by default, accepted with a warning
+# under model(..., allow_out_of_prior=True)
+
+# The campaign's PR-6a density n0 = 5e-5, below the log10n0 prior [-4, -1].
+PR6A_LOG10N0 = math.log10(5e-5)
+PR6A_SURVEY = {"log10n0": PR6A_LOG10N0, "delta": 0.0, "sigma_kde": 0.0}
+
+_OUT_OF_PRIOR = [
+    # (population mapping, fixed_survey, [(what, value, lo, hi), ...] in check order)
+    (
+        None,
+        {"log10n0": PR6A_LOG10N0},
+        [("survey parameter 'log10n0'", PR6A_LOG10N0, -4.0, -1.0)],
+    ),
+    (
+        {LABELS[1]: 6.5},
+        None,
+        [(f"population parameter {LABELS[1]!r}", 6.5, -4.0, 6.0)],
+    ),
+    (
+        {LABELS[1]: 6.5, LABELS[3]: 80.0},
+        {"log10n0": -11.0, "sigma_kde": 0.06, "delta": 0.0},
+        [
+            ("survey parameter 'log10n0'", -11.0, -4.0, -1.0),
+            ("survey parameter 'sigma_kde'", 0.06, 0.0, 0.05),
+            (f"population parameter {LABELS[1]!r}", 6.5, -4.0, 6.0),
+        ],
+    ),
+]
+
+
+def _out_of_prior_model(population_fixed, survey_fixed, **kwargs):
+    return model(
+        cosmology=COSMOLOGY,
+        population=Population(MODEL, fixed=population_fixed or True),
+        catalog=_catalog(),
+        fixed_survey=survey_fixed,
+        **kwargs,
+    )
+
+
+def _bounds_text(what, value, lo, hi):
+    return f"Fixed value for {what} ({value!r}) is outside its prior bounds [{lo}, {hi}]"
+
+
+@pytest.mark.parametrize("population_fixed,survey_fixed,outside", _OUT_OF_PRIOR)
+def test_out_of_prior_fixed_values_raise_by_default(population_fixed, survey_fixed, outside):
+    for kwargs in ({}, {"allow_out_of_prior": False}):
+        with pytest.raises(ValueError) as info:
+            _out_of_prior_model(population_fixed, survey_fixed, **kwargs)
+        # The first value checked is named, with its value and bounds, and the
+        # message points at the opt-out.
+        assert str(info.value) == (
+            _bounds_text(*outside[0]) + ". Pass allow_out_of_prior=True to ds.model to accept it."
+        )
+
+
+@pytest.mark.parametrize("population_fixed,survey_fixed,outside", _OUT_OF_PRIOR)
+def test_opt_out_accepts_out_of_prior_values_with_a_warning(
+    population_fixed, survey_fixed, outside
+):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        analysis = _out_of_prior_model(
+            population_fixed, survey_fixed, allow_out_of_prior=True
+        )
+    # One UserWarning per value outside its bounds, each the error's text plus
+    # the reason it was accepted, attributed to the caller's line.
+    assert [w.category for w in caught] == [UserWarning] * len(outside)
+    for w, entry in zip(caught, outside):
+        assert str(w.message).startswith(
+            _bounds_text(*entry) + "; accepted because allow_out_of_prior=True"
+        ), str(w.message)
+        assert w.filename == __file__
+    plan = analysis.parameters
+    assert plan.allow_out_of_prior is True
+    assert dict(plan.fixed_survey) == dict(survey_fixed or {})
+    assert dict(plan.fixed_population_values) == dict(population_fixed or {})
+    assert not set(survey_fixed or {}) & set(plan.labels)
+    assert not set(population_fixed or {}) & set(plan.labels)
+
+
+def test_opt_out_is_silent_for_values_inside_the_bounds():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        opted = _out_of_prior_model(TAIL, {"log10n0": -4.0, "sigma_kde": 0.05}, allow_out_of_prior=True)
+        plain = _out_of_prior_model(TAIL, {"log10n0": -4.0, "sigma_kde": 0.05})
+    assert opted.parameters.allow_out_of_prior is True
+    assert plain.parameters.allow_out_of_prior is False
+    assert dataclasses.replace(opted.parameters, allow_out_of_prior=False) == plain.parameters
+
+
+@pytest.mark.parametrize("flag", ("yes", 1, None))
+def test_opt_out_must_be_a_bool(flag):
+    with pytest.raises(TypeError, match="allow_out_of_prior must be True or False"):
+        _out_of_prior_model(None, {"log10n0": -3.0}, allow_out_of_prior=flag)
+
+
+@pytest.mark.parametrize(
+    "fixed,match",
+    [
+        ({_L0: 0.7, _L1: 0.6}, "violate the model's joint prior constraint simplex"),
+        ({_M1L: 3.0}, "leaves " + re.escape(repr(_M2L)) + " no prior support"),
+        # Outside lambda_0's bounds [0, 1]: accepted as a bound, but the
+        # sampled partner lambda_1 is left no support, which is not a bound.
+        ({_L0: 1.2}, "leaves " + re.escape(repr(_L1)) + " no prior support"),
+    ],
+)
+def test_opt_out_does_not_lift_the_joint_prior_checks(fixed, match):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(ValueError, match=match):
+            model(
+                cosmology=COSMOLOGY,
+                population=Population(_GWTC5, fixed=fixed),
+                allow_out_of_prior=True,
+            )
+
+
+@pytest.mark.parametrize("blocks", BLOCKS[:2])
+def test_pr6a_log10n0_pin_evaluates_the_catalog_parameters_n0_likelihood(blocks, monkeypatch):
+    """log10n0 = log10(5e-5) fixed under the opt-out is the n0 = 5e-5 likelihood.
+
+    Two references at the same point: the all-sampled binding with the value
+    in its log10n0 coordinate (the campaign harness's embedding), and the
+    all-sampled binding with CatalogParameters(n0=5e-5) put in place of the
+    decoded catalog parameters (core's direct n0 path, evaluated op by op).
+    """
+    events, injections = _stores()
+    with pytest.warns(UserWarning, match="accepted because allow_out_of_prior=True"):
+        full, part, fixed = _pair(
+            "incomplete", survey_fixed=PR6A_SURVEY, allow_out_of_prior=True
+        )
+    # _pair's all-sampled analysis is built without the opt-out; only the
+    # fixed plan needs it.
+    assert part.parameters.allow_out_of_prior is True
+    assert full.parameters.allow_out_of_prior is False
+    sel_batch_size, pe_event_block = blocks
+    kwargs = dict(
+        events=events, injections=injections,
+        sel_batch_size=sel_batch_size, pe_event_block=pe_event_block,
+    )
+    bound_full = bind_analysis(full, **kwargs)
+    bound_part = bind_analysis(part, **kwargs)
+    points = _points(full, part, fixed)
+
+    _, _, catalog_params, _ = _decode_theta(part, points[0][1], z_depth=bound_part.z_depth)
+    assert abs(float(catalog_params.n0) - 5e-5) <= 4e-16 * 5e-5
+
+    got = [float(bound_part(sub)) for _, sub in points]
+    embedded = [float(bound_full(whole)) for whole, _ in points]
+
+    decode = runtime_binding._decode_theta
+
+    def decode_with_n0(analysis, theta, *, z_depth):
+        cosmology, population, params, angular = decode(analysis, theta, z_depth=z_depth)
+        params = CatalogParameters(
+            n0=jnp.asarray(5e-5), delta=params.delta,
+            sigma_kde=params.sigma_kde, z_depth=params.z_depth,
+        )
+        return cosmology, population, params, angular
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_binding, "_decode_theta", decode_with_n0)
+        direct = [
+            float(bound_full._evaluate(
+                jnp.asarray(whole), bound_full.gw_pe, bound_full.gw_selection,
+                bound_full.catalog, bound_full.observed_density_cache,
+            ))
+            for whole, _ in points
+        ]
+    for g, e, d in zip(got, embedded, direct):
+        assert np.isfinite(g), (blocks, g)
+        assert abs(g - e) <= 1e-12 * abs(e), (blocks, g, e)
+        assert abs(g - d) <= 1e-12 * abs(d), (blocks, g, d)
+    # The pin moves the likelihood: it is not the in-prior n0 = 1e-4 value.
+    _, in_prior, _ = _pair("incomplete", survey_fixed=dict(PR6A_SURVEY, log10n0=-4.0))
+    bound_in_prior = bind_analysis(in_prior, **kwargs)
+    assert float(bound_in_prior(points[1][1])) != got[1]
+
+
+def test_fingerprint_changes_with_the_opt_out_flag(tmp_path):
+    survey = {"log10n0": -2.5, "sigma_kde": 0.01}
+    plain = _out_of_prior_model(TAIL, survey)
+    opted = _out_of_prior_model(TAIL, survey, allow_out_of_prior=True)
+    assert parameter_plan_semantic(opted.parameters)["fixed"]["allow_out_of_prior"] is True
+    assert _fingerprint(plain)["digest"] != _fingerprint(opted)["digest"]
+
+    save_run_fingerprint(str(tmp_path), _fingerprint(opted))
+    assert check_resume_fingerprint(str(tmp_path), _fingerprint(opted)) is not None
+    with pytest.raises(ResumeFingerprintError, match=r"parameters\.fixed\.allow_out_of_prior"):
+        check_resume_fingerprint(str(tmp_path), _fingerprint(plain))

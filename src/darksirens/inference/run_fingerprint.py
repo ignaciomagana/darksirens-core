@@ -172,8 +172,9 @@ def parameter_plan_semantic(plan) -> dict:
     """Canonical semantic block of a ParameterPlan, fixed values included.
 
     Two plans that sample the same labels but fix different parameters, or
-    the same parameters at different values, have different blocks, so a run
-    fingerprint built from it refuses to resume across them. Fixed values are
+    the same parameters at different values, or differ in
+    ``allow_out_of_prior``, have different blocks, so a run fingerprint built
+    from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
     semantic["parameters"] = parameter_plan_semantic(analysis.parameters).
@@ -223,6 +224,7 @@ def parameter_plan_semantic(plan) -> dict:
             "survey": {
                 str(name): float(value) for name, value in plan.fixed_survey
             },
+            "allow_out_of_prior": bool(plan.allow_out_of_prior),
         },
     })
 
