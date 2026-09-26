@@ -27,6 +27,14 @@ _COMPLETE_CATALOG_PRIORS = (
 )
 _UNIFORM = ("uniform", None, None)
 
+#: Settings of ``model(..., kernel_pin=...)``.
+KERNEL_PIN_SETTINGS = ("auto", "off")
+#: Parameters whose sampling moves the catalog kernel's redshift dependence
+#: beyond the scalar H0 factor (legacy ``_KERNEL_PIN_BLOCKING_LABELS``,
+#: ``likelihood/factory.py:1019-1028``). ``log10n0`` and the population do not
+#: enter the kernel; ``H0`` enters only as ``(H0_ref / H0)^3``.
+_KERNEL_PIN_BLOCKING = ("Om0", "w0", "wa", "delta", "sigma_kde")
+
 
 @dataclass(frozen=True)
 class SpectralRedshift:
@@ -87,6 +95,11 @@ class ParameterPlan:
     order. Fixed values never enter the sampled coordinates.
     ``allow_out_of_prior`` records ``model(..., allow_out_of_prior=...)``,
     whether fixed values were accepted outside their prior bounds.
+    ``kernel_pin`` records ``model(..., kernel_pin=...)`` (``"auto"`` or
+    ``"off"``) and ``kernel_pin_active`` whether it applies: an
+    incomplete-catalog analysis under ``"auto"`` that samples none of
+    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``. The bound likelihood of
+    such a plan evaluates the catalog kernel quadrature once, at bind time.
     """
 
     labels: tuple[str, ...]
@@ -105,6 +118,8 @@ class ParameterPlan:
     fixed_population_values: tuple[tuple[str, float], ...] = ()
     fixed_survey: tuple[tuple[str, float], ...] = ()
     allow_out_of_prior: bool = False
+    kernel_pin: str = "auto"
+    kernel_pin_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -398,6 +413,37 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
         )
 
 
+def _kernel_pin_setting(value) -> str:
+    if not isinstance(value, str):
+        raise TypeError(
+            f"kernel_pin must be one of {list(KERNEL_PIN_SETTINGS)}, got {value!r}"
+        )
+    if value not in KERNEL_PIN_SETTINGS:
+        raise ValueError(
+            f"kernel_pin must be one of {list(KERNEL_PIN_SETTINGS)}, got {value!r}"
+        )
+    return value
+
+
+def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
+    """Whether the bound likelihood pins the catalog kernel at bind time.
+
+    True for an incomplete-catalog analysis under ``setting="auto"`` whose
+    sampled labels include none of ``Om0``, ``w0``, ``wa``, ``delta``,
+    ``sigma_kde``: the kernel's redshift dependence is then fixed up to the
+    scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never values,
+    as legacy's ``kernel_pin_admissible`` does
+    (``likelihood/factory.py:1031-1052``, which also restricts the pin to
+    the unmarked incomplete ``dark_sirens`` model).
+    """
+    if _kernel_pin_setting(setting) != "auto":
+        return False
+    if not isinstance(redshift, IncompleteCatalogRedshift):
+        return False
+    sampled = {str(label) for label in sampled_labels}
+    return not any(name in sampled for name in _KERNEL_PIN_BLOCKING)
+
+
 def model(
     *,
     cosmology=None,
@@ -410,6 +456,7 @@ def model(
     counterpart_nside=None,
     fixed_survey=None,
     allow_out_of_prior=False,
+    kernel_pin="auto",
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -446,6 +493,19 @@ def model(
     support, still raise: the likelihood would be zero everywhere, which is
     not a question of prior bounds. Nor does it check that the model is
     defined at the value.
+
+    ``kernel_pin="auto"`` (the default) lets an incomplete-catalog analysis
+    that fixes ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` (``H0``
+    may be sampled) evaluate the per-galaxy catalog kernel quadrature once,
+    at bind time, at ``H0_ref = 67.74``; each call then adds the exact scalar
+    ``3 ln(H0 / H0_ref)``, as the frozen legacy H0 kernel pin does. The
+    result agrees with the per-call quadrature to rounding, not bit for bit
+    (on the benchmark fixtures, within 1e-15 relative on the total and 1e-13
+    on every per-event term). ``kernel_pin="off"`` keeps the per-call
+    quadrature. The plan records the setting and whether the
+    pin applies (``ParameterPlan.kernel_pin``,
+    ``ParameterPlan.kernel_pin_active``). It has no effect on spectral,
+    bright-siren or complete-catalog analyses.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -459,6 +519,7 @@ def model(
         raise TypeError("angular must be an angular model name")
     if not isinstance(allow_out_of_prior, bool):
         raise TypeError("allow_out_of_prior must be True or False")
+    kernel_pin = _kernel_pin_setting(kernel_pin)
 
     redshift, catalog_priors = _resolve_redshift(
         catalog,
@@ -621,6 +682,8 @@ def model(
         fixed_population_values=tuple(population_fixed.items()),
         fixed_survey=tuple(survey_fixed.items()),
         allow_out_of_prior=allow_out_of_prior,
+        kernel_pin=kernel_pin,
+        kernel_pin_active=kernel_pin_applies(redshift, labels, kernel_pin),
     )
     return Analysis(
         cosmology=cosmology,

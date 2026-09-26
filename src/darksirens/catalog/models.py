@@ -19,8 +19,10 @@ from darksirens.cosmology.volume import normalized_comoving_volume_grid
 from .completeness import CompletionCurves, ObservedDensityCache, completion_curves
 from .redshift import (
     CatalogKernelState,
+    PinnedCatalogKernel,
     build_catalog_kernel_state,
     eval_log_catalog_prior_state,
+    pinned_catalog_kernel_state,
 )
 from .types import CatalogParameters, GalaxyCatalog
 
@@ -61,6 +63,8 @@ def build_incomplete_catalog_prior_state_from_curves(
     params: CatalogParameters,
     catalog: GalaxyCatalog,
     curves: CompletionCurves,
+    *,
+    pinned_kernel: PinnedCatalogKernel | None = None,
 ) -> IncompleteCatalogPriorState:
     """Build the ordinary conditional prior from precomputed completion curves.
 
@@ -73,17 +77,36 @@ def build_incomplete_catalog_prior_state_from_curves(
     The observed-host kernel, finite-depth observed-count factor, additive
     missing density, and row normalization are exactly the ordinary
     incomplete-catalog convention used by :func:`build_incomplete_catalog_prior_state`.
+
+    ``pinned_kernel`` (built at bind time by
+    :func:`~darksirens.catalog.redshift.build_pinned_catalog_kernel`, valid
+    only while ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed)
+    serves the kernel state with the scalar H0 shift instead of the
+    per-proposal quadrature.  If its probe finds the premise violated, ``log_Z``
+    becomes NaN, which the sample weights turn into a ``-inf`` likelihood:
+    the normaliser is the first quantity downstream of the kernels that no
+    ``nan_to_num`` or ``> 0`` filter would turn into a plausible value (legacy
+    ``kernel_pin_poison``, ``redshift/catalog.py:1224-1242``, spent at
+    ``redshift/prior.py:641-652``).
     """
 
     if not isinstance(curves, CompletionCurves):
         raise TypeError("curves must be darksirens.catalog.completeness.CompletionCurves")
 
-    kernels = build_catalog_kernel_state(cosmo, params, catalog)
+    pin_ok = None
+    if pinned_kernel is None:
+        kernels = build_catalog_kernel_state(cosmo, params, catalog)
+    else:
+        kernels, pin_ok = pinned_catalog_kernel_state(
+            cosmo, params, catalog, pinned_kernel
+        )
     Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
     Nobs = Nobs * jnp.exp(kernels.log_depth_mass)
     log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
     Z = Nobs + curves.N_miss
     log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
+    if pin_ok is not None:
+        log_Z = log_Z + jnp.where(pin_ok, 0.0, jnp.nan)
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_Nobs,
@@ -97,6 +120,8 @@ def build_incomplete_catalog_prior_state(
     params: CatalogParameters,
     catalog: GalaxyCatalog,
     observed_cache: ObservedDensityCache,
+    *,
+    pinned_kernel: PinnedCatalogKernel | None = None,
 ) -> IncompleteCatalogPriorState:
     """Build the ordinary conditional dark-siren redshift prior.
 
@@ -109,6 +134,10 @@ def build_incomplete_catalog_prior_state(
     renormalization catalog-kernel mass below the depth, exactly as in legacy,
     so above-depth galaxies are not counted once in the observed branch and
     again in the missing branch.
+
+    ``pinned_kernel`` is passed to
+    :func:`build_incomplete_catalog_prior_state_from_curves`; the completeness
+    curves are evaluated per proposal either way.
     """
 
     curves = completion_curves(cosmo, params, catalog, observed_cache)
@@ -117,6 +146,7 @@ def build_incomplete_catalog_prior_state(
         params,
         catalog,
         curves,
+        pinned_kernel=pinned_kernel,
     )
 
 

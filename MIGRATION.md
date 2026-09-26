@@ -218,3 +218,36 @@ prior no support raise.
 `ParameterPlan` gains `fixed_population_values`, `fixed_survey` and
 `allow_out_of_prior`, and `run_fingerprint.parameter_plan_semantic(plan)`
 records them for the resume gate.
+
+### Catalog kernel pin (numerics change on pinned plans only)
+
+With `Om0`, `w0`, `wa`, `delta` and `sigma_kde` fixed, the galaxy measure
+`g(z) = dV_c/dz (1+z)^delta` depends on `H0` only through the factor
+`(H0_ref / H0)^3`, and the kernel widths not at all, so every galaxy's kernel
+normalisation moves by the same scalar. The frozen reference uses this: when
+none of the five is sampled it evaluates the per-galaxy 24-node quadrature once
+per run, at `H0_ref = 67.74`, and adds `3 ln(H0 / H0_ref)` per call (its H0
+kernel pin). Core now does the same, by default:
+`model(..., kernel_pin="auto")` pins an incomplete-catalog analysis whose plan
+samples none of the five (`H0` may be sampled). The quadrature, kernel,
+masks and completeness are unchanged; only the kernel state moves to bind
+time, and the completeness curves are still evaluated per call. Like the
+reference, each call rebuilds eight catalog rows from the live parameters and
+turns the likelihood into `-inf` if they disagree with the pin by more than
+1e-9 (they agree to about 1e-14).
+
+The pinned likelihood is not bit-identical to the per-call quadrature: the two
+round differently. On the harness fixtures T and S (plans `dark_H0`,
+`dark_pop`, `dark_joint_cosmo_pop`, single pass and blocked) the total log
+likelihood agrees to 7.6e-16 relative, every gate field to 6.7e-14 relative
+and every per-sample catalog log-density to 5.7e-14 absolute; against the
+reference, which pins, the total agrees to 2.9e-16 relative (bit for bit in 8
+of 12 cells, against 4 of 12 unpinned). On CPU a call is 1.4 to 6.7 times
+faster (T `dark_H0`: 15.8 ms against 105.7 ms), for about 1 s more at bind.
+The pin keeps two `(n_rows, n_max)` float64 arrays (the fused kernel
+log-weights and the inverse widths) and four per-row vectors; the reference
+keeps five such arrays. Complete-catalog analyses are not pinned, as in the
+reference. `kernel_pin="off"` keeps the per-call quadrature, and the bound
+program is then byte-identical to the previous release's. `ParameterPlan`
+gains `kernel_pin` and `kernel_pin_active`, and
+`run_fingerprint.parameter_plan_semantic(plan)` records both.
