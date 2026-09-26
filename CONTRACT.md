@@ -106,6 +106,26 @@ parameter decoders or sampler adapters.
   distance-grid support (`Om0` [0.1575, 0.4575], `w0` [-2.25, 0.25], `wa`
   [-2.5, 2.5], closed intervals); `H0` is unrestricted. Out-of-grid values or
   bounds raise at construction.
+- `Population(name, fixed={parameter: value, ...})` fixes only the named
+  population parameters, at the given values, and samples the rest. A key is
+  the model's label (`analysis.parameters.population_labels`) or its ASCII name
+  where the model declares one (`"PL.alpha"`). `model(..., fixed_survey={name:
+  value})` does the same for the survey parameters of a catalog analysis
+  (`log10n0`, `delta`, `sigma_kde`; no `log10n0` for `completeness="complete"`)
+  and is refused for spectral and bright sirens. Unknown names raise
+  `ValueError`. A value outside the parameter's prior bounds (inclusive)
+  raises `ValueError` naming the parameter, the value and the bounds, unless
+  `model(..., allow_out_of_prior=True)`: that accepts it, in either block, and
+  warns (`UserWarning`) once per such value. Fixed parameters leave
+  `ParameterPlan.labels`; `ParameterPlan.fixed_population_values`,
+  `ParameterPlan.fixed_survey` and `ParameterPlan.allow_out_of_prior` record
+  them, the bound likelihood reads them as constants, and
+  `parameter_plan_semantic(plan)` in `darksirens.inference.run_fingerprint`
+  puts them in a run fingerprint. Fixing one member of a joint prior pair
+  warns: the other member keeps the likelihood-side rejection. Fixed values
+  that violate a model's joint prior constraint (for example
+  `lambda_0 + lambda_1 <= 1`), or leave the pair's sampled member no prior
+  support, raise `ValueError` with or without `allow_out_of_prior`.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other

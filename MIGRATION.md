@@ -195,3 +195,26 @@ first follow-up had left open. Only one of them changes numerics:
 
 None of the items was found already fixed: the mass-ratio normaliser was
 fixed only at the recorded point, and the other items were open.
+
+### Partial fixing (additive API, no likelihood change)
+
+The frozen reference fixed any subset of parameters with
+`--fixed_parameter_values`; core could only fix the whole population (a preset)
+and always sampled `log10n0`, `delta` and `sigma_kde`. Two keywords close that
+gap without changing any scientific definition:
+`Population(name, fixed={parameter: value})` and
+`model(..., fixed_survey={name: value})`. The fixed parameters leave the
+sampled plan, their values are constants of the bound likelihood, and the
+decoded parameters equal the all-sampled decode at the same point bit for bit.
+The jitted likelihood agrees with the all-sampled one to a few ulp (at most
+4.5e-15 relative on the test fixtures), because XLA may fold the constants;
+evaluated op by op it is bit-identical. Keys are the plan labels, as in the
+reference, or a parameter's ASCII name. Unlike the reference, a fixed value
+outside the parameter's prior bounds raises by default;
+`model(..., allow_out_of_prior=True)` gives the reference's behavior for
+default bounds (accept and warn), for ablations such as
+`log10n0 = log10(5e-5)`. With or without it, fixed values that leave a joint
+prior no support raise.
+`ParameterPlan` gains `fixed_population_values`, `fixed_survey` and
+`allow_out_of_prior`, and `run_fingerprint.parameter_plan_semantic(plan)`
+records them for the resume gate.

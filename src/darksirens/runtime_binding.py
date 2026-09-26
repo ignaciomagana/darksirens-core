@@ -172,23 +172,42 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None):
         ]
     )
 
-    if plan.fixed_population is None:
-        start = plan.n_cosmology
-        stop = start + plan.n_population
-        population = theta[start:stop]
-    else:
+    # Fixed values are Python floats of the plan: inside the bound jit they
+    # are trace-time constants, never sampled coordinates. Each enters as a
+    # 0-d array of theta's dtype, the type a sampled coordinate has, so the
+    # decoded values and every later operation match the all-sampled decode.
+    start = plan.n_cosmology
+    if plan.fixed_population is not None:
         population = jnp.asarray(plan.fixed_population)
+    elif plan.fixed_population_values:
+        fixed_pop = dict(plan.fixed_population_values)
+        sampled = iter(range(start, start + plan.n_population))
+        population = jnp.stack([
+            jnp.asarray(fixed_pop[label], dtype=theta.dtype)
+            if label in fixed_pop
+            else theta[next(sampled)]
+            for label in plan.population_labels
+        ])
+    else:
+        population = theta[start : start + plan.n_population]
 
     catalog_params = None
-    if plan.n_catalog:
+    if isinstance(analysis.redshift, (IncompleteCatalogRedshift, CompleteCatalogRedshift)):
+        fixed_survey = dict(plan.fixed_survey)
+
+        def survey(name):
+            if name in fixed_survey:
+                return jnp.asarray(fixed_survey[name], dtype=theta.dtype)
+            return free[name]
+
         if isinstance(analysis.redshift, IncompleteCatalogRedshift):
-            n0 = 10.0 ** free["log10n0"]
+            n0 = 10.0 ** survey("log10n0")
         else:
             n0 = 1.0
         catalog_params = CatalogParameters(
             n0=n0,
-            delta=free["delta"],
-            sigma_kde=free["sigma_kde"],
+            delta=survey("delta"),
+            sigma_kde=survey("sigma_kde"),
             z_depth=z_depth,
         )
 
