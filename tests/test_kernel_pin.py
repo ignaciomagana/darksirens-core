@@ -453,6 +453,28 @@ def test_opt_out_is_the_unpinned_program(blocks):
     assert n_pin == n_off + len(jax.tree_util.tree_leaves(pinned.kernel_pin))
 
 
+@pytest.mark.parametrize("plan", ("H0", "pop"))
+def test_the_pinned_program_has_no_per_call_catalog_quadrature(plan):
+    # The point of the pin: the 24-node quadrature over every catalog row
+    # leaves the per-call program, on the PE and on the selection side, and
+    # only the probe rows are rebuilt. Values alone cannot show this (a
+    # binding that pinned one side only would agree to rounding).
+    auto, pinned, unpinned = _bound_pair(plan)
+    n_rows, n_max = (int(n) for n in pinned.catalog.zgals.shape)
+    n_probe = len(pinned.kernel_pin.probe_rows)
+    assert n_probe != n_rows
+    full, probe = f"[{n_rows},{n_max},24]", f"[{n_probe},{n_max},24]"
+
+    def shapes(bound):
+        eqns, _ = _program(bound, _theta(auto, 90.0 if "H0" in auto.parameters.labels else None))
+        return {aval for _, _, outs in eqns for aval in outs}
+
+    unpinned_shapes, pinned_shapes = shapes(unpinned), shapes(pinned)
+    assert any(full in aval for aval in unpinned_shapes)
+    assert not any(full in aval for aval in pinned_shapes)
+    assert any(probe in aval for aval in pinned_shapes)
+
+
 # ---------------------------------------------------------------------------
 # The probe
 
