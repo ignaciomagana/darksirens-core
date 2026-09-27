@@ -142,7 +142,11 @@ parameter decoders or sampler adapters.
   analyses. Each call re-derives eight catalog rows from the live parameters
   and returns `-inf` if they disagree with the pin by more than 1e-9. A
   `BoundAnalysis` refuses a pin its plan does not admit, or one built for
-  another catalog shape (for example after `dataclasses.replace`).
+  another catalog shape (for example after `dataclasses.replace`). Like the
+  observed-density cache, the pin belongs to the catalog it was built from:
+  a binding whose catalog is replaced by another of the same shape keeps a
+  stale pin, which the eight-row check need not detect, so a new catalog
+  needs a new `bind_analysis`.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other
