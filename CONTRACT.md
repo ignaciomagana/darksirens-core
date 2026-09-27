@@ -126,6 +126,35 @@ parameter decoders or sampler adapters.
   that violate a model's joint prior constraint (for example
   `lambda_0 + lambda_1 <= 1`), or leave the pair's sampled member no prior
   support, raise `ValueError` with or without `allow_out_of_prior`.
+- `model(..., kernel_pin="auto"|"off")` (default `"auto"`): an
+  incomplete-catalog analysis that samples none of `Om0`, `w0`, `wa`, `delta`,
+  `sigma_kde` (`H0` may be sampled) evaluates the per-galaxy catalog kernel
+  quadrature once, at bind time, at `H0_ref = 67.74`, and each call adds the
+  exact scalar `3 ln(H0 / H0_ref)` to it, as the frozen reference's H0 kernel
+  pin does. The likelihood agrees with the per-call quadrature to rounding,
+  not bit for bit (on the benchmark fixtures, within 1e-15 relative on the
+  total and on each event's log evidence, and 1.2e-13 on the Monte Carlo
+  variance diagnostics). `"off"` keeps the per-call
+  quadrature, and its bound program is unchanged. `ParameterPlan.kernel_pin`
+  and `ParameterPlan.kernel_pin_active` record the setting and whether it
+  applies, and `parameter_plan_semantic(plan)` puts both in a run fingerprint.
+  The setting has no effect on spectral, bright-siren or complete-catalog
+  analyses. Each call re-derives eight catalog rows from the live parameters
+  and returns `-inf` if they disagree with the pin by more than 1e-9. A
+  `BoundAnalysis` refuses a pin its plan does not admit, or one built for
+  another catalog shape (for example after `dataclasses.replace`). The pin
+  belongs to the catalog it was built from, and the eight-row check need not
+  notice a same-shape catalog that differs elsewhere, so the pin carries a
+  digest (`PinnedCatalogKernel.catalog_digest`, `BoundAnalysis.kernel_pin_digest`)
+  of the catalog arrays the kernel reads (`zgals`, `dzgals`, `wgals`,
+  `ngals`, every byte), the fixed `Om0`, `w0`, `wa`, `delta`, `sigma_kde` and
+  `z_depth`, its `H0_ref` and probe rows, and the kernel's static settings.
+  A `BoundAnalysis` recomputes it from its own catalog and plan when it is
+  made (and unpickled) and refuses a pin whose digest differs, naming both;
+  a new catalog needs a new `bind_analysis`. The digest is computed on the
+  host and is pytree metadata, never a traced value, and it does not enter
+  the tree structure's equality, so a compiled program serves a pin built
+  from other data without retracing; the per-call program is unchanged.
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other

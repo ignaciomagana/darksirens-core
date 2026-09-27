@@ -19,10 +19,16 @@ from darksirens.analysis import (
     CompleteCatalogRedshift,
     IncompleteCatalogRedshift,
     SpectralRedshift,
+    kernel_pin_applies,
 )
 from darksirens.catalog.compact import compact_pe_selection_catalog
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.geometry import ang2pix_ring
+from darksirens.catalog.redshift import (
+    PinnedCatalogKernel,
+    build_pinned_catalog_kernel,
+    check_pinned_catalog_kernel,
+)
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
@@ -232,9 +238,14 @@ class BoundAnalysis:
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE
     sel_batch_size: int | None = None
     pe_event_block: int | None = None
+    kernel_pin: Any = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        if self.kernel_pin is not None:
+            _require_admissible_kernel_pin(
+                self.analysis, self.catalog, self.kernel_pin, self.z_depth
+            )
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python
         # closures, and eager ``lax.scan`` traces per body-function object, so
@@ -242,6 +253,19 @@ class BoundAnalysis:
         # re-compiled the scans on every call and JAX's primitive-dispatch
         # cache kept every new executable. Under one jit they trace once.
         object.__setattr__(self, "_log_likelihood", _jit_log_likelihood(self))
+
+    @property
+    def kernel_pin_digest(self) -> str | None:
+        """The kernel pin's ``catalog_digest``, or ``None`` without a pin.
+
+        The digest of the catalog and fixed premise the pin was built from
+        (:func:`darksirens.catalog.redshift.catalog_kernel_pin_digest`),
+        checked against this binding's catalog and plan when the binding is
+        made. The plan does not carry the pin, so
+        ``parameter_plan_semantic`` does not record it; a caller that
+        fingerprints its data can.
+        """
+        return None if self.kernel_pin is None else self.kernel_pin.catalog_digest
 
     def __getstate__(self):
         # The jitted closure does not pickle; it is rebuilt on unpickling.
@@ -259,15 +283,28 @@ class BoundAnalysis:
         return self.analysis.parameters.labels
 
     def __call__(self, theta):
-        return self._log_likelihood(
+        operands = (
             jnp.asarray(theta),
             self.gw_pe,
             self.gw_selection,
             self.catalog,
             self.observed_density_cache,
         )
+        # The kernel pin is a data operand too; without one the call, and so
+        # the traced program, is exactly the unpinned one.
+        if self.kernel_pin is not None:
+            operands += (self.kernel_pin,)
+        return self._log_likelihood(*operands)
 
-    def _evaluate(self, theta, gw_pe, gw_selection, catalog, observed_density_cache):
+    def _evaluate(
+        self,
+        theta,
+        gw_pe,
+        gw_selection,
+        catalog,
+        observed_density_cache,
+        kernel_pin=None,
+    ):
         """Evaluate at ``theta`` with the data operands passed explicitly."""
         cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
@@ -331,6 +368,8 @@ class BoundAnalysis:
                 self.n_events,
                 self.nsamp,
                 self.n_draw,
+                pinned_kernel_pe=kernel_pin,
+                pinned_kernel_sel=kernel_pin,
                 **ordinary_common,
             )
 
@@ -357,9 +396,10 @@ def _jit_log_likelihood(bound: BoundAnalysis):
     """Return ``bound._evaluate`` as one ``jax.jit`` over its data operands.
 
     The coordinate, the PE and selection samples, the compact catalog, the
-    observed-density cache, the distance table and the ambient jit channels
-    are jit arguments, never HLO constants; ``bound`` supplies only the static
-    configuration (analysis, sizes, guard and block settings).
+    observed-density cache, the kernel pin (when there is one), the distance
+    table and the ambient jit channels are jit arguments, never HLO
+    constants; ``bound`` supplies only the static configuration (analysis,
+    sizes, guard and block settings).
     """
 
     @threads_distance_table()
@@ -369,13 +409,104 @@ def _jit_log_likelihood(bound: BoundAnalysis):
         gw_selection,
         catalog,
         observed_density_cache,
+        kernel_pin=None,
         distance_table=None,
     ):
         return bound._evaluate(
-            theta, gw_pe, gw_selection, catalog, observed_density_cache
+            theta, gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin
         )
 
     return log_likelihood
+
+
+def _require_admissible_kernel_pin(
+    analysis: Analysis, catalog, kernel_pin, z_depth
+) -> None:
+    """Refuse a binding that carries a kernel pin its plan does not admit.
+
+    The bound likelihood serves the pin whenever the binding carries one. A
+    binding rebuilt with ``dataclasses.replace`` under another plan would
+    otherwise evaluate the pinned program while the plan, and a run
+    fingerprint built from it, records ``kernel_pin="off"`` or a sampled
+    kernel parameter; with ``delta`` or ``sigma_kde`` sampled the probe then
+    returns ``-inf`` away from the pinned value. A pin built for another
+    catalog shape is refused too, and so is one built from another catalog of
+    the same shape or under other fixed values: the pin's catalog digest must
+    be the digest of this binding's catalog under this plan's fixed ``Om0``,
+    ``w0``, ``wa``, ``delta``, ``sigma_kde`` and ``z_depth``
+    (:func:`~darksirens.catalog.redshift.check_pinned_catalog_kernel`); the
+    per-call probe re-derives only eight rows and need not notice. Dropping
+    the pin (``kernel_pin=None``) is always allowed: that is the unpinned
+    program.
+    """
+    if not isinstance(kernel_pin, PinnedCatalogKernel):
+        raise TypeError(
+            "kernel_pin must be the PinnedCatalogKernel built by bind_analysis, or None"
+        )
+    plan = analysis.parameters
+    if not (
+        plan.kernel_pin_active
+        and kernel_pin_applies(analysis.redshift, plan.labels, plan.kernel_pin)
+    ):
+        raise ValueError(
+            "this BoundAnalysis carries a catalog kernel pin, but its plan does not "
+            f"admit one (kernel_pin={plan.kernel_pin!r}, kernel_pin_active="
+            f"{plan.kernel_pin_active}); bind the analysis with bind_analysis, or "
+            "drop the pin with kernel_pin=None"
+        )
+    pin_shape = tuple(np.shape(kernel_pin.log_kw_eff))
+    catalog_shape = None if catalog is None else tuple(np.shape(catalog.zgals))
+    if pin_shape != catalog_shape:
+        raise ValueError(
+            f"the catalog kernel pin was built for a catalog of shape {pin_shape}, "
+            f"but the binding's catalog has shape {catalog_shape}; rebuild the "
+            "binding with bind_analysis"
+        )
+    cosmology, catalog_params = _kernel_pin_premise(analysis, z_depth)
+    try:
+        check_pinned_catalog_kernel(kernel_pin, cosmology, catalog_params, catalog)
+    except ValueError as err:
+        raise ValueError(
+            f"{err}; for a BoundAnalysis, rebuild the binding with bind_analysis"
+        ) from None
+
+
+def _kernel_pin_premise(analysis: Analysis, z_depth):
+    """The fixed cosmology and catalog parameters a pin is built and checked under.
+
+    The run's own decoder at an arbitrary coordinate: the plan fixes ``Om0``,
+    ``w0``, ``wa``, ``delta``, ``sigma_kde`` whenever it admits a pin, so
+    these are exactly the values every call sees (``H0`` and ``n0`` do not
+    enter the kernel).
+    """
+    cosmology, _, catalog_params, _ = _decode_theta(
+        analysis,
+        jnp.full((len(analysis.parameters.labels),), 0.5, dtype=jnp.float64),
+        z_depth=z_depth,
+    )
+    return cosmology, catalog_params
+
+
+def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
+    """The bind-time catalog kernel pin of a plan that admits one, else None.
+
+    The reference cosmology and catalog parameters come from the run's own
+    decoder at an arbitrary coordinate, so the pin sees exactly the fixed
+    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde`` and ``z_depth`` every
+    call will (legacy ``_reference_params``, ``likelihood/factory.py:1054-1070``);
+    ``ParameterPlan.kernel_pin_active`` guarantees none of them is sampled.
+    """
+    plan = analysis.parameters
+    if not plan.kernel_pin_active:
+        return None
+    if not kernel_pin_applies(analysis.redshift, plan.labels, plan.kernel_pin):
+        raise RuntimeError(
+            "ParameterPlan.kernel_pin_active is set, but the analysis is not an "
+            "incomplete-catalog analysis with Om0, w0, wa, delta and sigma_kde fixed "
+            "under kernel_pin='auto'; build the plan with ds.model"
+        )
+    cosmology, catalog_params = _kernel_pin_premise(analysis, z_depth)
+    return build_pinned_catalog_kernel(cosmology, catalog_params, catalog)
 
 
 def bind_analysis(
@@ -467,6 +598,9 @@ def bind_analysis(
         )
         z_depth = catalog_store.z_depth
 
+    kernel_pin = (
+        None if catalog is None else _build_kernel_pin(analysis, catalog, z_depth)
+    )
     return BoundAnalysis(
         analysis=analysis,
         gw_pe=_make_runtime_event(events, pe_pixels, required),
@@ -482,6 +616,7 @@ def bind_analysis(
         max_likelihood_variance=float(max_likelihood_variance),
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
+        kernel_pin=kernel_pin,
     )
 
 

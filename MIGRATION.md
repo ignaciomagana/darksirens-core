@@ -235,3 +235,69 @@ fields from its diagnostics; NumPyro and the zero-free result set them to
 `None`. The Phase 6N/6O/6S/6T parity probes require these four fields on
 every candidate result and then drop them (`tools/_termination_fields.py`),
 so the comparison with the frozen reference stays exact on everything else.
+
+### Catalog kernel pin (numerics change on pinned plans only)
+
+With `Om0`, `w0`, `wa`, `delta` and `sigma_kde` fixed, the galaxy measure
+`g(z) = dV_c/dz (1+z)^delta` depends on `H0` only through the factor
+`(H0_ref / H0)^3`, and the kernel widths not at all, so every galaxy's kernel
+normalisation moves by the same scalar. The frozen reference uses this: when
+none of the five is sampled it evaluates the per-galaxy 24-node quadrature once
+per run, at `H0_ref = 67.74`, and adds `3 ln(H0 / H0_ref)` per call (its H0
+kernel pin). Core now does the same, by default:
+`model(..., kernel_pin="auto")` pins an incomplete-catalog analysis whose plan
+samples none of the five (`H0` may be sampled). The quadrature, kernel,
+masks and completeness are unchanged; only the kernel state moves to bind
+time, and the completeness curves are still evaluated per call. Like the
+reference, each call rebuilds eight catalog rows from the live parameters and
+turns the likelihood into `-inf` if they disagree with the pin by more than
+1e-9 (they agree to about 1e-14).
+
+The per-call probe re-derives eight rows, so a pin served with another
+catalog of the same shape that differs only elsewhere gives a finite, wrong
+likelihood (in `tests/test_kernel_pin.py`, with one galaxy moved by -0.01 in
+redshift on a row the probe does not rebuild, the stale pin gives a value
+1.5e-5 from the correct one at H0 = 30). The pin therefore carries
+`catalog_digest`, a blake2b digest of the catalog arrays the kernel
+reads (`zgals`, `dzgals`, `wgals`, `ngals`: dtype, shape and every byte,
+padding included), the fixed `Om0`, `w0`, `wa`, `delta`, `sigma_kde` and
+`z_depth`, the pin's `H0_ref` and probe rows, and the kernel's static
+settings (redshift grid, quadrature nodes, width floor, padding sentinel,
+distance-table grid, interpolation switches; not the distance table's
+values). `build_pinned_catalog_kernel` computes it on the host
+(`catalog_kernel_pin_digest`), and `BoundAnalysis` recomputes it from its own
+catalog and plan with `check_pinned_catalog_kernel` whenever it is made,
+replaced or unpickled, and refuses a mismatch with a `ValueError` naming both
+digests. `BoundAnalysis.kernel_pin_digest` exposes it; the plan does not carry
+the pin, so `parameter_plan_semantic` does not record it. The digest is
+pytree metadata, not a leaf, and pins that differ only in it have equal tree
+structures, so a compiled program serves a pin built from other data without
+retracing (and a pin returned by a jitted function keeps the digest that
+function was first traced with: build pins outside a jit). The jit operands,
+the lowered program and every pinned value are unchanged (on fixture T,
+three pinned plans, single pass and 4096/6: 66 values, 24 gradients, the 42
+pin arrays and the 6 lowered programs bit for bit). It costs 7 ms on T and
+0.34 s on a 196,608 x 70 catalog on CPU, twice per `bind_analysis` (at the
+build and at the check).
+
+The pinned likelihood is not bit-identical to the per-call quadrature: the two
+round differently. On the harness fixtures T and S (plans `dark_H0`,
+`dark_pop`, `dark_joint_cosmo_pop`, single pass and blocked) the total log
+likelihood agrees to 7.6e-16 relative, each event's log evidence to 4.4e-16,
+the Monte Carlo variance diagnostics to 1.2e-13 relative and every
+per-sample catalog log-density to 5.7e-14 absolute; against the
+reference, which pins, the total agrees to 2.9e-16 relative (bit for bit in 8
+of 12 cells, against 4 of 12 unpinned). On CPU a call is 1.4 to 6.7 times
+faster (T `dark_H0`: 15.8 ms against 105.7 ms), for about 1 s more at bind.
+The pin keeps two `(n_rows, n_max)` float64 arrays (the fused kernel
+log-weights and the inverse widths), three per-row vectors (the row offsets,
+the empty-row flags and the depth masses) and eight probe-row indices (224 MB
+on a 196,608 x 70 catalog); the reference keeps five such arrays. The pin is built
+by the per-call kernel builder, run once at bind, so binding needs the
+transient memory of one unpinned kernel build: on that catalog the CPU
+compiler gives the build 14.9 GB of scratch, while the per-call catalog terms
+need 3.2 GB pinned against 15.4 GB unpinned. Complete-catalog analyses are
+not pinned, as in the reference. `kernel_pin="off"` keeps the per-call
+quadrature, and the bound program is then byte-identical to the previous
+release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
+`run_fingerprint.parameter_plan_semantic(plan)` records both.

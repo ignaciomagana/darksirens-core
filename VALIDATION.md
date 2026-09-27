@@ -298,6 +298,67 @@ golden-regeneration guard), against 714 passed, 1 skipped before the stack. The
 45 new tests are 11 packaging and example tests, 2 preflight-message tests, 19
 fingerprint tests, 5 budget-audit tests and 8 GP mass-ratio cases.
 
+### Catalog kernel pin
+
+`model(..., kernel_pin="auto")` evaluates the catalog kernel state once, at
+bind time, when `Om0`, `w0`, `wa`, `delta` and `sigma_kde` are fixed (see
+MIGRATION.md). `tests/test_kernel_pin.py` (52 tests) checks the activation
+rule through `ds.model`, the pinned likelihood against `kernel_pin="off"` at
+rtol 1e-12 for H0 from 20 to 140 (three plans, single pass and scanned blocks),
+the pinned state leaf by leaf against the per-call state (padding and empty
+rows exact, occupied-row offsets and per-sample densities within 1e-12
+absolute), gradients, the program without the pin operand, the probe against
+pins built under six violated premises, the fingerprint and resume gate, and
+the bound jit's no-retrace, data-as-argument and pickling properties, and
+that the pinned program no longer contains the 24-node quadrature over every
+catalog row on either side (only the probe rows), and that a binding refuses a
+pin its plan does not admit. Five more tests check the pin's catalog digest:
+it is the digest of the binding's own catalog and plan, static pytree
+metadata that splits no jit cache, and the same on a second bind; a binding
+refuses a same-shape catalog with one galaxy moved on a row outside the probe
+rows (served that catalog, the stale pin gives a finite, wrong value), a
+forged `H0_ref` or probe-row set, another fixed `delta`, `sigma_kde`, `Om0`
+or `z_depth`, and accepts the same catalog in new arrays (bitwise the same
+values) and another fixed `log10n0`; the digest does not depend on how the
+arrays are held (numpy or jax, read whole or in row blocks) and refuses a
+traced input (but not a traced `H0`, which it does not read). Each mutant
+fails the new tests (counts against the first 47 tests):
+
+```text
+shift sign flipped                        16 of 47 fail
+row offset not shifted                     2 fail (occupied-row offsets)
+probe tolerance 1e30                       6 fail (the six violated premises)
+probe verdict not spent on log_Z           6 fail
+activation ignores sigma_kde               3 fail
+activation ignores kernel_pin="off"       14 fail
+binding does not serve the pin             8 fail
+fingerprint without the kernel_pin block   2 fail
+pin built at H0 = 70                       2 fail
+selection side not pinned                  2 fail (the other 45 pass)
+PE side not pinned                         2 fail
+probe rebuilds every row                   2 fail
+binding keeps a pin under another plan     1 fail
+```
+
+and the digest mutants (counts against the 52 tests):
+
+```text
+binding does not compare digests           2 of 52 fail
+digest reads only the probe rows           1 fail (the same-shape swap)
+digest omits the fixed premise             1 fail (the other 51 pass)
+digest splits the jit cache                1 fail
+```
+
+With the digest, the pinned values are unchanged: on fixture T (H0 sampled
+alone, with three population parameters, and the population sampled at fixed
+H0; single pass and 4096/6) the 66 values, 24 gradients, 42 pin arrays and 6
+lowered StableHLO programs are bit for bit those of the commit before it.
+
+With `kernel_pin="off"`, and for every plan the pin does not apply to, the
+lowered StableHLO of the bound likelihood is byte-identical to the previous
+release's (spectral, incomplete and complete catalogs, blocks single, 32/1
+and 4096/6, each lowered in a fresh process).
+
 ## Permanent firewall
 
 The broad Phase-8 regression statically parses `src/darksirens/**/*.py` and

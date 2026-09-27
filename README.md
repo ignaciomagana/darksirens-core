@@ -79,6 +79,13 @@ A fixed value must lie inside its parameter's prior bounds;
 `ds.model(..., allow_out_of_prior=True)` accepts one outside them, such as
 `log10n0 = log10(5e-5)` below the `[-4, -1]` prior, with a warning.
 
+With `delta` and `sigma_kde` fixed, and `Om0`, `w0`, `wa` fixed (the default
+cosmology), the catalog kernel's redshift dependence is fixed up to a scalar
+`H0` factor, so the per-galaxy kernel quadrature is evaluated once, at bind
+time, instead of on every likelihood call (`kernel_pin="auto"`, the default).
+The values agree with the per-call quadrature to rounding;
+`ds.model(..., kernel_pin="off")` keeps the per-call quadrature.
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog
