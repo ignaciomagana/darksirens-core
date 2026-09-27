@@ -218,3 +218,20 @@ prior no support raise.
 `ParameterPlan` gains `fixed_population_values`, `fixed_survey` and
 `allow_out_of_prior`, and `run_fingerprint.parameter_plan_semantic(plan)`
 records them for the resume gate.
+
+### Sampler termination fields (additive result fields, no sampling change)
+
+The frozen reference returned a Dynesty result without saying whether the run
+stopped on its `dlogz` criterion or on its `max_samples` call cap, so a caller
+could not assert convergence. Every sampler result now carries
+`dlogz_final`, `stop_reason`, `ncall` and `niter`
+(`nested_output.termination_record`). For Dynesty the adapter rebuilds the
+stop check of dynesty 2.1.4's sampling loop from the sampler's state after
+`run_nested`, using the loop's own running evidence, so `dlogz_final` is
+bitwise the number dynesty compared with `dlogz`. It adds no attribute to the
+sampler and calls `run_nested` exactly as before: samples, `logZ`, `logZerr`
+and dead points are bitwise unchanged at the same seed. TinyNS reads the same
+fields from its diagnostics; NumPyro and the zero-free result set them to
+`None`. The Phase 6N/6O/6S/6T parity probes require these four fields on
+every candidate result and then drop them (`tools/_termination_fields.py`),
+so the comparison with the frozen reference stays exact on everything else.

@@ -15,6 +15,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from _termination_fields import candidate_runner
+
 
 class _FakeRNG:
     def __init__(self, seed):
@@ -248,7 +250,8 @@ def _load_candidate(records):
     adapter.restore_dynesty_sampler = restore
     adapter.install_dynesty_checkpointing = install
     adapter.package_dead_points = _dead_points
-    return adapter.run_dynesty
+    # The candidate result also carries the declared termination fields.
+    return candidate_runner(adapter.run_dynesty)
 
 
 def _likelihood(theta):
