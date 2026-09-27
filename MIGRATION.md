@@ -301,3 +301,52 @@ not pinned, as in the reference. `kernel_pin="off"` keeps the per-call
 quadrature, and the bound program is then byte-identical to the previous
 release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
 `run_fingerprint.parameter_plan_semantic(plan)` records both.
+
+### Catalog kernel pin on the field seam (opt-in, per target)
+
+A field (host-density) target builds its prior state per proposal through
+`darksirens.catalog.field.build_field_incomplete_catalog_prior_state_from_curves`,
+which now takes `pinned_kernel=` as the conditional seam does. The DESI P12.4
+target of `desi_darksirens_selection` is one: it samples `H0`, `M0hat` and
+`sigma_M` and fixes `Om0`, `w0`, `wa`, `delta`, `sigma_kde` and `z_depth`, so
+its catalog kernel moves only through `3 ln(H0 / H0_ref)` while its completion
+curves still move with all three. Such a target can build the kernel once with
+`build_pinned_field_kernel` (the ordinary path's builder: `H0_ref = 67.74`,
+eight probe rows, tolerance 1e-9), pass it to its jitted evaluation as an
+argument, and hand it to the seam on every call; `field_kernel_pin_applies`
+is the activation rule (sampled labels, never values) and
+`field_kernel_pin_plan(plan, setting)` records `kernel_pin` and
+`kernel_pin_active` on the target's plan for `parameter_plan_semantic`
+(`combine_parameter_plans` keeps returning neutral metadata). The seam refuses
+a pin built for another catalog shape, and a concrete pin under a traced
+catalog.
+
+Nothing changes for a target that passes no pin: its lowered program is
+byte-identical to the previous release's. With a pin the values move by
+rounding only. On the consumer's synthetic P12.4 fixture and on the campaign
+fixtures T and S through a field-style target (single pass and the P12.4
+blocks 131072/32, hard and soft guards, with and without a depth), against the
+per-call quadrature: the total log likelihood within 8.8e-16 relative, each
+event's log evidence within 7.1e-15 absolute, `n_eff` within 1.6e-14, the
+Monte Carlo variance diagnostics within 2.8e-13 relative, and every
+per-sample field log density within 1.2e-13 absolute. On CPU a call on T and
+S is 2.4 to 13 times faster (T, single pass: 15 ms against 134 ms), for 0.7
+to 1.9 s more at build; on the small consumer fixture at the P12.4 blocks the
+padded 131072-injection selection pass dominates and the time is unchanged. A
+pin belongs to the catalog view and the distance table it was built from: a
+target that evaluates other data must rebuild it. The probe returns `-inf`
+when the difference reaches its eight rows (a pin built under another
+premise, or a catalog or table rescaled as a whole), but a catalog of the
+same shape that differs only outside the probe rows keeps a stale pin that
+the probe need not detect, as on the ordinary path. The field pin therefore
+carries the ordinary path's `catalog_digest` (the same builder, the same
+digest), and `darksirens.catalog.field.check_field_kernel_pin(pin, cosmo,
+params, catalog)` recomputes it on the host from the catalog view and fixed
+premise the target serves the pin with, and refuses a mismatch with a
+`ValueError` naming both digests. Inside the target's jit the catalog is
+traced and cannot be hashed, so a target calls the check where it attaches
+the pin to its catalog view (its jit operands), outside the jit, and again
+whenever it replaces either; an eager call of the seam (nothing traced) runs
+the check itself. The digest is not a jit operand and splits no jit cache: a
+target's compiled program is unchanged and still serves a rebuilt pin without
+retracing.
