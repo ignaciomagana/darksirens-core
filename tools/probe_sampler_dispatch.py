@@ -25,6 +25,8 @@ from types import ModuleType, SimpleNamespace
 import jax.numpy as jnp
 import numpy as np
 
+from _termination_fields import candidate_runner
+
 
 _EVENTS = []
 
@@ -296,7 +298,8 @@ def _load_candidate_dispatcher():
     sampling._nested_preflight = _candidate_preflight
     tinyns_adapter.plan_from_opts = _plan_from_opts
     dynesty_adapter.plan_from_opts = _plan_from_opts
-    return sampling.run_sampler
+    # The candidate result also carries the declared termination fields.
+    return candidate_runner(sampling.run_sampler)
 
 
 def _likelihood(theta):

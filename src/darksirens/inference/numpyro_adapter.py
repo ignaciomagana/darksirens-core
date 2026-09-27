@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from darksirens.inference.nested_output import termination_record
+
 
 def _numpyro_diagnostics(extra, max_tree_depth: int, target_accept: float):
     """Build the frozen post-warmup NumPyro sampler-health summary."""
@@ -178,6 +180,8 @@ def run_numpyro(
             None if log_likelihood is None else np.asarray(log_likelihood)
         ),
         "numpyro_diagnostics": numpyro_diagnostics,
+        # NUTS has no evidence or stopping criterion to report.
+        **termination_record(),
     }
 
 

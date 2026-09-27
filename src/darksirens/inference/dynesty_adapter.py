@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from darksirens.inference.nested_output import package_dead_points
+from darksirens.inference.nested_output import (
+    package_dead_points,
+    termination_record,
+)
 
 
 def plan_from_opts(opts, sampler):
@@ -64,6 +67,82 @@ def _normalized_dynesty_weights(logw):
     if not np.isfinite(weight_sum) or weight_sum <= 0.0:
         raise RuntimeError("dynesty posterior weights could not be normalized.")
     return logw, weights / weight_sum
+
+
+def _dynesty_running_logz(sampler):
+    """Return the list dynesty's sampling loop appends its running ln Z to.
+
+    At the end of ``run_nested`` dynesty 2.1.4 recomputes the evidence of the
+    whole run and *replaces* ``saved_run['logz']`` with the new list, so a
+    reference taken before the call keeps the loop's own running values.
+    ``None`` when the sampler exposes no such record.
+    """
+    try:
+        return sampler.saved_run["logz"]
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+
+def _dynesty_termination(sampler, running_logz, ncall_before, dlogz, maxcall):
+    """Reconstruct dynesty's final dlogz and the criterion that stopped it.
+
+    Dynesty's static loop (``Sampler.sample``) evaluates, before each
+    iteration, ``delta_logz = logaddexp(0, max(live_logl) + logvol - logz)``,
+    where ``logvol`` and ``logz`` are those of the last retired point, and
+    stops when ``ncall > maxcall`` (calls made by this ``run_nested``) or
+    ``delta_logz < dlogz``, or when the live likelihoods form a plateau
+    (``ptp(live_logl) == 0``). The value that stopped the loop is never
+    returned. It is rebuilt here from the same float64 operands (the live
+    likelihoods, the last dead point's ``logvol`` and the running ``logz``
+    kept in ``running_logz``), so it is bitwise the number dynesty compared.
+    When dlogz and a cap hold at the same check, the run counts as converged.
+    For a checkpoint whose run had already finished, ``run_nested`` samples
+    nothing and ``running_logz`` holds the recomputed evidence instead.
+
+    Every field is ``None`` when the sampler exposes no such state.
+    """
+    live_logl = getattr(sampler, "live_logl", None)
+    it = getattr(sampler, "it", None)
+    ncall = getattr(sampler, "ncall", None)
+    saved_run = getattr(sampler, "saved_run", None)
+    if (
+        running_logz is None
+        or saved_run is None
+        or live_logl is None
+        or it is None
+        or ncall is None
+        or ncall_before is None
+    ):
+        return termination_record()
+
+    n_dead = int(it) - 1
+    if n_dead > 0:
+        logvol = saved_run["logvol"][n_dead - 1]
+        logz = running_logz[n_dead - 1]
+    else:
+        # No point was retired: the loop's initial values.
+        logvol = sampler.logvol_init
+        logz = -1.0e300
+    live_logl = np.asarray(live_logl)
+    delta_logz = np.logaddexp(0, np.max(live_logl) + logvol - logz)
+
+    if dlogz is None:
+        # run_nested's default for a run that adds the final live points.
+        dlogz = 1e-3 * (sampler.nlive - 1.0) + 0.01
+    if delta_logz < dlogz:
+        stop_reason = "convergence"
+    elif maxcall is not None and int(ncall) - int(ncall_before) > maxcall:
+        stop_reason = "maxcall"
+    elif np.ptp(live_logl) == 0:
+        stop_reason = "plateau"
+    else:
+        stop_reason = "unknown"
+    return termination_record(
+        dlogz_final=delta_logz,
+        stop_reason=stop_reason,
+        ncall=ncall,
+        niter=n_dead,
+    )
 
 
 def run_dynesty(likelihood, prior_transform, labels, opts):
@@ -176,6 +255,8 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
     if maxcall is not None:
         print(f"[*] Dynesty call cap: maxcall={maxcall}", flush=True)
 
+    running_logz = _dynesty_running_logz(sampler)
+    ncall_before = getattr(sampler, "ncall", None)
     try:
         sampler.run_nested(
             dlogz=opts.dlogz,
@@ -207,6 +288,9 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
         "dead_points": dead_points,
         "nlive_actual": int(getattr(sampler, "nlive", opts.nlive)),
         "prior_transform_dispatch": getattr(dynesty_ptform, "dispatch", ""),
+        **_dynesty_termination(
+            sampler, running_logz, ncall_before, opts.dlogz, maxcall
+        ),
     }
 
 

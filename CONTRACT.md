@@ -142,6 +142,20 @@ parameter decoders or sampler adapters.
 - Ordinary `infer` results carry `log_prior_volume_fraction` and, for a finite
   `logZ`, `logZ_corrected = logZ - log_prior_volume_fraction`. The raw `logZ`
   is exactly the sampler's number.
+- Every `infer` result carries the sampler-termination fields `dlogz_final`,
+  `stop_reason`, `ncall` and `niter`
+  (`darksirens.inference.nested_output.TERMINATION_FIELDS`); a backend that
+  does not report one sets it to `None`. For Dynesty, `dlogz_final` is the
+  remaining-evidence estimate at the check that ended the run, bitwise the
+  number dynesty compared with `dlogz`; `stop_reason` is `"convergence"` (the
+  `dlogz` criterion held, including when a cap was reached at the same
+  check), `"maxcall"` (more than `max_samples` calls in this sampling call),
+  `"plateau"` or `"unknown"`; `ncall` and `niter` are dynesty's call counter
+  and iteration count. TinyNS reports its own final dlogz, call and iteration
+  counts with `"convergence"`, `"maxiter"`, `"callback"`,
+  `"replacement_failure"` or `"unknown"`. NumPyro and a target with no free
+  parameter set all four to `None`. The names and the value `"convergence"`
+  are a downstream contract: convergence checks read them as they are.
 - `infer` refuses a PE store and an injection store whose `contract_hash`
   attributes differ (stores without one are exempt) and warns when their
   declared cosmologies differ.

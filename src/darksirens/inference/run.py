@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from darksirens.inference.nested_output import termination_record
+
 
 def zero_free_parameter_result(likelihood, ndim: int):
     """Return the exact point-mass result for a zero-dimensional inference.
@@ -36,6 +38,8 @@ def zero_free_parameter_result(likelihood, ndim: int):
         "logZ": log_l_fixed,
         "logZerr": 0.0,
         "log_likelihood": np.array([log_l_fixed], dtype=float),
+        # No sampler ran, so there is no termination to report.
+        **termination_record(),
     }
 
 

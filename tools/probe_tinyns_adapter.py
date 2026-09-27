@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from _termination_fields import candidate_runner
+
 
 class _Plan:
     def __init__(self, opts):
@@ -188,7 +190,8 @@ def _load_candidate_runner(records):
     adapter.package_dead_points = _dead_points
     adapter.normalize_tinyns_diagnostics = _normalize
     adapter.print_tinyns_diagnostics = _print_diag
-    return adapter.run_tinyns
+    # The candidate result also carries the declared termination fields.
+    return candidate_runner(adapter.run_tinyns)
 
 
 def _likelihood(theta):

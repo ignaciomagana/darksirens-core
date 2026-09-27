@@ -10,6 +10,8 @@ the prior transform is caught.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -91,6 +93,12 @@ def test_tinyns_recovers_the_analytic_evidence_and_posterior():
     _assert_evidence(result)
     _assert_standard_normal_posterior(result["samples"])
     assert result["dead_points"] is not None
+    diagnostics = result["tinyns_runtime_diagnostics"]
+    assert result["stop_reason"] == "convergence"
+    assert result["dlogz_final"] == diagnostics["final_delta_logz"]
+    assert result["dlogz_final"] < 0.5
+    assert result["ncall"] == diagnostics["ncall"] > 0
+    assert result["niter"] == diagnostics["niter"] > 0
 
 
 def test_dynesty_recovers_the_analytic_evidence_and_posterior():
@@ -109,6 +117,141 @@ def test_dynesty_recovers_the_analytic_evidence_and_posterior():
     assert result["nlive_actual"] == 200
 
 
+@contextlib.contextmanager
+def _trace_dynesty_loop():
+    """Record the locals of dynesty's own sampling loop at every exit.
+
+    ``Sampler.sample`` never returns the ``delta_logz`` that stopped it. A
+    trace function on that generator's frame records its locals at every
+    ``return`` event (each yield and the final exit), so the last record is
+    the state at the check that ended the run.
+    """
+    from dynesty.sampler import Sampler
+
+    code = Sampler.sample.__code__
+    exits = []
+
+    def local_trace(frame, event, arg):
+        if event == "return":
+            exits.append(
+                {
+                    "delta_logz": frame.f_locals["delta_logz"],
+                    "ncall": frame.f_locals["ncall"],
+                }
+            )
+        return local_trace
+
+    def global_trace(frame, event, arg):
+        return local_trace if frame.f_code is code else None
+
+    previous = sys.gettrace()
+    sys.settrace(global_trace)
+    try:
+        yield exits
+    finally:
+        sys.settrace(previous)
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"dlogz": 0.5}, "convergence"),
+        ({"dlogz": 0.1, "max_samples": 300}, "maxcall"),
+    ],
+    ids=["dlogz", "maxcall"],
+)
+def test_dynesty_reports_its_final_dlogz_and_stop_reason(options, reason):
+    pytest.importorskip("dynesty")
+    nlive = 50
+    capped = reason == "maxcall"
+    warns = (
+        pytest.warns(UserWarning, match="stopped short")
+        if capped
+        else contextlib.nullcontext()
+    )
+    with warns, _trace_dynesty_loop() as exits:
+        result = ds.infer(
+            _target(),
+            sampler="dynesty",
+            nlive=nlive,
+            show_progress=False,
+            seed=1,
+            **options,
+        )
+    final = exits[-1]
+    # Bitwise the number dynesty compared with dlogz when it stopped.
+    assert result["dlogz_final"] == float(final["delta_logz"])
+    assert result["stop_reason"] == reason
+    if capped:
+        # Measured: dlogz_final 4.20 after 311 loop calls.
+        assert result["dlogz_final"] > options["dlogz"]
+        assert final["ncall"] > options["max_samples"]
+    else:
+        # Measured: dlogz_final 0.495.
+        assert result["dlogz_final"] < options["dlogz"]
+    # dynesty counts nlive calls for the initial live points plus the loop's.
+    assert result["ncall"] == nlive + final["ncall"]
+    assert result["niter"] == result["dead_points"]["n_dead"] - nlive
+    fields = {
+        name: result[name]
+        for name in ("dlogz_final", "stop_reason", "ncall", "niter")
+    }
+    assert json.loads(json.dumps(fields, allow_nan=False)) == fields
+
+
+def test_resumed_dynesty_runs_report_the_termination_of_the_whole_run(tmp_path):
+    dynesty = pytest.importorskip("dynesty")
+    from darksirens.inference import dynesty_checkpoint
+
+    nlive = 50
+    # A run killed after 60 iterations: its last checkpoint is mid-loop.
+    sampler = dynesty.NestedSampler(
+        lambda x: -0.5 * float(np.sum(np.asarray(x) ** 2)),
+        lambda u: 2.0 * _BOX * np.asarray(u) - _BOX,
+        2,
+        nlive=nlive,
+        rstate=np.random.default_rng(3),
+        bound="multi",
+        sample="rwalk",
+    )
+    loop = sampler.sample(maxiter=60, dlogz=0.0, add_live=False)
+    for _ in range(60):
+        next(loop)
+    killed = str(tmp_path / "killed.pkl")
+    dynesty_checkpoint.install_dynesty_checkpointing(sampler)
+    sampler.save(killed)
+
+    finished = str(tmp_path / "finished.pkl")
+    options = dict(nlive=nlive, dlogz=0.5, show_progress=False, seed=1)
+    with _trace_dynesty_loop() as exits:
+        result = ds.infer(
+            _target(),
+            sampler="dynesty",
+            resume_from_resolved=killed,
+            checkpoint_interval_seconds=1e-6,
+            checkpoint_file_resolved=finished,
+            **options,
+        )
+    final = exits[-1]
+    assert result["stop_reason"] == "convergence"
+    assert result["dlogz_final"] == float(final["delta_logz"])
+    assert result["dlogz_final"] < 0.5
+    # The counter carries the calls made before the checkpoint.
+    assert result["ncall"] == sampler.ncall + final["ncall"]
+    assert result["niter"] == result["dead_points"]["n_dead"] - nlive
+
+    # Resuming the checkpoint of the finished run samples nothing; the
+    # termination is read back from the saved state (the evidence there is
+    # dynesty's recomputed one, equal to the running one to rounding).
+    with pytest.warns(UserWarning, match="finished static run"):
+        again = ds.infer(
+            _target(), sampler="dynesty", resume_from_resolved=finished, **options
+        )
+    assert again["stop_reason"] == "convergence"
+    assert again["dlogz_final"] == pytest.approx(result["dlogz_final"], abs=1e-12)
+    assert (again["ncall"], again["niter"]) == (result["ncall"], result["niter"])
+
+
 def test_numpyro_recovers_the_analytic_posterior():
     pytest.importorskip("numpyro")
     result = ds.infer(
@@ -122,6 +265,10 @@ def test_numpyro_recovers_the_analytic_posterior():
     # NUTS is not an evidence estimator: run_numpyro returns logZ None by
     # contract, so the posterior moments are the whole assertion here.
     assert result["logZ"] is None and result["logZerr"] is None
+    assert all(
+        result[name] is None
+        for name in ("dlogz_final", "stop_reason", "ncall", "niter")
+    )
     _assert_standard_normal_posterior(result["samples"])
     assert result["numpyro_diagnostics"]["n_divergent"] == 0
     log_likelihood = np.asarray(result["log_likelihood"])
