@@ -134,7 +134,11 @@ magnitude-selection or external curves all enter through one function.
 `darksirens.selection.footprint` composes one coverage fraction per catalog row
 into the magnitude-selection curves, and `darksirens.catalog.field` evaluates the
 complementary field-weighted numerator. Raw map parsing and the construction of
-those inputs stay in survey packages.
+those inputs stay in survey packages. A field target that fixes `Om0`, `w0`,
+`wa`, `delta` and `sigma_kde` can build the catalog kernel once
+(`darksirens.catalog.field.build_pinned_field_kernel`) and pass it to the seam
+on every call as a jit argument (`pinned_kernel=`), as `ds.model` does with
+`kernel_pin="auto"`.
 
 ## Guards worth knowing
 

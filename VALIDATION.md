@@ -359,6 +359,46 @@ lowered StableHLO of the bound likelihood is byte-identical to the previous
 release's (spectral, incomplete and complete catalogs, blocks single, 32/1
 and 4096/6, each lowered in a fresh process).
 
+### Catalog kernel pin on the field seam
+
+`build_field_incomplete_catalog_prior_state_from_curves(..., pinned_kernel=)`
+serves the pin to a field (host-density) target, built once with
+`build_pinned_field_kernel` (see MIGRATION.md). `tests/test_field_kernel_pin.py`
+(33 tests) builds a synthetic field target the way the DESI P12.4 target is
+built (compact PE/selection catalog, per-row footprint fractions, Gaussian
+magnitude selection with `H0`, `M0hat`, `sigma_M` sampled, the P12.4
+calibration block fixed, host-density likelihood under one jit with the data
+and the pin as arguments) and checks the activation rule and the plan hook
+(fingerprint block, digests and the resume gate), the pinned target against
+the per-call quadrature at rtol 1e-12 on every diagnostics field (H0 from 20
+to 140, three selection points, single pass and padded blocks, infinities
+identical), the pinned state leaf by leaf (depth 0.3 and none), gradients,
+that the seam without a pin traces the previous seam's program equation for
+equation with bitwise values (no keyword and `pinned_kernel=None`), that the
+pinned program has no 24-node quadrature over every row (only the probe rows)
+and takes the pin's leaves as operands, the probe against pins built under
+six violated premises (`-inf` through the target's own compiled program), the
+refusals (a concrete pin under a traced catalog, a pin for another catalog
+shape, a pin built inside a trace), that no pin array is a constant of the
+compiled program, and no retrace or recompile. Each mutant fails the new
+tests:
+
+```text
+seam drops the pin (passes None on)        9 of 33 fail
+activation ignores sigma_kde               1 fail
+activation ignores kernel_pin="off"        9 fail
+plan hook never marks the pin active      13 fail
+no jit-argument guard                      1 fail
+no catalog-shape check                     1 fail
+shift sign flipped                        12 fail
+probe verdict not spent on log_Z           6 fail
+```
+
+With no pin, the lowered StableHLO of a field target (the consumer's own
+P12.4 target module and a field-style target, depth 0.3 and none, blocks
+single and 131072/32, likelihood and diagnostics) is byte-identical to the
+previous release's, each lowered in a fresh process.
+
 ## Permanent firewall
 
 The broad Phase-8 regression statically parses `src/darksirens/**/*.py` and

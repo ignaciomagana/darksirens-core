@@ -15,14 +15,33 @@ selection samples at fixed hyperparameters and cancels exactly between the
 ``N`` event evidences and ``-N log(mu)``.  Multi-catalog mixture fractions need
 an explicit full-survey global normalization and must not use this numerator as
 an absolute normalized density.
+
+Catalog kernel pin.  A field target (a host-density
+:class:`~darksirens.inference.target.InferenceTarget` that samples, e.g.,
+``H0`` and the magnitude-selection nuisances) builds this state on every
+proposal.  When ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed
+the catalog kernel inside it moves with the proposal only through the scalar
+``3 ln(H0 / H0_ref)``, exactly as on the ordinary path
+(:func:`darksirens.catalog.redshift.build_pinned_catalog_kernel`), while the
+completion curves still move with every proposal.  Such a target builds the
+pin once with :func:`build_pinned_field_kernel`, passes it to its jitted
+evaluation as an argument, and hands it to
+:func:`build_field_incomplete_catalog_prior_state_from_curves` as
+``pinned_kernel`` on every call.  :func:`field_kernel_pin_applies` is the
+activation rule and :func:`field_kernel_pin_plan` records the setting on the
+target's :class:`~darksirens.analysis.ParameterPlan`, where
+:func:`darksirens.inference.run_fingerprint.parameter_plan_semantic` reads it.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, NamedTuple
 
 import jax
+import numpy as np
 
+from darksirens.analysis import _KERNEL_PIN_BLOCKING, ParameterPlan, _kernel_pin_setting
 from darksirens.cosmology.parameters import CosmologyParameters
 
 from .completeness import CompletionCurves
@@ -31,7 +50,12 @@ from .models import (
     build_incomplete_catalog_prior_state_from_curves,
     eval_incomplete_catalog_prior_state,
 )
-from .redshift import CatalogKernelState
+from .redshift import (
+    KERNEL_PIN_PROBE_ROWS,
+    CatalogKernelState,
+    PinnedCatalogKernel,
+    build_pinned_catalog_kernel,
+)
 from .types import CatalogParameters, GalaxyCatalog
 
 
@@ -44,11 +68,115 @@ class FieldIncompleteCatalogPriorState(NamedTuple):
     log_row_mass: Any
 
 
+def field_kernel_pin_applies(sampled_labels, setting: str = "auto") -> bool:
+    """Whether a field (host-density) target may serve a catalog kernel pin.
+
+    The field state is assembled by the ordinary conditional constructor, so
+    the pin's premise is the ordinary one: the kernel's redshift dependence is
+    fixed up to ``(H0_ref / H0)^3`` when none of ``Om0``, ``w0``, ``wa``,
+    ``delta``, ``sigma_kde`` is sampled.  True under ``setting="auto"`` when
+    the target's sampled labels include none of them.  ``H0``, the
+    magnitude-selection nuisances (``M0hat``, ``sigma_M``), ``log10n0`` and
+    the population may be sampled: they enter the completion curves or the
+    population, never the kernel.  Like
+    :func:`darksirens.analysis.kernel_pin_applies` it reads labels, never
+    values; a target that moves a kernel parameter under another name is
+    caught by the per-call probe (the likelihood is ``-inf``), not here.
+    """
+
+    if _kernel_pin_setting(setting) != "auto":
+        return False
+    sampled = {str(label) for label in sampled_labels}
+    return not any(name in sampled for name in _KERNEL_PIN_BLOCKING)
+
+
+def field_kernel_pin_plan(plan: ParameterPlan, setting: str = "auto") -> ParameterPlan:
+    """``plan`` with a field target's kernel-pin setting recorded on it.
+
+    Sets ``kernel_pin`` to ``setting`` and ``kernel_pin_active`` to
+    :func:`field_kernel_pin_applies` of the plan's sampled labels, so a run
+    fingerprint built with
+    :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
+    records ``{"setting", "active"}`` for the target as it does for
+    ``ds.model``, and refuses to resume across them.  Apply it to the
+    target's final plan (:func:`~darksirens.inference.target.combine_parameter_plans`
+    returns neutral metadata) and serve a pin exactly when
+    ``kernel_pin_active`` is set.
+    """
+
+    if not isinstance(plan, ParameterPlan):
+        raise TypeError("plan must be a darksirens.analysis.ParameterPlan")
+    setting = _kernel_pin_setting(setting)
+    return dataclasses.replace(
+        plan,
+        kernel_pin=setting,
+        kernel_pin_active=field_kernel_pin_applies(plan.labels, setting),
+    )
+
+
+def _traced_leaves(tree) -> list[bool]:
+    return [isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(tree)]
+
+
+def build_pinned_field_kernel(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    *,
+    n_probe: int = KERNEL_PIN_PROBE_ROWS,
+) -> PinnedCatalogKernel:
+    """The catalog kernel pin of a field target, built once outside its jit.
+
+    ``catalog`` is the catalog view the target evaluates (for compact PE/
+    selection views, the compact catalog); ``cosmo`` and ``params`` carry the
+    target's fixed ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde`` and
+    ``z_depth`` (``cosmo.H0`` is replaced by ``KERNEL_PIN_H0_REF``).  This is
+    :func:`~darksirens.catalog.redshift.build_pinned_catalog_kernel`, the
+    ordinary path's builder: the per-proposal kernel builder run once under
+    one jit, with the same reference ``H0``, probe rows and tolerance.  Pass
+    the result to the jitted target as an argument and on to
+    :func:`build_field_incomplete_catalog_prior_state_from_curves`.
+    """
+
+    if any(_traced_leaves((cosmo, params, catalog))):
+        raise TypeError(
+            "build_pinned_field_kernel runs once, outside the target's trace, on the "
+            "concrete catalog; build the pin before jitting and pass it as an argument"
+        )
+    return build_pinned_catalog_kernel(cosmo, params, catalog, n_probe=n_probe)
+
+
+def _check_field_pin(pinned_kernel, catalog: GalaxyCatalog) -> None:
+    """Trace-time checks of a pin served to the field seam."""
+
+    if not isinstance(pinned_kernel, PinnedCatalogKernel):
+        raise TypeError(
+            "pinned_kernel must be the PinnedCatalogKernel returned by "
+            "build_pinned_field_kernel"
+        )
+    pin_shape = tuple(np.shape(pinned_kernel.log_kw_eff))
+    catalog_shape = tuple(np.shape(catalog.zgals))
+    if pin_shape != catalog_shape:
+        raise ValueError(
+            f"the catalog kernel pin was built for a catalog of shape {pin_shape}, but "
+            f"the field seam evaluates a catalog of shape {catalog_shape}; build it "
+            "from the catalog view the target evaluates"
+        )
+    if any(_traced_leaves(catalog)) and not all(_traced_leaves(pinned_kernel)):
+        raise ValueError(
+            "the catalog is traced but the catalog kernel pin is not: a pin closed "
+            "over by a jitted target becomes a constant of the compiled program; "
+            "pass it to the jitted evaluation as an argument"
+        )
+
+
 def build_field_incomplete_catalog_prior_state_from_curves(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
     catalog: GalaxyCatalog,
     curves: CompletionCurves,
+    *,
+    pinned_kernel: PinnedCatalogKernel | None = None,
 ) -> FieldIncompleteCatalogPriorState:
     """Build a field numerator state from accepted completion curves.
 
@@ -56,13 +184,25 @@ def build_field_incomplete_catalog_prior_state_from_curves(
     catalog kernel, finite-depth observed-count factor, and missing-host budget
     are identical.  Only evaluation differs: field mode restores the row host
     mass that conditional mode divides out.
+
+    ``pinned_kernel`` (from :func:`build_pinned_field_kernel`, valid only
+    while ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed) is
+    passed to the conditional constructor, which serves the kernel with the
+    scalar H0 shift instead of the per-proposal quadrature and rebuilds the
+    probe rows from the live proposal; a failed probe makes the row host mass
+    NaN and the host-density likelihood ``-inf``.  The pin must reach this
+    call as an argument of the target's jit: a traced catalog with a concrete
+    pin is refused.  Without a pin the state is built exactly as before.
     """
 
+    if pinned_kernel is not None:
+        _check_field_pin(pinned_kernel, catalog)
     conditional = build_incomplete_catalog_prior_state_from_curves(
         cosmo,
         params,
         catalog,
         curves,
+        pinned_kernel=pinned_kernel,
     )
     return FieldIncompleteCatalogPriorState(
         kernels=conditional.kernels,
@@ -111,6 +251,9 @@ def eval_field_incomplete_catalog_prior_state_vmap(z, row, state, catalog):
 __all__ = [
     "FieldIncompleteCatalogPriorState",
     "build_field_incomplete_catalog_prior_state_from_curves",
+    "build_pinned_field_kernel",
     "eval_field_incomplete_catalog_prior_state",
     "eval_field_incomplete_catalog_prior_state_vmap",
+    "field_kernel_pin_applies",
+    "field_kernel_pin_plan",
 ]

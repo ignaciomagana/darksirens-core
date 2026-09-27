@@ -236,6 +236,23 @@ curves, and `darksirens.catalog.field` evaluates the complementary field-weighte
 (unnormalized additive) host-density numerator. Raw map parsing, HEALPix
 degradation and the construction of the row fractions belong to survey packages.
 
+The field seam takes the catalog kernel pin too. A field target whose sampled
+labels include none of `Om0`, `w0`, `wa`, `delta`, `sigma_kde`
+(`field_kernel_pin_applies(labels, setting)`) builds the pin once with
+`darksirens.catalog.field.build_pinned_field_kernel`, the ordinary path's
+builder (`H0_ref = 67.74`, eight probe rows, tolerance 1e-9), passes it to its
+jitted evaluation as an argument, and hands it to
+`build_field_incomplete_catalog_prior_state_from_curves(..., pinned_kernel=pin)`
+on every call. The completion curves are still evaluated per call; each call
+re-derives the probe rows from the live parameters and a disagreement makes the
+host-density likelihood `-inf`. The seam refuses a pin built for another
+catalog shape, and a concrete pin under a traced catalog (a pin closed over by
+a jit would be a constant of the compiled program).
+`field_kernel_pin_plan(plan, setting)` records `kernel_pin` and
+`kernel_pin_active` on the target's plan, so `parameter_plan_semantic` puts
+them in the target's run fingerprint. Without a pin the seam's program is
+unchanged.
+
 There is no model-name discovery, entry-point registration or callback registry.
 
 ## Import contract
