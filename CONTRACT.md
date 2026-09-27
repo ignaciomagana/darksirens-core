@@ -140,7 +140,9 @@ parameter decoders or sampler adapters.
   applies, and `parameter_plan_semantic(plan)` puts both in a run fingerprint.
   The setting has no effect on spectral, bright-siren or complete-catalog
   analyses. Each call re-derives eight catalog rows from the live parameters
-  and returns `-inf` if they disagree with the pin by more than 1e-9.
+  and returns `-inf` if they disagree with the pin by more than 1e-9. A
+  `BoundAnalysis` refuses a pin its plan does not admit, or one built for
+  another catalog shape (for example after `dataclasses.replace`).
 - `model(..., completeness="complete", empty_policy="zero"|"volume")`: the
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other
