@@ -333,5 +333,9 @@ per-sample field log density within 1.2e-13 absolute. On CPU a call on T and
 S is 2.4 to 13 times faster (T, single pass: 15 ms against 134 ms), for 0.7
 to 1.9 s more at build; on the small consumer fixture at the P12.4 blocks the
 padded 131072-injection selection pass dominates and the time is unchanged. A
-pin is built from one catalog view and one distance table: a target that
-evaluates other data must rebuild it, or the probe returns `-inf`.
+pin belongs to the catalog view and the distance table it was built from: a
+target that evaluates other data must rebuild it. The probe returns `-inf`
+when the difference reaches its eight rows (a pin built under another
+premise, or a catalog or table rescaled as a whole), but a catalog of the
+same shape that differs only outside the probe rows keeps a stale pin that
+the probe need not detect, as on the ordinary path.

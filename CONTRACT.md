@@ -247,7 +247,10 @@ on every call. The completion curves are still evaluated per call; each call
 re-derives the probe rows from the live parameters and a disagreement makes the
 host-density likelihood `-inf`. The seam refuses a pin built for another
 catalog shape, and a concrete pin under a traced catalog (a pin closed over by
-a jit would be a constant of the compiled program).
+a jit would be a constant of the compiled program). Like the ordinary path's
+pin, it belongs to the catalog it was built from: a same-shape catalog swap
+keeps a stale pin that the eight-row check need not detect, so a new catalog
+view needs a new pin.
 `field_kernel_pin_plan(plan, setting)` records `kernel_pin` and
 `kernel_pin_active` on the target's plan, so `parameter_plan_semantic` puts
 them in the target's run fingerprint. Without a pin the seam's program is
