@@ -31,6 +31,9 @@ evaluation as an argument, and hands it to
 activation rule and :func:`field_kernel_pin_plan` records the setting on the
 target's :class:`~darksirens.analysis.ParameterPlan`, where
 :func:`darksirens.inference.run_fingerprint.parameter_plan_semantic` reads it.
+The pin carries the ordinary path's catalog digest;
+:func:`check_field_kernel_pin` compares it, on the host, with the catalog
+view and premise the target serves the pin with.
 """
 
 from __future__ import annotations
@@ -54,7 +57,9 @@ from .redshift import (
     KERNEL_PIN_PROBE_ROWS,
     CatalogKernelState,
     PinnedCatalogKernel,
+    _digest_reads_are_concrete,
     build_pinned_catalog_kernel,
+    check_pinned_catalog_kernel,
 )
 from .types import CatalogParameters, GalaxyCatalog
 
@@ -133,9 +138,13 @@ def build_pinned_field_kernel(
     ``z_depth`` (``cosmo.H0`` is replaced by ``KERNEL_PIN_H0_REF``).  This is
     :func:`~darksirens.catalog.redshift.build_pinned_catalog_kernel`, the
     ordinary path's builder: the per-proposal kernel builder run once under
-    one jit, with the same reference ``H0``, probe rows and tolerance.  Pass
+    one jit, with the same reference ``H0``, probe rows and tolerance, and
+    the same ``catalog_digest`` of ``catalog`` and this premise
+    (:func:`~darksirens.catalog.redshift.catalog_kernel_pin_digest`).  Pass
     the result to the jitted target as an argument and on to
-    :func:`build_field_incomplete_catalog_prior_state_from_curves`.
+    :func:`build_field_incomplete_catalog_prior_state_from_curves`, and check
+    it with :func:`check_field_kernel_pin` wherever the target attaches it to
+    the catalog view it evaluates.
     """
 
     if any(_traced_leaves((cosmo, params, catalog))):
@@ -146,8 +155,55 @@ def build_pinned_field_kernel(
     return build_pinned_catalog_kernel(cosmo, params, catalog, n_probe=n_probe)
 
 
-def _check_field_pin(pinned_kernel, catalog: GalaxyCatalog) -> None:
-    """Trace-time checks of a pin served to the field seam."""
+def check_field_kernel_pin(
+    pinned_kernel: PinnedCatalogKernel,
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+) -> str:
+    """Refuse a field pin that was not built from ``catalog`` under this premise.
+
+    Host side, outside the target's jit: call it where the target attaches
+    the pin to the catalog view it evaluates (its jit operands), and again
+    whenever either is replaced.  ``cosmo`` and ``params`` carry the target's
+    fixed ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde`` and ``z_depth``
+    (``cosmo.H0`` and ``params.n0`` are not read).  It recomputes the pin's
+    catalog digest (:func:`~darksirens.catalog.redshift.check_pinned_catalog_kernel`)
+    and raises ``ValueError`` naming both digests if they differ: the probe
+    re-derives only eight rows, so a catalog of the same shape that differs
+    elsewhere would otherwise keep a stale pin and give a finite, wrong
+    likelihood.  Inside the target's jit the catalog is traced and the seam
+    cannot read it; an eager call of the seam runs this check itself.
+    Returns the digest.
+    """
+
+    if not isinstance(pinned_kernel, PinnedCatalogKernel):
+        raise TypeError(
+            "pinned_kernel must be the PinnedCatalogKernel returned by "
+            "build_pinned_field_kernel"
+        )
+    try:
+        return check_pinned_catalog_kernel(pinned_kernel, cosmo, params, catalog)
+    except ValueError as err:
+        raise ValueError(
+            f"{err}; for a field target, rebuild it with build_pinned_field_kernel "
+            "from the catalog view the target evaluates"
+        ) from None
+
+
+def _check_field_pin(
+    pinned_kernel,
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+) -> None:
+    """Checks of a pin served to the field seam, at trace time or eagerly.
+
+    When everything the catalog digest reads is concrete (an eager call), the
+    digest is compared too (:func:`check_field_kernel_pin`); under the
+    target's jit the catalog is traced, and that comparison is the target's,
+    on the host, where it attaches the pin.
+    """
 
     if not isinstance(pinned_kernel, PinnedCatalogKernel):
         raise TypeError(
@@ -168,6 +224,10 @@ def _check_field_pin(pinned_kernel, catalog: GalaxyCatalog) -> None:
             "over by a jitted target becomes a constant of the compiled program; "
             "pass it to the jitted evaluation as an argument"
         )
+    if _digest_reads_are_concrete(cosmo, params, catalog) and not any(
+        _traced_leaves((pinned_kernel.H0_ref, pinned_kernel.probe_rows))
+    ):
+        check_field_kernel_pin(pinned_kernel, cosmo, params, catalog)
 
 
 def build_field_incomplete_catalog_prior_state_from_curves(
@@ -192,11 +252,14 @@ def build_field_incomplete_catalog_prior_state_from_curves(
     probe rows from the live proposal; a failed probe makes the row host mass
     NaN and the host-density likelihood ``-inf``.  The pin must reach this
     call as an argument of the target's jit: a traced catalog with a concrete
-    pin is refused.  Without a pin the state is built exactly as before.
+    pin is refused.  An eager call (nothing traced) also refuses a pin built
+    from another catalog or premise (:func:`check_field_kernel_pin`); under
+    the jit the target checks that on the host.  Without a pin the state is
+    built exactly as before.
     """
 
     if pinned_kernel is not None:
-        _check_field_pin(pinned_kernel, catalog)
+        _check_field_pin(pinned_kernel, cosmo, params, catalog)
     conditional = build_incomplete_catalog_prior_state_from_curves(
         cosmo,
         params,
@@ -252,6 +315,7 @@ __all__ = [
     "FieldIncompleteCatalogPriorState",
     "build_field_incomplete_catalog_prior_state_from_curves",
     "build_pinned_field_kernel",
+    "check_field_kernel_pin",
     "eval_field_incomplete_catalog_prior_state",
     "eval_field_incomplete_catalog_prior_state_vmap",
     "field_kernel_pin_applies",

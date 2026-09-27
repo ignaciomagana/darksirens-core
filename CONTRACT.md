@@ -248,9 +248,14 @@ re-derives the probe rows from the live parameters and a disagreement makes the
 host-density likelihood `-inf`. The seam refuses a pin built for another
 catalog shape, and a concrete pin under a traced catalog (a pin closed over by
 a jit would be a constant of the compiled program). Like the ordinary path's
-pin, it belongs to the catalog it was built from: a same-shape catalog swap
-keeps a stale pin that the eight-row check need not detect, so a new catalog
-view needs a new pin.
+pin, it belongs to the catalog it was built from, and the eight-row check need
+not notice a same-shape catalog that differs elsewhere, so it carries the same
+catalog digest. `check_field_kernel_pin(pin, cosmo, params, catalog)`
+recomputes it on the host and refuses a pin built from another catalog view or
+premise, naming both digests; a target calls it where it attaches the pin to
+the catalog view it evaluates, outside its jit (inside, the catalog is traced
+and the seam cannot read it), and an eager call of the seam runs it itself. A
+new catalog view needs a new pin.
 `field_kernel_pin_plan(plan, setting)` records `kernel_pin` and
 `kernel_pin_active` on the target's plan, so `parameter_plan_semantic` puts
 them in the target's run fingerprint. Without a pin the seam's program is

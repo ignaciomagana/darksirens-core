@@ -10,8 +10,9 @@ With the kernel's z-dependence fixed, the catalog kernel moves only through
 (:func:`build_pinned_field_kernel`) and pass it to its jit as an argument.
 These tests pin the activation rule and the plan hook, the values against
 the per-call quadrature (1e-12) on a synthetic field target, the unpinned
-seam (the previous program), the in-graph probe, and the pin as a jit
-argument (never a constant).
+seam (the previous program), the in-graph probe, the pin as a jit
+argument (never a constant), and the pin's catalog digest (a pin built from
+another catalog view or premise is refused on the host and by an eager seam).
 """
 
 from __future__ import annotations
@@ -32,13 +33,19 @@ from darksirens.catalog.field import (
     FieldIncompleteCatalogPriorState,
     build_field_incomplete_catalog_prior_state_from_curves,
     build_pinned_field_kernel,
+    check_field_kernel_pin,
     eval_field_incomplete_catalog_prior_state_vmap,
     field_kernel_pin_applies,
     field_kernel_pin_plan,
 )
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.models import build_incomplete_catalog_prior_state_from_curves
-from darksirens.catalog.redshift import KERNEL_PIN_H0_REF, KERNEL_PIN_PROBE_ROWS
+from darksirens.catalog.redshift import (
+    KERNEL_PIN_H0_REF,
+    KERNEL_PIN_PROBE_ROWS,
+    build_pinned_catalog_kernel,
+    catalog_kernel_pin_digest,
+)
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology import distances as _cosmo
 from darksirens.cosmology.parameters import CosmologyParameters
@@ -638,3 +645,109 @@ def test_pinned_field_target_neither_retraces_nor_recompiles():
             jax.block_until_ready(target(theta))
     assert later.get(TRACE_EVENT, 0) == 0, later
     assert later.get(COMPILE_EVENT, 0) == 0, later
+
+
+# ---------------------------------------------------------------------------
+# The catalog digest: a pin belongs to the catalog view and premise it was built from
+
+
+def _changed_outside_the_probe_rows(catalog, pin):
+    """``catalog`` with one galaxy moved by -0.01 in redshift on an occupied
+    row the probe does not rebuild (same shape, same probe rows)."""
+    probe = set(np.asarray(pin.probe_rows).tolist())
+    ngals = np.asarray(catalog.ngals)
+    row = next(r for r in range(len(ngals)) if ngals[r] > 1 and r not in probe)
+    zgals = np.array(catalog.zgals)
+    zgals[row, 0] -= 0.01
+    return catalog._replace(zgals=jnp.asarray(zgals)), row
+
+
+def _curves(cosmo, catalog, params=PARAMS):
+    selection = GaussianMagnitudeSelection(M_LIM, *SELECTIONS[0], K_CORR)
+    return selection_completion_curves_with_row_fraction(
+        cosmo, params, catalog, selection, INPUTS["fraction"]
+    )
+
+
+def test_the_field_pin_carries_the_ordinary_catalog_digest():
+    pinned, _ = _pair()
+    pin, catalog = pinned.operands.pin, INPUTS["catalog"]
+    reference = _reference_cosmology()
+    digest = pin.catalog_digest
+    assert isinstance(digest, str) and len(digest) == 32
+    assert build_pinned_catalog_kernel(reference, PARAMS, catalog).catalog_digest == digest
+    assert catalog_kernel_pin_digest(
+        reference, PARAMS, catalog, H0_ref=pin.H0_ref, probe_rows=pin.probe_rows
+    ) == digest
+    # The live H0 and n0 are not read: the check accepts any of them.
+    for cosmo, params in (
+        (_reference_cosmology(H0=90.0), PARAMS),
+        (reference, PARAMS._replace(n0=1.0)),
+    ):
+        assert check_field_kernel_pin(pin, cosmo, params, catalog) == digest
+    # A copy of the catalog view in new arrays is the same catalog.
+    copy = GalaxyCatalog(*(None if x is None else jnp.asarray(np.array(x)) for x in catalog))
+    assert check_field_kernel_pin(pin, reference, PARAMS, copy) == digest
+    cosmo = _reference_cosmology(H0=90.0)
+    eager = build_field_incomplete_catalog_prior_state_from_curves(
+        cosmo, PARAMS, copy, _curves(cosmo, copy), pinned_kernel=pin
+    )
+    assert np.all(np.isfinite(np.asarray(eager.log_row_mass)))
+
+
+def test_the_field_seam_refuses_a_same_shape_catalog_changed_outside_the_probe_rows():
+    pinned, _ = _pair()
+    pin, catalog = pinned.operands.pin, INPUTS["catalog"]
+    changed, row = _changed_outside_the_probe_rows(catalog, pin)
+    assert changed.zgals.shape == catalog.zgals.shape
+    fresh = build_pinned_field_kernel(_reference_cosmology(), PARAMS, changed)
+    assert np.array_equal(np.asarray(fresh.probe_rows), np.asarray(pin.probe_rows))
+    assert row not in set(np.asarray(pin.probe_rows).tolist())
+    assert fresh.catalog_digest != pin.catalog_digest
+    # Why the check: through the target's own compiled program, the stale pin
+    # passes the probe and gives a finite value that is not the right one.
+    stale_ops = pinned.operands._replace(catalog=changed)
+    right_ops = stale_ops._replace(pin=fresh)
+    off = False
+    for theta in _thetas():
+        stale, right = float(pinned(theta, stale_ops)), float(pinned(theta, right_ops))
+        assert np.isfinite(stale) == np.isfinite(right), (theta, stale, right)
+        off |= bool(np.isfinite(right) and abs(stale - right) > 1e-9 * abs(right))
+    assert off
+    # On the host, where the target attaches the pin to its catalog view.
+    with pytest.raises(ValueError, match="another catalog") as refused:
+        check_field_kernel_pin(pin, _reference_cosmology(), PARAMS, changed)
+    message = str(refused.value)
+    assert pin.catalog_digest in message and fresh.catalog_digest in message
+    assert "build_pinned_field_kernel" in message
+    assert check_field_kernel_pin(fresh, _reference_cosmology(), PARAMS, changed)
+    # And in an eager call of the seam.
+    cosmo = _reference_cosmology(H0=90.0)
+    with pytest.raises(ValueError, match="another catalog"):
+        build_field_incomplete_catalog_prior_state_from_curves(
+            cosmo, PARAMS, changed, _curves(cosmo, changed), pinned_kernel=pin
+        )
+
+
+@pytest.mark.parametrize(
+    "premise",
+    [("Om0", 0.35), ("w0", -0.9), ("wa", 0.2), ("delta", 0.5), ("sigma_kde", 0.02),
+     ("z_depth", 0.25), ("z_depth", None)],
+)
+def test_the_field_seam_refuses_a_pin_built_under_another_premise(premise):
+    pinned, _ = _pair()
+    pin, catalog = pinned.operands.pin, INPUTS["catalog"]
+    name, value = premise
+    cosmo, params = _reference_cosmology(H0=90.0), PARAMS
+    if name in cosmo._fields:
+        cosmo = cosmo._replace(**{name: value})
+    else:
+        params = params._replace(**{name: value})
+    with pytest.raises(ValueError, match="under another premise"):
+        check_field_kernel_pin(pin, cosmo, params, catalog)
+    with pytest.raises(ValueError, match="under another premise"):
+        build_field_incomplete_catalog_prior_state_from_curves(
+            cosmo, params, catalog, _curves(cosmo, catalog, params), pinned_kernel=pin
+        )
+    with pytest.raises(TypeError, match="PinnedCatalogKernel"):
+        check_field_kernel_pin(tuple(pin), cosmo, params, catalog)

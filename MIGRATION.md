@@ -338,4 +338,15 @@ target that evaluates other data must rebuild it. The probe returns `-inf`
 when the difference reaches its eight rows (a pin built under another
 premise, or a catalog or table rescaled as a whole), but a catalog of the
 same shape that differs only outside the probe rows keeps a stale pin that
-the probe need not detect, as on the ordinary path.
+the probe need not detect, as on the ordinary path. The field pin therefore
+carries the ordinary path's `catalog_digest` (the same builder, the same
+digest), and `darksirens.catalog.field.check_field_kernel_pin(pin, cosmo,
+params, catalog)` recomputes it on the host from the catalog view and fixed
+premise the target serves the pin with, and refuses a mismatch with a
+`ValueError` naming both digests. Inside the target's jit the catalog is
+traced and cannot be hashed, so a target calls the check where it attaches
+the pin to its catalog view (its jit operands), outside the jit, and again
+whenever it replaces either; an eager call of the seam (nothing traced) runs
+the check itself. The digest is not a jit operand and splits no jit cache: a
+target's compiled program is unchanged and still serves a rebuilt pin without
+retracing.
