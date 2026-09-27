@@ -312,19 +312,20 @@ pins built under six violated premises, the fingerprint and resume gate, and
 the bound jit's no-retrace, data-as-argument and pickling properties, and
 that the pinned program no longer contains the 24-node quadrature over every
 catalog row on either side (only the probe rows), and that a binding refuses a
-pin its plan does not admit. Each mutant fails the new tests:
+pin its plan does not admit. Each mutant fails the new tests (counts against
+the 47 tests):
 
 ```text
-shift sign flipped                        16 of 44 fail
+shift sign flipped                        16 of 47 fail
 row offset not shifted                     2 fail (occupied-row offsets)
 probe tolerance 1e30                       6 fail (the six violated premises)
 probe verdict not spent on log_Z           6 fail
 activation ignores sigma_kde               3 fail
-activation ignores kernel_pin="off"       11 fail
-binding does not serve the pin             6 fail
+activation ignores kernel_pin="off"       14 fail
+binding does not serve the pin             8 fail
 fingerprint without the kernel_pin block   2 fail
 pin built at H0 = 70                       2 fail
-selection side not pinned                  2 fail (the other 44 pass)
+selection side not pinned                  2 fail (the other 45 pass)
 PE side not pinned                         2 fail
 probe rebuilds every row                   2 fail
 binding keeps a pin under another plan     1 fail
@@ -332,8 +333,8 @@ binding keeps a pin under another plan     1 fail
 
 With `kernel_pin="off"`, and for every plan the pin does not apply to, the
 lowered StableHLO of the bound likelihood is byte-identical to the previous
-release's (spectral, incomplete and complete catalogs, blocks single and
-32/1, each lowered in a fresh process).
+release's (spectral, incomplete and complete catalogs, blocks single, 32/1
+and 4096/6, each lowered in a fresh process).
 
 ## Permanent firewall
 
