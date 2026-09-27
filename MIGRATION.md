@@ -236,6 +236,33 @@ reference, each call rebuilds eight catalog rows from the live parameters and
 turns the likelihood into `-inf` if they disagree with the pin by more than
 1e-9 (they agree to about 1e-14).
 
+The per-call probe re-derives eight rows, so a pin served with another
+catalog of the same shape that differs only elsewhere gives a finite, wrong
+likelihood (in `tests/test_kernel_pin.py`, with one galaxy moved by -0.01 in
+redshift on a row the probe does not rebuild, the stale pin gives a value
+1.5e-5 from the correct one at H0 = 30). The pin therefore carries
+`catalog_digest`, a blake2b digest of the catalog arrays the kernel
+reads (`zgals`, `dzgals`, `wgals`, `ngals`: dtype, shape and every byte,
+padding included), the fixed `Om0`, `w0`, `wa`, `delta`, `sigma_kde` and
+`z_depth`, the pin's `H0_ref` and probe rows, and the kernel's static
+settings (redshift grid, quadrature nodes, width floor, padding sentinel,
+distance-table grid, interpolation switches; not the distance table's
+values). `build_pinned_catalog_kernel` computes it on the host
+(`catalog_kernel_pin_digest`), and `BoundAnalysis` recomputes it from its own
+catalog and plan with `check_pinned_catalog_kernel` whenever it is made,
+replaced or unpickled, and refuses a mismatch with a `ValueError` naming both
+digests. `BoundAnalysis.kernel_pin_digest` exposes it; the plan does not carry
+the pin, so `parameter_plan_semantic` does not record it. The digest is
+pytree metadata, not a leaf, and pins that differ only in it have equal tree
+structures, so a compiled program serves a pin built from other data without
+retracing (and a pin returned by a jitted function keeps the digest that
+function was first traced with: build pins outside a jit). The jit operands,
+the lowered program and every pinned value are unchanged (on fixture T,
+three pinned plans, single pass and 4096/6: 66 values, 24 gradients, the 42
+pin arrays and the 6 lowered programs bit for bit). It costs 7 ms on T and
+0.34 s on a 196,608 x 70 catalog on CPU, twice per `bind_analysis` (at the
+build and at the check).
+
 The pinned likelihood is not bit-identical to the per-call quadrature: the two
 round differently. On the harness fixtures T and S (plans `dark_H0`,
 `dark_pop`, `dark_joint_cosmo_pop`, single pass and blocked) the total log

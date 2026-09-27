@@ -18,11 +18,15 @@ moves by ``-3 ln(H0 / H0_ref)`` and ``log_kw`` by ``+3 ln(H0 / H0_ref)``.
 :func:`build_pinned_catalog_kernel` evaluates the state once at
 ``KERNEL_PIN_H0_REF`` (bind time) and :func:`pinned_catalog_kernel_state`
 serves it per proposal with that shift, as the frozen legacy H0 kernel pin
-does (legacy ``redshift/catalog.py:990-1360``).
+does (legacy ``redshift/catalog.py:990-1360``).  The pin carries a digest of
+the catalog and premise it was built from (:func:`catalog_kernel_pin_digest`),
+which :func:`check_pinned_catalog_kernel` compares, on the host, with the
+catalog it is about to be served with.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, NamedTuple
 
 import jax
@@ -32,6 +36,8 @@ from jax import lax, vmap
 from jax.scipy.special import log_ndtr, logsumexp, ndtr, ndtri
 from jax.scipy.stats import norm
 
+from darksirens.cosmology import _grid as _redshift_grid
+from darksirens.cosmology import distances as _distances
 from darksirens.cosmology._grid import log_interp_zgrid, zgrid
 from darksirens.cosmology.distances import dV_of_z, threads_distance_table
 from darksirens.cosmology.parameters import H0_FID, CosmologyParameters
@@ -317,6 +323,13 @@ KERNEL_PIN_PROBE_ROWS: int = 8
 #: [20, 140]; the smallest violation legacy measured is 3.9e-2.
 KERNEL_PIN_TOL: float = 1.0e-9
 
+#: Version tag hashed first into every pin's ``catalog_digest``.
+KERNEL_PIN_DIGEST_SCHEME: str = "darksirens.catalog-kernel-pin.digest/1"
+
+# A device array is read to the host in row blocks of about this many bytes, so
+# the digest keeps no host copy of it alive (see ``_host_blocks``).
+_DIGEST_BLOCK_BYTES: int = 1 << 26
+
 
 class PinnedCatalogKernel(NamedTuple):
     """The catalog kernel state at ``H0_ref``, for a fixed kernel z-dependence.
@@ -334,6 +347,18 @@ class PinnedCatalogKernel(NamedTuple):
     the leaves the likelihood reads are kept.  ``probe_rows`` are occupied
     rows the per-call state rebuilds from the live proposal to check the
     premise (legacy ``PinnedKernelQuadrature``, ``redshift/catalog.py:1013-1076``).
+
+    ``catalog_digest`` is :func:`catalog_kernel_pin_digest` of the catalog
+    and premise the pin was built from, computed on the host by
+    :func:`build_pinned_catalog_kernel`.  It is pytree metadata, not a leaf,
+    so it never enters a trace, and it does not enter the tree structure's
+    equality either: pins that differ only in their digest have the same
+    structure, and a compiled function serves a pin built from other data
+    without retracing, as it does any other data operand.  JAX never compares
+    digests; :func:`check_pinned_catalog_kernel` does, on the host, against
+    the catalog the pin is served with.  The per-call probe does not read it.
+    A pin returned by a jitted function carries the digest of the pin that
+    function was first traced with, so build pins outside any jit.
     """
 
     H0_ref: Any  # 0-d, the H0 the pin was evaluated at
@@ -343,6 +368,56 @@ class PinnedCatalogKernel(NamedTuple):
     row_empty: Any  # (N_rows,) theta-invariant
     log_depth_mass: Any  # (N_rows,) or 0-d, H0-invariant
     probe_rows: Any  # (P,) int32 occupied rows
+    catalog_digest: str  # static: the catalog and premise it was built from
+
+
+_PIN_LEAVES = PinnedCatalogKernel._fields[:-1]
+
+
+class _PinDigest:
+    """A pin's ``catalog_digest`` as tree-structure metadata.
+
+    Equal to, and hashed like, every other ``_PinDigest``, so the digest
+    never splits a jit cache (see :class:`PinnedCatalogKernel`).
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, _PinDigest)
+
+    def __hash__(self):
+        return hash(_PinDigest)
+
+    def __repr__(self):
+        return f"catalog_digest={self.value!r}"
+
+
+def _flatten_pin_with_keys(pin):
+    children = tuple(
+        (jax.tree_util.GetAttrKey(name), getattr(pin, name)) for name in _PIN_LEAVES
+    )
+    return children, _PinDigest(pin.catalog_digest)
+
+
+def _flatten_pin(pin):
+    return tuple(getattr(pin, name) for name in _PIN_LEAVES), _PinDigest(
+        pin.catalog_digest
+    )
+
+
+def _unflatten_pin(digest, children):
+    return PinnedCatalogKernel(*children, digest.value)
+
+
+# The digest rides in the treedef (static), the seven arrays are the leaves,
+# in the order a NamedTuple would flatten them.
+jax.tree_util.register_pytree_with_keys(
+    PinnedCatalogKernel, _flatten_pin_with_keys, _unflatten_pin, _flatten_pin
+)
 
 
 def _spread_probe_rows(ngals, n_probe: int) -> np.ndarray:
@@ -366,6 +441,181 @@ def _spread_probe_rows(ngals, n_probe: int) -> np.ndarray:
     return occupied[pick].astype(np.int32)
 
 
+def _host_resident(value) -> bool:
+    """Whether ``value`` is a host (numpy or CPU) array, read without a copy."""
+
+    return not isinstance(value, jax.Array) or all(
+        device.platform == "cpu" for device in value.devices()
+    )
+
+
+def _host_blocks(value):
+    """``value``'s bytes on the host, in C order, as one or more arrays.
+
+    ``np.asarray`` of a whole device array keeps its host copy cached on the
+    array, so an array that is not host resident is read in row blocks of at
+    most about ``_DIGEST_BLOCK_BYTES``, each a fresh slice.  The concatenated
+    bytes are the same either way: the digest does not depend on where the
+    array lives.
+    """
+
+    if _host_resident(value) or value.ndim == 0 or value.shape[0] == 0:
+        yield np.ascontiguousarray(np.asarray(value))
+        return
+    n_rows = int(value.shape[0])
+    row_bytes = max(1, int(value.nbytes) // n_rows)
+    step = max(1, int(_DIGEST_BLOCK_BYTES) // row_bytes)
+    for start in range(0, n_rows, step):
+        block = lax.slice_in_dim(value, start, min(start + step, n_rows))
+        yield np.ascontiguousarray(np.asarray(block))
+
+
+def _digest_array(h, name: str, value) -> None:
+    array_like = value if hasattr(value, "dtype") else np.asarray(value)
+    dtype = np.dtype(array_like.dtype)
+    shape = tuple(int(n) for n in np.shape(array_like))
+    h.update(f"{name}:{dtype.str}:{shape};".encode())
+    for block in _host_blocks(array_like):
+        h.update(block)
+
+
+def _digest_value(h, name: str, value) -> None:
+    """A premise or setting value: ``None``, or float64 at full precision."""
+
+    if value is None:
+        h.update(f"{name}:None;".encode())
+        return
+    _digest_array(h, name, np.asarray(value, dtype=np.float64).reshape(-1))
+
+
+_DIGEST_CATALOG_FIELDS = ("zgals", "dzgals", "wgals", "ngals")
+_DIGEST_COSMOLOGY_FIELDS = ("Om0", "w0", "wa")
+_DIGEST_PARAMETER_FIELDS = ("delta", "sigma_kde", "z_depth")
+
+
+def _digest_reads(cosmo, params, catalog) -> tuple:
+    """The catalog arrays and premise values the digest reads (not H0, n0)."""
+
+    return (
+        tuple(getattr(catalog, name) for name in _DIGEST_CATALOG_FIELDS),
+        tuple(getattr(cosmo, name) for name in _DIGEST_COSMOLOGY_FIELDS),
+        tuple(getattr(params, name) for name in _DIGEST_PARAMETER_FIELDS),
+    )
+
+
+def _digest_reads_are_concrete(cosmo, params, catalog) -> bool:
+    """Whether no catalog array or premise value the digest reads is traced."""
+
+    return not any(
+        isinstance(leaf, jax.core.Tracer)
+        for leaf in jax.tree_util.tree_leaves(_digest_reads(cosmo, params, catalog))
+    )
+
+
+def catalog_kernel_pin_digest(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    *,
+    H0_ref,
+    probe_rows,
+) -> str:
+    """Host-side digest of the catalog and premise a kernel pin is built from.
+
+    A blake2b digest (32 hex characters) of, in order: a version tag
+    (``KERNEL_PIN_DIGEST_SCHEME``); the catalog arrays the kernel reads,
+    ``zgals``, ``dzgals``, ``wgals`` and ``ngals`` (the row counts, and so the
+    empty rows), each by dtype, shape and every byte, padding included; the
+    premise, ``Om0``, ``w0``, ``wa`` from ``cosmo`` and ``delta``,
+    ``sigma_kde``, ``z_depth`` from ``params`` (float64 at full precision,
+    ``z_depth`` possibly ``None``; ``cosmo.H0`` and ``params.n0`` do not enter
+    the kernel); the pin's ``H0_ref`` and ``probe_rows``; and the builder's
+    static settings (the kernel redshift grid, the quadrature node count, the
+    width floor, the padding sentinel, the distance-table redshift grid and
+    the interpolation switches).  The distance table's values are not hashed.
+
+    It reads concrete arrays on the host, once, and never inside a trace; a
+    traced value among those it reads raises ``TypeError`` (a traced
+    ``cosmo.H0`` does not).  On a 196,608 x 70 catalog it hashes
+    about 331 MB (0.34 s on CPU).
+    """
+
+    traced = [
+        isinstance(leaf, jax.core.Tracer)
+        for leaf in jax.tree_util.tree_leaves((H0_ref, probe_rows))
+    ]
+    if any(traced) or not _digest_reads_are_concrete(cosmo, params, catalog):
+        raise TypeError(
+            "catalog_kernel_pin_digest reads concrete arrays on the host: compute it "
+            "(build or check the kernel pin) outside any jit or trace"
+        )
+    h = hashlib.blake2b(digest_size=16)
+    h.update(KERNEL_PIN_DIGEST_SCHEME.encode())
+    arrays, cosmology, parameters = _digest_reads(cosmo, params, catalog)
+    for name, value in zip(_DIGEST_CATALOG_FIELDS, arrays):
+        _digest_array(h, f"catalog.{name}", value)
+    for name, value in zip(_DIGEST_COSMOLOGY_FIELDS, cosmology):
+        _digest_value(h, f"cosmology.{name}", value)
+    for name, value in zip(_DIGEST_PARAMETER_FIELDS, parameters):
+        _digest_value(h, f"catalog_parameters.{name}", value)
+    _digest_value(h, "pin.H0_ref", H0_ref)
+    _digest_array(
+        h, "pin.probe_rows", np.asarray(probe_rows, dtype=np.int64).reshape(-1)
+    )
+    _digest_array(h, "settings.zgrid", zgrid)
+    _digest_value(h, "settings.gl_nodes", _GL_NODES)
+    _digest_value(h, "settings.sigma_eff_floor", SIGMA_EFF_FLOOR)
+    _digest_value(h, "settings.sentinel_cut", _KERNEL_SENTINEL_CUT)
+    _digest_value(h, "settings.distance_table_zmax", _distances.zMax)
+    _digest_value(h, "settings.distance_table_nodes", _distances._ZGRID_NODES)
+    _digest_value(
+        h, "settings.interp_searchsorted", _redshift_grid._USE_SEARCHSORTED
+    )
+    _digest_value(h, "settings.interp_scan", _distances._USE_INTERP_SCAN)
+    return h.hexdigest()
+
+
+def check_pinned_catalog_kernel(
+    pinned: PinnedCatalogKernel,
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+) -> str:
+    """Refuse a pin that was not built from ``catalog`` under this premise.
+
+    Recomputes :func:`catalog_kernel_pin_digest` of ``catalog`` with the
+    premise in ``cosmo`` and ``params`` (the fixed values the pin will be
+    served under; ``cosmo.H0`` is not read) and the pin's own ``H0_ref`` and
+    ``probe_rows``, and raises ``ValueError`` naming both digests if it is not
+    ``pinned.catalog_digest``.  The per-call probe re-derives only a few rows,
+    so a catalog of the same shape that differs elsewhere would otherwise keep
+    a stale pin and give a finite, wrong likelihood.  Call it on the host,
+    where the pin is attached to the catalog it will be served with.
+    Returns the digest.
+    """
+
+    if not isinstance(pinned, PinnedCatalogKernel):
+        raise TypeError(
+            "pinned must be the PinnedCatalogKernel built by "
+            "build_pinned_catalog_kernel"
+        )
+    digest = catalog_kernel_pin_digest(
+        cosmo,
+        params,
+        catalog,
+        H0_ref=pinned.H0_ref,
+        probe_rows=pinned.probe_rows,
+    )
+    if digest != pinned.catalog_digest:
+        raise ValueError(
+            "the catalog kernel pin was built from another catalog or under another "
+            f"premise: its catalog digest is {pinned.catalog_digest!r}, but the "
+            f"catalog and premise it is served with have digest {digest!r}; build "
+            "a new pin from this catalog"
+        )
+    return digest
+
+
 def build_pinned_catalog_kernel(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -380,7 +630,8 @@ def build_pinned_catalog_kernel(
     by the reference.  The state is :func:`build_catalog_kernel_state`
     itself, the per-proposal builder, run once under one jit with the catalog
     and the distance table as arguments.  Call it outside any trace, with
-    concrete catalog arrays.
+    concrete catalog arrays: the pin's ``catalog_digest``
+    (:func:`catalog_kernel_pin_digest`) is computed here, on the host.
     """
 
     ref = cosmo._replace(
@@ -391,6 +642,10 @@ def build_pinned_catalog_kernel(
     def _state(catalog, distance_table=None):
         return build_catalog_kernel_state(ref, params, catalog)
 
+    probe_rows = _spread_probe_rows(catalog.ngals, n_probe)
+    catalog_digest = catalog_kernel_pin_digest(
+        ref, params, catalog, H0_ref=KERNEL_PIN_H0_REF, probe_rows=probe_rows
+    )
     state = _state(catalog)
     return PinnedCatalogKernel(
         H0_ref=ref.H0,
@@ -399,7 +654,8 @@ def build_pinned_catalog_kernel(
         inv_sig_eff=state.inv_sig_eff,
         row_empty=state.row_empty,
         log_depth_mass=state.log_depth_mass,
-        probe_rows=jnp.asarray(_spread_probe_rows(catalog.ngals, n_probe)),
+        probe_rows=jnp.asarray(probe_rows),
+        catalog_digest=catalog_digest,
     )
 
 
@@ -566,6 +822,7 @@ def log_catalog_prior_vmap(
 
 __all__ = [
     "CatalogKernelState",
+    "KERNEL_PIN_DIGEST_SCHEME",
     "KERNEL_PIN_H0_REF",
     "KERNEL_PIN_PROBE_ROWS",
     "KERNEL_PIN_TOL",
@@ -573,6 +830,8 @@ __all__ = [
     "SIGMA_EFF_FLOOR",
     "build_catalog_kernel_state",
     "build_pinned_catalog_kernel",
+    "catalog_kernel_pin_digest",
+    "check_pinned_catalog_kernel",
     "eval_log_catalog_prior_state",
     "eval_log_catalog_prior_state_vmap",
     "log_catalog_prior",

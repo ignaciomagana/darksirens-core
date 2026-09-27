@@ -7,8 +7,10 @@ evaluates the per-galaxy quadrature once at bind time, as the frozen legacy H0
 kernel pin does (legacy ``likelihood/factory.py:1017-1135``,
 ``redshift/catalog.py:990-1360``). These tests pin the activation rule, the
 values against the per-call quadrature (1e-12), the opt-out (the unpinned
-program, unchanged), the in-graph probe, the fingerprint and the O1 properties
-of the bound jit (no retrace, data as arguments, pickling).
+program, unchanged), the in-graph probe, the fingerprint, the O1 properties
+of the bound jit (no retrace, data as arguments, pickling), and the pin's
+catalog digest (a binding refuses a pin built from another catalog or
+premise).
 """
 
 from __future__ import annotations
@@ -28,10 +30,14 @@ from darksirens.catalog.models import (
     build_incomplete_catalog_prior_state,
     eval_incomplete_catalog_prior_state_vmap,
 )
+from darksirens.catalog import redshift as _redshift
 from darksirens.catalog.redshift import (
     KERNEL_PIN_H0_REF,
+    PinnedCatalogKernel,
     build_catalog_kernel_state,
     build_pinned_catalog_kernel,
+    catalog_kernel_pin_digest,
+    check_pinned_catalog_kernel,
     eval_log_catalog_prior_state_vmap,
     pinned_catalog_kernel_state,
 )
@@ -619,3 +625,222 @@ def test_pinned_binding_pickles():
     assert clone.kernel_pin is not None
     theta = _theta(auto, 100.0)
     assert _same_bits(clone(theta), bound(theta))
+
+
+# ---------------------------------------------------------------------------
+# The catalog digest: a pin belongs to the catalog and premise it was built from
+
+
+def _wide_galaxies(z_depth=0.30):
+    """48 pixels (nside 2), each with two to five galaxies.
+
+    The binding's compact catalog then has 19 occupied rows, more than the
+    eight the probe rebuilds, so a row can change where the probe does not
+    look.
+    """
+    npix, n_max = 48, 5
+    rng = np.random.default_rng(20260927)
+    ngals = rng.integers(2, n_max + 1, npix).astype(np.int32)
+    zgals = np.zeros((npix, n_max))
+    dzgals = np.ones((npix, n_max))
+    wgals = np.zeros((npix, n_max))
+    for row, n in enumerate(ngals):
+        zgals[row, :n] = np.sort(rng.uniform(0.04, 0.24, n))
+        dzgals[row, :n] = rng.uniform(0.001, 0.03, n)
+        wgals[row, :n] = rng.uniform(0.5, 2.0, n)
+    return CatalogStore(
+        path="wide-catalog-fixture.h5",
+        nside=2,
+        z_depth=z_depth,
+        catalog=GalaxyCatalog(
+            apix=np.pi / 12.0, zgals=zgals, dzgals=dzgals, wgals=wgals, ngals=ngals,
+            unique_pixels=None,
+        ),
+    )
+
+
+_WIDE = {}
+
+
+def _wide_pair():
+    """(pinned binding, same-shape binding of a catalog changed outside the probe rows).
+
+    One galaxy's redshift moves by -0.01 in an occupied compact row that is not
+    a probe row; nothing else changes, so the two compact catalogs have the
+    same shape.
+    """
+    if not _WIDE:
+        store = _wide_galaxies()
+        pinned = _bind(model(catalog=store, fixed_survey=SURVEY, **H0_ONLY))
+        probe = set(np.asarray(pinned.kernel_pin.probe_rows).tolist())
+        ngals = np.asarray(pinned.catalog.ngals)
+        row = next(r for r in range(len(ngals)) if ngals[r] > 0 and r not in probe)
+        pixel = int(np.asarray(pinned.catalog.unique_pixels)[row])
+        zgals = np.array(store.catalog.zgals)
+        zgals[pixel, 0] -= 0.01
+        changed = dataclasses.replace(
+            store, catalog=store.catalog._replace(zgals=zgals)
+        )
+        other = _bind(model(catalog=changed, fixed_survey=SURVEY, **H0_ONLY))
+        assert other.catalog.zgals.shape == pinned.catalog.zgals.shape
+        assert np.array_equal(
+            np.asarray(other.kernel_pin.probe_rows), np.asarray(pinned.kernel_pin.probe_rows)
+        )
+        _WIDE.update(pinned=pinned, other=other, row=row)
+    return _WIDE["pinned"], _WIDE["other"], _WIDE["row"]
+
+
+def test_the_pin_carries_the_digest_of_its_catalog_and_premise():
+    auto, pinned, unpinned = _bound_pair("H0")
+    pin = pinned.kernel_pin
+    digest = pin.catalog_digest
+    assert isinstance(digest, str) and len(digest) == 32 and int(digest, 16) >= 0
+    # The digest the binding recomputes from its own catalog and plan.
+    cosmo, _, params, _ = _decode_theta(auto, jnp.asarray([90.0]), z_depth=pinned.z_depth)
+    assert catalog_kernel_pin_digest(
+        cosmo, params, pinned.catalog, H0_ref=pin.H0_ref, probe_rows=pin.probe_rows
+    ) == digest
+    assert check_pinned_catalog_kernel(pin, cosmo, params, pinned.catalog) == digest
+    # Recorded in the binding (the plan does not carry the pin), identical on
+    # a second bind of the same analysis, absent without a pin.
+    assert pinned.kernel_pin_digest == digest
+    assert _bind(auto).kernel_pin_digest == digest
+    assert unpinned.kernel_pin_digest is None
+    assert "digest" not in parameter_plan_semantic(auto.parameters)["kernel_pin"]
+    # Metadata, not a leaf: the jit operands are the seven arrays.
+    leaves = jax.tree_util.tree_leaves(pin)
+    assert len(leaves) == 7 and not any(isinstance(leaf, str) for leaf in leaves)
+    assert jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(pin), leaves) == pin
+    assert pickle.loads(pickle.dumps(pin)).catalog_digest == digest
+    # Nor does it split the jit cache: the binding's compiled program serves a
+    # pin that differs only in its digest without a trace or a compile (the
+    # host-side check, not JAX, compares digests).
+    relabelled = pin._replace(catalog_digest="0" * 32)
+    assert jax.tree_util.tree_structure(relabelled) == jax.tree_util.tree_structure(pin)
+    theta = jnp.asarray(_theta(auto, 90.0))
+    operands = (
+        theta, pinned.gw_pe, pinned.gw_selection, pinned.catalog,
+        pinned.observed_density_cache,
+    )
+    expected = pinned._log_likelihood(*operands, pin)
+    with _jax_events() as counts:
+        value = pinned._log_likelihood(*operands, relabelled)
+    assert counts.get(TRACE_EVENT, 0) == 0 and counts.get(COMPILE_EVENT, 0) == 0, counts
+    assert _same_bits(value, expected)
+
+
+def test_a_binding_refuses_a_same_shape_catalog_changed_outside_the_probe_rows():
+    pinned, other, row = _wide_pair()
+    assert row not in set(np.asarray(pinned.kernel_pin.probe_rows).tolist())
+    assert other.kernel_pin_digest != pinned.kernel_pin_digest
+    theta = np.asarray([KERNEL_PIN_H0_REF])
+    for H0 in (30.0, 45.0):
+        # Why the guard: served the changed catalog, the stale pin passes the
+        # probe and gives a finite, wrong likelihood (1.5e-5 and 6.5e-6 off
+        # here; the moved galaxy matters most at low H0).
+        stale = float(pinned._log_likelihood(
+            jnp.asarray([H0]), pinned.gw_pe, pinned.gw_selection, other.catalog,
+            other.observed_density_cache, pinned.kernel_pin,
+        ))
+        right = float(other(np.asarray([H0])))
+        assert np.isfinite(stale) and np.isfinite(right), (H0, stale, right)
+        assert abs(stale - right) > 1e-9 * abs(right), (H0, stale, right)
+    with pytest.raises(ValueError, match="another catalog") as refused:
+        dataclasses.replace(
+            pinned, catalog=other.catalog, observed_density_cache=other.observed_density_cache
+        )
+    message = str(refused.value)
+    assert pinned.kernel_pin_digest in message and other.kernel_pin_digest in message
+    assert "bind_analysis" in message
+    with pytest.raises(ValueError, match="another catalog"):
+        dataclasses.replace(other, kernel_pin=pinned.kernel_pin)
+    with pytest.raises(ValueError, match="another catalog"):
+        check_pinned_catalog_kernel(
+            pinned.kernel_pin,
+            *_decode_theta(pinned.analysis, jnp.asarray(theta), z_depth=pinned.z_depth)[::2],
+            other.catalog,
+        )
+
+
+def test_a_binding_accepts_the_catalog_its_pin_was_built_from():
+    pinned, _, _ = _wide_pair()
+    cat = pinned.catalog
+    # The same values in new arrays (host copies, then back on the device).
+    copy = GalaxyCatalog(*(None if leaf is None else jnp.asarray(np.array(leaf)) for leaf in cat))
+    assert copy.zgals is not cat.zgals
+    same = dataclasses.replace(pinned, catalog=copy)
+    assert same.kernel_pin is pinned.kernel_pin
+    for H0 in (45.0, KERNEL_PIN_H0_REF, 120.0):
+        assert _same_bits(same(np.asarray([H0])), pinned(np.asarray([H0])))
+    clone = pickle.loads(pickle.dumps(pinned))  # __setstate__ checks the pin again
+    assert clone.kernel_pin_digest == pinned.kernel_pin_digest
+
+
+def test_a_binding_refuses_a_pin_built_under_another_premise():
+    auto, pinned, _ = _bound_pair("H0")
+    pin = pinned.kernel_pin
+    # The pin's own reference H0 and probe rows are in the digest.
+    for forged in (
+        pin._replace(H0_ref=jnp.asarray(70.0)),
+        pin._replace(probe_rows=pin.probe_rows[:4]),
+    ):
+        with pytest.raises(ValueError, match="another catalog or under another premise"):
+            dataclasses.replace(pinned, kernel_pin=forged)
+    # Plans that admit a pin, on the same catalog, with other fixed values.
+    for kwargs in (
+        dict(fixed_survey={**SURVEY, "delta": 0.5}, **H0_ONLY),
+        dict(fixed_survey={**SURVEY, "sigma_kde": 0.02}, **H0_ONLY),
+        dict(fixed_survey=SURVEY, cosmology=Cosmology(H0=(20.0, 140.0), Om0=0.35),
+             population=H0_ONLY["population"]),
+    ):
+        other = model(catalog=_galaxies(), **kwargs)
+        assert other.parameters.kernel_pin_active
+        with pytest.raises(ValueError, match="another premise"):
+            dataclasses.replace(pinned, analysis=other)
+    with pytest.raises(ValueError, match="another premise"):
+        dataclasses.replace(pinned, z_depth=0.25)
+    # log10n0 does not enter the kernel: another fixed value keeps the pin.
+    n0 = model(catalog=_galaxies(), fixed_survey={**SURVEY, "log10n0": -2.0}, **H0_ONLY)
+    assert dataclasses.replace(pinned, analysis=n0).kernel_pin is pin
+    with pytest.raises(TypeError, match="PinnedCatalogKernel"):
+        dataclasses.replace(pinned, kernel_pin=tuple(pin))
+
+
+def test_the_digest_is_read_on_the_host_and_does_not_depend_on_the_layout(monkeypatch):
+    auto, pinned, _ = _bound_pair("H0")
+    pin = pinned.kernel_pin
+    cosmo, _, params, _ = _decode_theta(auto, jnp.asarray([90.0]), z_depth=pinned.z_depth)
+
+    def digest(catalog):
+        return catalog_kernel_pin_digest(
+            cosmo, params, catalog, H0_ref=pin.H0_ref, probe_rows=pin.probe_rows
+        )
+
+    host = GalaxyCatalog(*(None if leaf is None else np.asarray(leaf) for leaf in pinned.catalog))
+    assert digest(host) == pin.catalog_digest
+    # A device array is read in row blocks; the bytes, and the digest, are the same.
+    monkeypatch.setattr(_redshift, "_host_resident", lambda value: False)
+    monkeypatch.setattr(_redshift, "_DIGEST_BLOCK_BYTES", 3 * 8 * int(pinned.catalog.zgals.shape[1]))
+    assert len(list(_redshift._host_blocks(pinned.catalog.zgals))) > 1
+    assert digest(pinned.catalog) == pin.catalog_digest
+    monkeypatch.undo()
+    # Never inside a trace; H0 is not read, so a traced H0 does not matter.
+    with pytest.raises(TypeError, match="outside any jit"):
+        jax.jit(digest)(pinned.catalog)
+
+    @jax.jit
+    def traced_H0(H0):
+        cosmo_H0 = cosmo._replace(H0=H0)
+        same = catalog_kernel_pin_digest(
+            cosmo_H0, params, host, H0_ref=pin.H0_ref, probe_rows=pin.probe_rows
+        ) == pin.catalog_digest
+        return H0 * same
+
+    assert float(traced_H0(90.0)) == 90.0
+    # Padding counts too (fails closed): the kernel ignores it, the digest does not.
+    ngals = np.asarray(host.ngals)
+    row = int(np.flatnonzero(ngals < host.zgals.shape[1])[0])
+    zgals = np.array(host.zgals)
+    zgals[row, -1] += 1.0
+    assert digest(host._replace(zgals=zgals)) != pin.catalog_digest
+    assert isinstance(pin, PinnedCatalogKernel)
