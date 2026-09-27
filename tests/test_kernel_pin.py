@@ -453,6 +453,35 @@ def test_opt_out_is_the_unpinned_program(blocks):
     assert n_pin == n_off + len(jax.tree_util.tree_leaves(pinned.kernel_pin))
 
 
+def test_a_binding_serves_a_pin_only_under_a_plan_that_admits_it():
+    # The bound likelihood serves the pin whenever the binding carries one, so
+    # a binding rebuilt under another plan must not keep it: the plan (and a
+    # run fingerprint built from it) would record kernel_pin="off" or a
+    # sampled kernel parameter while the program is pinned, and with delta
+    # sampled the probe would return -inf away from the pinned value.
+    auto, pinned, unpinned = _bound_pair("H0")
+    sampled_delta = model(
+        catalog=_galaxies(),
+        fixed_survey={"log10n0": SURVEY["log10n0"], "sigma_kde": SURVEY["sigma_kde"]},
+        **H0_ONLY,
+    )
+    assert not sampled_delta.parameters.kernel_pin_active
+    for analysis in (unpinned.analysis, sampled_delta):
+        with pytest.raises(ValueError, match="does not admit"):
+            dataclasses.replace(pinned, analysis=analysis)
+    with pytest.raises(ValueError, match="does not admit"):
+        dataclasses.replace(unpinned, kernel_pin=pinned.kernel_pin)
+    cat = pinned.catalog
+    fewer_rows = cat._replace(
+        zgals=cat.zgals[:-1], dzgals=cat.dzgals[:-1], wgals=cat.wgals[:-1], ngals=cat.ngals[:-1]
+    )
+    with pytest.raises(ValueError, match="built for a catalog of shape"):
+        dataclasses.replace(pinned, catalog=fewer_rows)
+    # Keeping the pin under its own plan, or dropping it, is allowed.
+    assert dataclasses.replace(pinned).kernel_pin is pinned.kernel_pin
+    assert dataclasses.replace(pinned, kernel_pin=None).kernel_pin is None
+
+
 @pytest.mark.parametrize("plan", ("H0", "pop"))
 def test_the_pinned_program_has_no_per_call_catalog_quadrature(plan):
     # The point of the pin: the 24-node quadrature over every catalog row

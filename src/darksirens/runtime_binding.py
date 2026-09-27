@@ -238,6 +238,8 @@ class BoundAnalysis:
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        if self.kernel_pin is not None:
+            _require_admissible_kernel_pin(self.analysis, self.catalog, self.kernel_pin)
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python
         # closures, and eager ``lax.scan`` traces per body-function object, so
@@ -396,6 +398,39 @@ def _jit_log_likelihood(bound: BoundAnalysis):
         )
 
     return log_likelihood
+
+
+def _require_admissible_kernel_pin(analysis: Analysis, catalog, kernel_pin) -> None:
+    """Refuse a binding that carries a kernel pin its plan does not admit.
+
+    The bound likelihood serves the pin whenever the binding carries one. A
+    binding rebuilt with ``dataclasses.replace`` under another plan would
+    otherwise evaluate the pinned program while the plan, and a run
+    fingerprint built from it, records ``kernel_pin="off"`` or a sampled
+    kernel parameter; with ``delta`` or ``sigma_kde`` sampled the probe then
+    returns ``-inf`` away from the pinned value. A pin built for another
+    catalog shape is refused too. Dropping the pin (``kernel_pin=None``) is
+    always allowed: that is the unpinned program.
+    """
+    plan = analysis.parameters
+    if not (
+        plan.kernel_pin_active
+        and kernel_pin_applies(analysis.redshift, plan.labels, plan.kernel_pin)
+    ):
+        raise ValueError(
+            "this BoundAnalysis carries a catalog kernel pin, but its plan does not "
+            f"admit one (kernel_pin={plan.kernel_pin!r}, kernel_pin_active="
+            f"{plan.kernel_pin_active}); bind the analysis with bind_analysis, or "
+            "drop the pin with kernel_pin=None"
+        )
+    pin_shape = tuple(np.shape(kernel_pin.log_kw_eff))
+    catalog_shape = None if catalog is None else tuple(np.shape(catalog.zgals))
+    if pin_shape != catalog_shape:
+        raise ValueError(
+            f"the catalog kernel pin was built for a catalog of shape {pin_shape}, "
+            f"but the binding's catalog has shape {catalog_shape}; rebuild the "
+            "binding with bind_analysis"
+        )
 
 
 def _build_kernel_pin(analysis: Analysis, catalog, z_depth):

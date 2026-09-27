@@ -302,7 +302,7 @@ fingerprint tests, 5 budget-audit tests and 8 GP mass-ratio cases.
 
 `model(..., kernel_pin="auto")` evaluates the catalog kernel state once, at
 bind time, when `Om0`, `w0`, `wa`, `delta` and `sigma_kde` are fixed (see
-MIGRATION.md). `tests/test_kernel_pin.py` (46 tests) checks the activation
+MIGRATION.md). `tests/test_kernel_pin.py` (47 tests) checks the activation
 rule through `ds.model`, the pinned likelihood against `kernel_pin="off"` at
 rtol 1e-12 for H0 from 20 to 140 (three plans, single pass and scanned blocks),
 the pinned state leaf by leaf against the per-call state (padding and empty
@@ -311,8 +311,8 @@ absolute), gradients, the program without the pin operand, the probe against
 pins built under six violated premises, the fingerprint and resume gate, and
 the bound jit's no-retrace, data-as-argument and pickling properties, and
 that the pinned program no longer contains the 24-node quadrature over every
-catalog row on either side (only the probe rows). Each mutant fails the new
-tests:
+catalog row on either side (only the probe rows), and that a binding refuses a
+pin its plan does not admit. Each mutant fails the new tests:
 
 ```text
 shift sign flipped                        16 of 44 fail
@@ -327,6 +327,7 @@ pin built at H0 = 70                       2 fail
 selection side not pinned                  2 fail (the other 44 pass)
 PE side not pinned                         2 fail
 probe rebuilds every row                   2 fail
+binding keeps a pin under another plan     1 fail
 ```
 
 With `kernel_pin="off"`, and for every plan the pin does not apply to, the
