@@ -199,6 +199,9 @@ def test_run_numpyro_wires_sites_mcmc_and_likelihood_recovery(monkeypatch, capsy
     np.testing.assert_array_equal(result["log_likelihood"], expected_ll)
     assert result["logZ"] is None
     assert result["logZerr"] is None
+    # NUTS has no stopping criterion: the termination fields are all None.
+    for name in ("dlogz_final", "stop_reason", "ncall", "niter"):
+        assert result[name] is None
     assert ("sample", "u", "Uniform") in events
     assert ("sample", "n", "TruncatedNormal") in events
     assert ("run", ("diverging", "num_steps", "accept_prob")) in events

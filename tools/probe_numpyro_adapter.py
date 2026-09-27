@@ -17,6 +17,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from _termination_fields import candidate_runner
+
 
 _STATE = {
     "events": [],
@@ -329,7 +331,8 @@ def _candidate_executor():
             prior_kinds=prior_kinds,
         )
 
-    return run
+    # The candidate result also carries the declared termination fields.
+    return candidate_runner(run)
 
 
 def _likelihood(theta):

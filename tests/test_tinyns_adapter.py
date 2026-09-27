@@ -2,9 +2,13 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from darksirens.inference.tinyns_adapter import (
     _print_iteration_budget,
     _resolve_checkpoint_paths,
+    _tinyns_stop_reason,
+    _tinyns_termination,
 )
 from darksirens.inference.tinyns_config import build_tinyns_config, tinyns_run_kwargs
 
@@ -86,3 +90,42 @@ def test_resume_same_path_keeps_tinyns_default_output_target():
     )
     config = build_tinyns_config(opts)
     assert _resolve_checkpoint_paths(config, opts) == (path, path, None)
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        ("converged", "convergence"),
+        ("converged after partial block before replacement failure", "convergence"),
+        ("maxiter=20 reached", "maxiter"),
+        ("stopped by callback", "callback"),
+        ("max_attempts=5000 hit during bounded JAX rwalk draw", "replacement_failure"),
+        ("max_attempts=5000 hit during constrained prior draw", "replacement_failure"),
+        ("", "unknown"),
+        (None, None),
+    ],
+)
+def test_tinyns_status_message_maps_to_a_stop_reason(message, reason):
+    assert _tinyns_stop_reason(message) == reason
+
+
+def test_tinyns_termination_reads_the_normalized_diagnostics():
+    diagnostics = {
+        "message": "maxiter=20 reached",
+        "final_delta_logz": 3.5,
+        "ncall": 250,
+        "niter": 20,
+        "success": False,
+    }
+    assert _tinyns_termination(diagnostics) == {
+        "dlogz_final": 3.5,
+        "stop_reason": "maxiter",
+        "ncall": 250,
+        "niter": 20,
+    }
+    assert _tinyns_termination({"normalized": True}) == {
+        "dlogz_final": None,
+        "stop_reason": None,
+        "ncall": None,
+        "niter": None,
+    }

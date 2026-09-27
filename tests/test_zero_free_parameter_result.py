@@ -47,6 +47,9 @@ def test_zero_dimension_returns_exact_fixed_point_result(capsys):
     assert logl.shape == (1,)
     assert logl.dtype == np.dtype(float)
     np.testing.assert_array_equal(logl, np.array([-3.14159], dtype=float))
+    # No sampler ran: the termination fields are present and None.
+    for name in ("dlogz_final", "stop_reason", "ncall", "niter"):
+        assert result[name] is None
     assert capsys.readouterr().out == (
         "[*] 0 free parameters (all blocks fixed) - skipping nested sampling; "
         "evidence is exact at the fixed point.\n"

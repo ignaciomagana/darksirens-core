@@ -156,6 +156,10 @@ user typed them rather than as a silent `-inf`:
 - Ordinary `ds.infer` results carry `log_prior_volume_fraction` and
   `logZ_corrected` next to the raw `logZ`, so evidences from angular models
   that reject part of their prior box are comparable.
+- Every `ds.infer` result says how the sampler stopped: `stop_reason`
+  (`"convergence"` when the `dlogz` criterion held, `"maxcall"`/`"maxiter"`
+  for a budget cap), the final remaining-evidence estimate `dlogz_final`, and
+  the `ncall`/`niter` counters (`None` where a backend has no such notion).
 - `ParameterPlan` prior kinds and joint-constraint kinds are closed
   vocabularies; anything else raises instead of being reinterpreted. An
   `InferenceTarget` plan must spell out `loc` and `scale` for every

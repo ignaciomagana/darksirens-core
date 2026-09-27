@@ -12,7 +12,10 @@ import os
 
 import numpy as np
 
-from darksirens.inference.nested_output import package_dead_points
+from darksirens.inference.nested_output import (
+    package_dead_points,
+    termination_record,
+)
 from darksirens.inference.tinyns_config import (
     build_tinyns_config,
     tinyns_run_kwargs,
@@ -72,6 +75,35 @@ def _resolve_checkpoint_paths(config, opts):
     ):
         checkpoint_path_out = checkpoint_path
     return checkpoint_path, resume_from, checkpoint_path_out
+
+
+def _tinyns_stop_reason(message):
+    """Map TinyNS' terminal status message onto a stop reason."""
+
+    if message is None:
+        return None
+    message = str(message)
+    if message.startswith("converged"):
+        return "convergence"
+    if message.startswith("maxiter=") and message.endswith(" reached"):
+        return "maxiter"
+    if message == "stopped by callback":
+        return "callback"
+    if message.startswith("max_attempts="):
+        return "replacement_failure"
+    return "unknown"
+
+
+def _tinyns_termination(diagnostics):
+    """Read the termination fields from normalized TinyNS diagnostics."""
+
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    return termination_record(
+        dlogz_final=diagnostics.get("final_delta_logz"),
+        stop_reason=_tinyns_stop_reason(diagnostics.get("message")),
+        ncall=diagnostics.get("ncall"),
+        niter=diagnostics.get("niter"),
+    )
 
 
 def run_tinyns(likelihood, prior_transform, ndim: int, opts):
@@ -157,6 +189,7 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
             pass
     out["tinyns_runtime_diagnostics"] = normalize_tinyns_diagnostics(result)
     print_tinyns_diagnostics(out["tinyns_runtime_diagnostics"])
+    out.update(_tinyns_termination(out["tinyns_runtime_diagnostics"]))
     return out
 
 
