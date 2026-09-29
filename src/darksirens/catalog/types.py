@@ -11,6 +11,27 @@ from typing import Any, NamedTuple
 import numpy as np
 
 
+#: Reference H0 of an h-scaled galaxy number density (h = H0 / 100).
+H0_N0_REF = 100.0
+
+
+def physical_n0(log10n0, H0, n0_units: str = "physical"):
+    """The number density ``n0`` (Mpc^-3) the completeness model consumes.
+
+    ``n0_units="physical"`` (the frozen default) reads ``log10n0`` as Mpc^-3
+    and returns ``10**log10n0`` unchanged. ``"h_scaled"`` reads it as
+    h^3 Mpc^-3 and returns ``10**log10n0 * (H0 / 100)**3``, so that
+    ``n0 * dV_c/dz`` (dV_c in Mpc^3 at ``H0``) does not depend on H0 at fixed
+    background shape. ``H0`` may be traced.
+    """
+
+    if n0_units == "physical":
+        return 10.0 ** log10n0
+    if n0_units == "h_scaled":
+        return 10.0 ** log10n0 * (H0 / H0_N0_REF) ** 3
+    raise ValueError(f"n0_units must be 'physical' or 'h_scaled', got {n0_units!r}")
+
+
 class CatalogParameters(NamedTuple):
     """Parameters consumed by the ordinary catalog redshift model.
 

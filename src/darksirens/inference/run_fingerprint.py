@@ -173,8 +173,8 @@ def parameter_plan_semantic(plan) -> dict:
 
     Two plans that sample the same labels but fix different parameters, or
     the same parameters at different values, or differ in
-    ``allow_out_of_prior`` or in the catalog kernel pin (``kernel_pin``
-    setting, and whether it applies), have different blocks, so a run
+    ``allow_out_of_prior``, in the catalog kernel pin (``kernel_pin``
+    setting, and whether it applies) or in ``n0_units``, have different blocks, so a run
     fingerprint built from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
@@ -231,6 +231,13 @@ def parameter_plan_semantic(plan) -> dict:
             "setting": str(plan.kernel_pin),
             "active": bool(plan.kernel_pin_active),
         },
+        # Only a non-default unit enters, so every existing fingerprint is
+        # unchanged.
+        **(
+            {}
+            if getattr(plan, "n0_units", "physical") == "physical"
+            else {"n0_units": str(plan.n0_units)}
+        ),
     })
 
 

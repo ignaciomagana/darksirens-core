@@ -74,6 +74,7 @@ def model(
     fixed_survey=None,
     allow_out_of_prior=False,
     kernel_pin="auto",
+    n0_units=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -91,6 +92,7 @@ def model(
         fixed_survey=fixed_survey,
         allow_out_of_prior=allow_out_of_prior,
         kernel_pin=kernel_pin,
+        n0_units=n0_units,
     )
 
 
