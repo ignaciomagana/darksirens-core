@@ -29,6 +29,13 @@ _UNIFORM = ("uniform", None, None)
 
 #: Settings of ``model(..., kernel_pin=...)``.
 KERNEL_PIN_SETTINGS = ("auto", "off")
+#: Settings of ``model(..., n0_units=...)``: the unit of the incomplete
+#: catalog's ``log10n0``. ``"physical"`` (the frozen default) is Mpc^-3 at the
+#: sampled H0, so the expected galaxy count scales as ``n0 * H0^-3``;
+#: ``"h_scaled"`` is h^3 Mpc^-3, and the bound likelihood uses
+#: ``n0 = 10**log10n0 * (H0 / 100)**3``, which keeps the expected count
+#: independent of H0 at fixed background shape.
+N0_UNITS_SETTINGS = ("physical", "h_scaled")
 #: Parameters whose sampling moves the catalog kernel's redshift dependence
 #: beyond the scalar H0 factor (legacy ``_KERNEL_PIN_BLOCKING_LABELS``,
 #: ``likelihood/factory.py:1019-1028``). ``log10n0`` and the population do not
@@ -43,9 +50,13 @@ class SpectralRedshift:
 
 @dataclass(frozen=True)
 class IncompleteCatalogRedshift:
-    """Ordinary catalog plus the core missing-host completeness branch."""
+    """Ordinary catalog plus the core missing-host completeness branch.
+
+    ``n0_units`` is the unit of ``log10n0`` (see :data:`N0_UNITS_SETTINGS`).
+    """
 
     catalog: Any
+    n0_units: str = "physical"
 
 
 @dataclass(frozen=True)
@@ -95,6 +106,8 @@ class ParameterPlan:
     order. Fixed values never enter the sampled coordinates.
     ``allow_out_of_prior`` records ``model(..., allow_out_of_prior=...)``,
     whether fixed values were accepted outside their prior bounds.
+    ``n0_units`` records ``model(..., n0_units=...)`` for an incomplete-catalog
+    analysis (``"physical"`` otherwise).
     ``kernel_pin`` records ``model(..., kernel_pin=...)`` (``"auto"`` or
     ``"off"``) and ``kernel_pin_active`` whether it applies: an
     incomplete-catalog analysis under ``"auto"`` that samples none of
@@ -120,6 +133,7 @@ class ParameterPlan:
     allow_out_of_prior: bool = False
     kernel_pin: str = "auto"
     kernel_pin_active: bool = False
+    n0_units: str = "physical"
 
 
 @dataclass(frozen=True)
@@ -163,9 +177,21 @@ def _resolve_redshift(
     completeness,
     *,
     empty_policy=None,
+    n0_units=None,
     counterparts=None,
     counterpart_nside=None,
 ):
+    if n0_units is not None:
+        if n0_units not in N0_UNITS_SETTINGS:
+            raise ValueError(
+                f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}"
+            )
+        if catalog is None or completeness not in (None, "incomplete"):
+            raise ValueError(
+                "n0_units applies only to an incomplete-catalog analysis, got "
+                f"catalog={'None' if catalog is None else 'set'} and "
+                f"completeness={completeness!r}"
+            )
     if empty_policy is not None and completeness != "complete":
         raise ValueError(
             "empty_policy applies only to completeness='complete', got "
@@ -216,7 +242,10 @@ def _resolve_redshift(
         raise TypeError("catalog must be the CatalogStore returned by ds.load_catalog")
 
     if completeness is None or completeness == "incomplete":
-        return IncompleteCatalogRedshift(catalog), _INCOMPLETE_CATALOG_PRIORS
+        return (
+            IncompleteCatalogRedshift(catalog, n0_units or "physical"),
+            _INCOMPLETE_CATALOG_PRIORS,
+        )
     if completeness == "complete":
         return (
             CompleteCatalogRedshift(catalog, empty_policy or "zero"),
@@ -457,6 +486,7 @@ def model(
     fixed_survey=None,
     allow_out_of_prior=False,
     kernel_pin="auto",
+    n0_units=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -473,6 +503,16 @@ def model(
     ``empty_policy`` is legal only with ``completeness='complete'`` and selects
     the galaxy-free-row branch of that likelihood: ``'zero'`` (the default) or
     the ``'volume'`` robustness approximation.
+
+    ``n0_units`` is legal only for an incomplete-catalog analysis and sets the
+    unit of ``log10n0``. ``'physical'`` (the default, the frozen legacy
+    convention) is Mpc^-3 at the sampled H0: the expected galaxy count then
+    scales as ``n0 * H0^-3`` against fixed catalog counts, which ties a fixed
+    ``log10n0`` to the H0 it was calibrated at. ``'h_scaled'`` is h^3 Mpc^-3:
+    the bound likelihood uses ``n0 = 10**log10n0 * (H0 / 100)**3``, so the
+    expected count does not depend on H0 at fixed background shape. The plan
+    records it (``ParameterPlan.n0_units``) and a run fingerprint changes with
+    it.
 
     ``fixed_survey={name: value}`` fixes the named survey parameters of a
     catalog analysis (``log10n0``, ``delta``, ``sigma_kde``; the complete
@@ -526,6 +566,7 @@ def model(
         catalog,
         completeness,
         empty_policy=empty_policy,
+        n0_units=n0_units,
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
     )
@@ -685,6 +726,7 @@ def model(
         allow_out_of_prior=allow_out_of_prior,
         kernel_pin=kernel_pin,
         kernel_pin_active=kernel_pin_applies(redshift, labels, kernel_pin),
+        n0_units=getattr(redshift, "n0_units", "physical"),
     )
     return Analysis(
         cosmology=cosmology,

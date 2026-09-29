@@ -29,7 +29,7 @@ from darksirens.catalog.redshift import (
     build_pinned_catalog_kernel,
     check_pinned_catalog_kernel,
 )
-from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
+from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, physical_n0
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.runtime import make_gw_event
@@ -207,7 +207,9 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None):
             return free[name]
 
         if isinstance(analysis.redshift, IncompleteCatalogRedshift):
-            n0 = 10.0 ** survey("log10n0")
+            n0 = physical_n0(
+                survey("log10n0"), cosmology.H0, analysis.redshift.n0_units
+            )
         else:
             n0 = 1.0
         catalog_params = CatalogParameters(

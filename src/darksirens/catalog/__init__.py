@@ -14,6 +14,8 @@ from .types import (
     CatalogParameters,
     CatalogSampleView,
     GalaxyCatalog,
+    H0_N0_REF,
+    physical_n0,
     validate_catalog,
 )
 
@@ -23,10 +25,12 @@ __all__ = [
     "CatalogSampleView",
     "CatalogStore",
     "GalaxyCatalog",
+    "H0_N0_REF",
     "ang2pix_ring",
     "compact_catalog",
     "compact_pe_selection_catalog",
     "load_catalog",
+    "physical_n0",
     "unique_inference_pixels",
     "validate_catalog",
 ]
