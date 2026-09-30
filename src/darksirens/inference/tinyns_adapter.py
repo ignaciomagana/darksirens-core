@@ -143,14 +143,14 @@ def tinyns_loglike(likelihood, tinyns_module):
     constants (darksirens-core#26). Otherwise it gets the historical closure.
     Both return the same value for the same ``theta``.
     """
-    import jax.numpy as jnp
-
     if tinyns_supports_pytree_loglike(tinyns_module) and callable(
         getattr(likelihood, "as_pytree_callable", None)
     ):
         return likelihood.as_pytree_callable(), "pytree"
 
     def closure(theta):
+        import jax.numpy as jnp
+
         return likelihood(jnp.asarray(theta))
 
     return closure, "closure"
@@ -170,7 +170,10 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
     from tinyns import NestedSampler
 
     loglike, loglike_form = tinyns_loglike(likelihood, tinyns)
-    print(f"[*] tinyns log-likelihood form: {loglike_form} (tinyns {getattr(tinyns, '__version__', '?')})", flush=True)
+    # Only the new form is announced: the historical closure path prints what it
+    # always printed (the sampler-dispatch stdout parity).
+    if loglike_form == "pytree":
+        print(f"[*] tinyns log-likelihood form: pytree (tinyns {tinyns.__version__})", flush=True)
 
     def tinyns_ptform(u):
         return jnp.asarray(prior_transform(jnp.asarray(u)))

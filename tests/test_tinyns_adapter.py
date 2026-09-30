@@ -1,5 +1,6 @@
 """Phase 6N tests for the lazy TinyNS execution adapter."""
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -159,7 +160,15 @@ def test_pytree_support_is_gated_on_tinyns_0_2_0(version, expected):
     assert tinyns_supports_pytree_loglike(module) is expected
 
 
-def test_new_tinyns_gets_the_pytree_callable_and_old_tinyns_the_closure():
+@pytest.fixture
+def _stub_jax(monkeypatch):
+    # The closure converts theta with jax.numpy; the adapter job runs without JAX.
+    jnp = SimpleNamespace(asarray=lambda x: x)
+    monkeypatch.setitem(sys.modules, "jax", SimpleNamespace(numpy=jnp))
+    monkeypatch.setitem(sys.modules, "jax.numpy", jnp)
+
+
+def test_new_tinyns_gets_the_pytree_callable_and_old_tinyns_the_closure(_stub_jax):
     likelihood = _Pytreeable()
     got, form = tinyns_loglike(likelihood, SimpleNamespace(__version__="0.2.0"))
     assert form == "pytree" and got is likelihood.pytree
@@ -167,6 +176,6 @@ def test_new_tinyns_gets_the_pytree_callable_and_old_tinyns_the_closure():
     assert form == "closure" and got is not likelihood.pytree and got([0.5]) == 1.0
 
 
-def test_a_likelihood_without_the_hook_keeps_the_closure():
+def test_a_likelihood_without_the_hook_keeps_the_closure(_stub_jax):
     got, form = tinyns_loglike(lambda theta: 2.0, SimpleNamespace(__version__="0.2.0"))
     assert form == "closure" and got([0.1]) == 2.0
