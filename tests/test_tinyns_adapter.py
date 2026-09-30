@@ -129,3 +129,44 @@ def test_tinyns_termination_reads_the_normalized_diagnostics():
         "ncall": None,
         "niter": None,
     }
+
+
+# --- pytree log-likelihood hand-off (darksirens-core#26) ---------------------
+
+from darksirens.inference.tinyns_adapter import (  # noqa: E402
+    tinyns_loglike,
+    tinyns_supports_pytree_loglike,
+)
+
+
+class _Pytreeable:
+    def __init__(self):
+        self.pytree = object()
+
+    def __call__(self, theta):
+        return 1.0
+
+    def as_pytree_callable(self):
+        return self.pytree
+
+
+@pytest.mark.parametrize(
+    "version, expected",
+    [("0.1.0", False), ("0.1.9", False), ("0.2.0", True), ("0.2.1", True), ("1.0.0", True), (None, False)],
+)
+def test_pytree_support_is_gated_on_tinyns_0_2_0(version, expected):
+    module = SimpleNamespace() if version is None else SimpleNamespace(__version__=version)
+    assert tinyns_supports_pytree_loglike(module) is expected
+
+
+def test_new_tinyns_gets_the_pytree_callable_and_old_tinyns_the_closure():
+    likelihood = _Pytreeable()
+    got, form = tinyns_loglike(likelihood, SimpleNamespace(__version__="0.2.0"))
+    assert form == "pytree" and got is likelihood.pytree
+    got, form = tinyns_loglike(likelihood, SimpleNamespace(__version__="0.1.0"))
+    assert form == "closure" and got is not likelihood.pytree and got([0.5]) == 1.0
+
+
+def test_a_likelihood_without_the_hook_keeps_the_closure():
+    got, form = tinyns_loglike(lambda theta: 2.0, SimpleNamespace(__version__="0.2.0"))
+    assert form == "closure" and got([0.1]) == 2.0

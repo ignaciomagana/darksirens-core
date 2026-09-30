@@ -106,6 +106,56 @@ def _tinyns_termination(diagnostics):
     )
 
 
+#: The first TinyNS release whose kernels take a pytree log-likelihood and pass
+#: its array leaves as arguments of the compiled program.
+TINYNS_PYTREE_MIN_VERSION = "0.2.0"
+
+
+def _version_tuple(text):
+    try:
+        from packaging.version import Version
+
+        return Version(str(text))
+    except ImportError:  # packaging is not a declared dependency of core
+        parts = []
+        for piece in str(text).split("."):
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            if not digits:
+                break
+            parts.append(int(digits))
+        return tuple(parts)
+
+
+def tinyns_supports_pytree_loglike(tinyns_module) -> bool:
+    """Whether the installed TinyNS takes a pytree log-likelihood (>= 0.2.0)."""
+    version = getattr(tinyns_module, "__version__", None)
+    if version is None:
+        return False
+    return _version_tuple(version) >= _version_tuple(TINYNS_PYTREE_MIN_VERSION)
+
+
+def tinyns_loglike(likelihood, tinyns_module):
+    """The log-likelihood TinyNS receives, and which form it is.
+
+    With TinyNS >= 0.2.0 and a likelihood that offers ``as_pytree_callable``
+    (a :class:`darksirens.runtime_binding.BoundAnalysis`), TinyNS gets the
+    pytree callable, so the data are arguments of its kernels rather than
+    constants (darksirens-core#26). Otherwise it gets the historical closure.
+    Both return the same value for the same ``theta``.
+    """
+    import jax.numpy as jnp
+
+    if tinyns_supports_pytree_loglike(tinyns_module) and callable(
+        getattr(likelihood, "as_pytree_callable", None)
+    ):
+        return likelihood.as_pytree_callable(), "pytree"
+
+    def closure(theta):
+        return likelihood(jnp.asarray(theta))
+
+    return closure, "closure"
+
+
 def run_tinyns(likelihood, prior_transform, ndim: int, opts):
     """Execute TinyNS and return the reconstructed standardized result mapping.
 
@@ -116,17 +166,18 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
 
     import jax
     import jax.numpy as jnp
+    import tinyns
     from tinyns import NestedSampler
 
-    def tinyns_loglike(theta):
-        return likelihood(jnp.asarray(theta))
+    loglike, loglike_form = tinyns_loglike(likelihood, tinyns)
+    print(f"[*] tinyns log-likelihood form: {loglike_form} (tinyns {getattr(tinyns, '__version__', '?')})", flush=True)
 
     def tinyns_ptform(u):
         return jnp.asarray(prior_transform(jnp.asarray(u)))
 
     config = build_tinyns_config(opts)
     sampler = NestedSampler(
-        tinyns_loglike,
+        loglike,
         tinyns_ptform,
         ndim=int(ndim),
         nlive=config.nlive,
