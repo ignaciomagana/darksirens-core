@@ -9,6 +9,7 @@ run-versus-resume dispatch, and standardized result assembly.
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
 
@@ -128,19 +129,33 @@ def tinyns_supports_pytree_loglike(tinyns_module) -> bool:
     return _version_tuple(version) >= _version_tuple(TINYNS_PYTREE_MIN_VERSION)
 
 
+def _is_jax_partial(obj) -> bool:
+    # A jax.tree_util.Partial exists only once JAX is imported, so this never
+    # imports JAX itself.
+    jax = sys.modules.get("jax")
+    partial = getattr(getattr(jax, "tree_util", None), "Partial", None)
+    return isinstance(partial, type) and isinstance(obj, partial)
+
+
 def tinyns_loglike(likelihood, tinyns_module):
     """The log-likelihood TinyNS receives, and which form it is.
 
     With TinyNS >= 0.2.0 and a likelihood that offers ``as_pytree_callable``
     (a :class:`darksirens.runtime_binding.BoundAnalysis`), TinyNS gets the
     pytree callable, so the data are arguments of its kernels rather than
-    constants (darksirens-core#26). Otherwise it gets the historical closure.
-    Both return the same value for the same ``theta``.
+    constants (darksirens-core#26). A likelihood that is itself a
+    ``jax.tree_util.Partial`` (e.g. an :class:`InferenceTarget` wrapping a
+    bound analysis in its own pytree embedding) is handed over as it is.
+    Otherwise TinyNS gets the historical closure. Both forms return the same
+    value for the same ``theta``.
     """
-    if tinyns_supports_pytree_loglike(tinyns_module) and callable(
-        getattr(likelihood, "as_pytree_callable", None)
-    ):
-        return likelihood.as_pytree_callable(), "pytree"
+    if tinyns_supports_pytree_loglike(tinyns_module):
+        if callable(getattr(likelihood, "as_pytree_callable", None)):
+            return likelihood.as_pytree_callable(), "pytree"
+        if _is_jax_partial(likelihood):
+            # Already a pytree callable (e.g. an InferenceTarget built from a
+            # jax.tree_util.Partial): its leaves stay arguments as they are.
+            return likelihood, "pytree"
 
     def closure(theta):
         import jax.numpy as jnp
