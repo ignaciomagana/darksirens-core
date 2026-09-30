@@ -17,6 +17,8 @@ from darksirens.inference.nested_output import (
     termination_record,
 )
 from darksirens.inference.tinyns_config import (
+    _version_tuple,
+    require_tinyns_for_config,
     build_tinyns_config,
     tinyns_run_kwargs,
     tinyns_sampler_kwargs,
@@ -51,6 +53,13 @@ def _print_iteration_budget(config, run_kwargs) -> None:
         if config.replacement_chain_schedule
         else int(config.replacement_chains)
     )
+    if config.walks is None:
+        print(
+            f"[*] tinyns iteration cap: maxiter={int(maxiter):,} (--max_samples); "
+            "walks resolved by TinyNS from ndim",
+            flush=True,
+        )
+        return
     print(
         f"[*] tinyns iteration cap: maxiter={int(maxiter):,} "
         f"(--max_samples), i.e. up to "
@@ -111,21 +120,6 @@ def _tinyns_termination(diagnostics):
 TINYNS_PYTREE_MIN_VERSION = "0.2.0"
 
 
-def _version_tuple(text):
-    try:
-        from packaging.version import Version
-
-        return Version(str(text))
-    except ImportError:  # packaging is not a declared dependency of core
-        parts = []
-        for piece in str(text).split("."):
-            digits = "".join(ch for ch in piece if ch.isdigit())
-            if not digits:
-                break
-            parts.append(int(digits))
-        return tuple(parts)
-
-
 def tinyns_supports_pytree_loglike(tinyns_module) -> bool:
     """Whether the installed TinyNS takes a pytree log-likelihood (>= 0.2.0)."""
     version = getattr(tinyns_module, "__version__", None)
@@ -169,6 +163,8 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
     import tinyns
     from tinyns import NestedSampler
 
+    config = build_tinyns_config(opts)
+    require_tinyns_for_config(config, tinyns)
     loglike, loglike_form = tinyns_loglike(likelihood, tinyns)
     # Only the new form is announced: the historical closure path prints what it
     # always printed (the sampler-dispatch stdout parity).
@@ -178,7 +174,6 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
     def tinyns_ptform(u):
         return jnp.asarray(prior_transform(jnp.asarray(u)))
 
-    config = build_tinyns_config(opts)
     sampler = NestedSampler(
         loglike,
         tinyns_ptform,
