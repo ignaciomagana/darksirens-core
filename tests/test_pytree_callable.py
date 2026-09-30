@@ -101,3 +101,46 @@ def test_kernel_pin_is_a_leaf_and_absent_without_a_pin():
     n_pinned = len(jax.tree_util.tree_leaves(pinned))
     n_plain = len(jax.tree_util.tree_leaves(plain))
     assert n_pinned > n_plain
+
+
+# --- a caller's own pytree embedding (InferenceTarget) ------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from darksirens.inference.tinyns_adapter import tinyns_loglike  # noqa: E402
+
+
+def _embedded_eval(base, idx, inner, theta):
+    return inner(base.at[idx].set(theta))
+
+
+def _embedding(bound):
+    # A harness that fixes some coordinates of a full plan: the free ones are
+    # written into a base vector around the bound likelihood.
+    base = jnp.asarray(_thetas(bound, n=1)[0])
+    idx = jnp.asarray([0, 2])
+    return base, idx
+
+
+def test_a_jax_partial_likelihood_goes_to_new_tinyns_as_is():
+    f = jax.tree_util.Partial(_embedded_eval, jnp.zeros(3), jnp.asarray([0]), lambda t: t.sum())
+    got, form = tinyns_loglike(f, SimpleNamespace(__version__="0.2.0"))
+    assert form == "pytree" and got is f
+    got, form = tinyns_loglike(f, SimpleNamespace(__version__="0.1.0"))
+    assert form == "closure" and got is not f
+
+
+def test_an_embedding_partial_is_bitwise_the_closure_and_keeps_data_out_of_constants():
+    bound = _bound("incomplete")
+    base, idx = _embedding(bound)
+    partial = jax.tree_util.Partial(_embedded_eval, base, idx, bound.as_pytree_callable())
+
+    def closure(t):
+        return bound(base.at[idx].set(t))
+
+    for theta in _thetas(bound):
+        free = theta[np.asarray(idx)]
+        assert _same_bits(partial(free), closure(free))
+    free = _thetas(bound, n=1)[0][np.asarray(idx)]
+    assert _large_consts(lambda g, t: g(t), partial, free) == []
+    assert len(_large_consts(closure, free)) > 0
