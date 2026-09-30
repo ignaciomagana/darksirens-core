@@ -171,3 +171,66 @@ def test_termination_fields_survive_a_json_round_trip():
     back = json.loads(json.dumps(record, allow_nan=False))
     assert back == record
     assert [type(v) for v in back.values()] == [float, str, int, int]
+
+
+# --- dynesty_walks (opt-in rwalk walk length) --------------------------------
+
+import sys  # noqa: E402
+
+from darksirens.inference import dynesty_adapter  # noqa: E402
+from darksirens.inference.dynesty_adapter import resolve_dynesty_walks  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "value, ndim, expected",
+    [(None, 13, None), ("scaled", 13, 78), ("scaled", 16, 96), ("scaled", 3, 23), (100, 13, 100), (2, 5, 2)],
+)
+def test_dynesty_walks_resolution(value, ndim, expected):
+    assert resolve_dynesty_walks(value, ndim) == expected
+
+
+@pytest.mark.parametrize("value", ["6ndim", 1, 0, -5, 2.5, True])
+def test_dynesty_walks_rejects_other_values(value):
+    with pytest.raises(ValueError, match="dynesty_walks must be"):
+        resolve_dynesty_walks(value, 13)
+
+
+class _Built(Exception):
+    pass
+
+
+def _nested_sampler_kwargs(monkeypatch, capsys, **opts):
+    # Fakes for jax.numpy, dynesty and the lazy helpers: the job runs without
+    # either backend. The recorder stops the run once the sampler is built.
+    seen = {}
+
+    def recorder(loglike, ptform, ndim, **kwargs):
+        seen.update(kwargs, ndim=ndim)
+        raise _Built
+
+    jnp = SimpleNamespace(asarray=lambda x: x)
+    monkeypatch.setitem(sys.modules, "jax", SimpleNamespace(numpy=jnp))
+    monkeypatch.setitem(sys.modules, "jax.numpy", jnp)
+    monkeypatch.setitem(sys.modules, "dynesty", SimpleNamespace(NestedSampler=recorder))
+    monkeypatch.setitem(sys.modules, "dynesty.utils", SimpleNamespace(resample_equal=None))
+    monkeypatch.setattr(dynesty_adapter, "make_dynesty_ptform", lambda pt, n, mode="auto": pt)
+    monkeypatch.setattr(dynesty_adapter, "plan_from_opts",
+                        lambda o, s: SimpleNamespace(resuming=False, enabled=False))
+    values = dict(nlive=64, seed=1, max_samples=None)
+    values.update(opts)
+    with pytest.raises(_Built):
+        dynesty_adapter.run_dynesty(lambda t: 0.0, lambda u: u, ["a"] * 13, SimpleNamespace(**values))
+    return seen, capsys.readouterr().out
+
+
+def test_default_passes_no_walks_so_dynesty_keeps_its_own(monkeypatch, capsys):
+    seen, out = _nested_sampler_kwargs(monkeypatch, capsys)
+    assert "walks" not in seen
+    assert seen["sample"] == "rwalk" and seen["bound"] == "multi" and seen["nlive"] == 64
+    assert "rwalk walks" not in out
+
+
+def test_scaled_walks_reach_dynesty_and_are_announced(monkeypatch, capsys):
+    seen, out = _nested_sampler_kwargs(monkeypatch, capsys, dynesty_walks="scaled")
+    assert seen["walks"] == 78 and seen["ndim"] == 13
+    assert "[*] dynesty rwalk walks: 78 per proposal (dynesty_walks)" in out

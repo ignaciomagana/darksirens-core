@@ -145,6 +145,35 @@ def _dynesty_termination(sampler, running_logz, ncall_before, dlogz, maxcall):
     )
 
 
+#: ``dynesty_walks="scaled"``: rwalk steps per proposal of 6 per free
+#: parameter, never fewer than dynesty's own ``20 + ndim``. On 13-D mocks the
+#: default ``20 + ndim`` left ln Z 0.6-0.75 nat low against walks=100, and
+#: 6 * ndim closed the gap (the tinyns cross-check on mock R1).
+DYNESTY_SCALED_WALKS_PER_DIM = 6
+
+
+def resolve_dynesty_walks(value, ndim):
+    """The rwalk ``walks`` core passes to dynesty, or ``None`` to pass none.
+
+    ``None`` (the default) leaves dynesty's own choice, ``20 + ndim`` for
+    rwalk, and the sampler call unchanged. ``"scaled"`` is
+    ``max(20 + ndim, 6 * ndim)``. An integer >= 2 is passed as given.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value != "scaled":
+            raise ValueError(
+                f"dynesty_walks must be None, 'scaled' or an integer >= 2, got {value!r}"
+            )
+        return max(20 + int(ndim), DYNESTY_SCALED_WALKS_PER_DIM * int(ndim))
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) < 2:
+        raise ValueError(
+            f"dynesty_walks must be None, 'scaled' or an integer >= 2, got {value!r}"
+        )
+    return int(value)
+
+
 def run_dynesty(likelihood, prior_transform, labels, opts):
     """Execute the frozen Dynesty sampling core and standardize its result."""
     import jax.numpy as jnp
@@ -152,6 +181,7 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
     from dynesty.utils import resample_equal
 
     ndims = len(labels)
+    walks = resolve_dynesty_walks(getattr(opts, "dynesty_walks", None), ndims)
     eval_count = 0
     valid_count = 0
 
@@ -200,6 +230,13 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
                 f"--nlive {opts.nlive}; the checkpoint's value wins.",
                 flush=True,
             )
+        restored_walks = getattr(sampler, "walks", None)
+        if walks is not None and restored_walks is not None and int(restored_walks) != walks:
+            print(
+                f"  [!] checkpoint walks={restored_walks} differs from "
+                f"dynesty_walks {walks}; the checkpoint's value wins.",
+                flush=True,
+            )
         dynesty_rstate = sampler.rstate
         print(
             f"[*] Resumed at iteration {getattr(sampler, 'it', 0)} "
@@ -213,6 +250,10 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             flush=True,
         )
         dynesty_rstate = np.random.default_rng(int(opts.seed))
+        walks_kwargs = {}
+        if walks is not None:
+            walks_kwargs["walks"] = walks
+            print(f"[*] dynesty rwalk walks: {walks} per proposal (dynesty_walks)", flush=True)
         sampler = NestedSampler(
             dynesty_loglike,
             dynesty_ptform,
@@ -221,6 +262,7 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             sample="rwalk",
             nlive=opts.nlive,
             rstate=dynesty_rstate,
+            **walks_kwargs,
         )
 
     checkpoint_kwargs = {}
@@ -281,7 +323,7 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
         n_live=(int(res["nlive"]) if "nlive" in res else None),
     )
 
-    return {
+    result = {
         "samples": np.asarray(samples),
         "logZ": logz,
         "logZerr": logzerr,
@@ -292,6 +334,11 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             sampler, running_logz, ncall_before, opts.dlogz, maxcall
         ),
     }
+    # Recorded only when dynesty_walks was set, so a default result keeps its
+    # frozen keys.
+    if walks is not None:
+        result["walks_actual"] = int(getattr(sampler, "walks", walks))
+    return result
 
 
 __all__ = ["run_dynesty"]
