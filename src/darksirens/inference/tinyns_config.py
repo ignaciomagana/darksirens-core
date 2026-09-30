@@ -451,6 +451,40 @@ def tinyns_run_kwargs(config):
     return kwargs
 
 
+
+def _version_tuple(text):
+    try:
+        from packaging.version import Version
+
+        return Version(str(text))
+    except ImportError:  # packaging is not a declared dependency of core
+        parts = []
+        for piece in str(text).split("."):
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            if not digits:
+                break
+            parts.append(int(digits))
+        return tuple(parts)
+
+
+def require_tinyns_for_config(config, tinyns_module) -> None:
+    """Refuse settings the installed TinyNS cannot run, before any sampling.
+
+    ``rwalk_proposal="live-cov"`` and ``walks=None`` (the ``livecov`` preset)
+    need TinyNS >= 0.2.0; older releases have no live-cov proposal and
+    require an integer ``walks``. Imports nothing, so it runs without numpy.
+    """
+    needs = config.rwalk_proposal == "live-cov" or config.walks is None
+    if not needs:
+        return
+    version = getattr(tinyns_module, "__version__", None)
+    if version is None or _version_tuple(version) < _version_tuple(TINYNS_LIVECOV_MIN_VERSION):
+        raise ValueError(
+            f"TinyNS rwalk_proposal={config.rwalk_proposal!r} / walks={config.walks!r} needs "
+            f"tinyns >= {TINYNS_LIVECOV_MIN_VERSION}; installed tinyns is {version or 'unversioned'}"
+        )
+
+
 __all__ = [
     "BASE_DEFAULTS",
     "PRESETS",
@@ -458,6 +492,7 @@ __all__ = [
     "TinyNSConfig",
     "build_tinyns_config",
     "parse_chain_schedule",
+    "require_tinyns_for_config",
     "tiny_ns_preset_defaults",
     "tinyns_run_kwargs",
     "tinyns_sampler_kwargs",

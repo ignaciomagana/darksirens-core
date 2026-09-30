@@ -202,7 +202,7 @@ def test_invalid_configurations_fail_eagerly(kwargs, message):
 
 from types import SimpleNamespace as _NS  # noqa: E402
 
-from darksirens.inference.tinyns_adapter import require_tinyns_for_config  # noqa: E402
+from darksirens.inference.tinyns_config import require_tinyns_for_config  # noqa: E402
 from darksirens.inference.tinyns_config import (  # noqa: E402
     PRESETS as _PRESETS,
     build_tinyns_config as _build,

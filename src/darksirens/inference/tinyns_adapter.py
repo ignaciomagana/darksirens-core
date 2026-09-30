@@ -17,6 +17,8 @@ from darksirens.inference.nested_output import (
     termination_record,
 )
 from darksirens.inference.tinyns_config import (
+    _version_tuple,
+    require_tinyns_for_config,
     build_tinyns_config,
     tinyns_run_kwargs,
     tinyns_sampler_kwargs,
@@ -118,47 +120,12 @@ def _tinyns_termination(diagnostics):
 TINYNS_PYTREE_MIN_VERSION = "0.2.0"
 
 
-def _version_tuple(text):
-    try:
-        from packaging.version import Version
-
-        return Version(str(text))
-    except ImportError:  # packaging is not a declared dependency of core
-        parts = []
-        for piece in str(text).split("."):
-            digits = "".join(ch for ch in piece if ch.isdigit())
-            if not digits:
-                break
-            parts.append(int(digits))
-        return tuple(parts)
-
-
 def tinyns_supports_pytree_loglike(tinyns_module) -> bool:
     """Whether the installed TinyNS takes a pytree log-likelihood (>= 0.2.0)."""
     version = getattr(tinyns_module, "__version__", None)
     if version is None:
         return False
     return _version_tuple(version) >= _version_tuple(TINYNS_PYTREE_MIN_VERSION)
-
-
-def require_tinyns_for_config(config, tinyns_module) -> None:
-    """Refuse settings the installed TinyNS cannot run, before any sampling.
-
-    ``rwalk_proposal="live-cov"`` and ``walks=None`` (the ``livecov`` preset)
-    need TinyNS >= 0.2.0; older releases removed live-cov and require an
-    integer ``walks``.
-    """
-    from darksirens.inference.tinyns_config import TINYNS_LIVECOV_MIN_VERSION
-
-    needs = config.rwalk_proposal == "live-cov" or config.walks is None
-    if not needs:
-        return
-    version = getattr(tinyns_module, "__version__", None)
-    if version is None or _version_tuple(version) < _version_tuple(TINYNS_LIVECOV_MIN_VERSION):
-        raise ValueError(
-            f"TinyNS rwalk_proposal={config.rwalk_proposal!r} / walks={config.walks!r} needs "
-            f"tinyns >= {TINYNS_LIVECOV_MIN_VERSION}; installed tinyns is {version or 'unversioned'}"
-        )
 
 
 def tinyns_loglike(likelihood, tinyns_module):
