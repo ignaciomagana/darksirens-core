@@ -71,8 +71,22 @@ PRESETS = {
         rwalk_proposal="live-cov", walks=5, replacement_chains=16,
         jax_block_size=1,
     ),
+    # TinyNS >= 0.2.0: the live-covariance rwalk proposal, unbounded by design.
+    # walks=None is resolved by TinyNS (walks = max(25, 6 * ndim)) and
+    # max_attempts=None is not passed, so TinyNS's default applies; step_scale is the initial scale, which live-cov adapts
+    # to its target acceptance.
+    "livecov": dict(
+        sample="rwalk", kernel="jax", rwalk_proposal="live-cov", walks=None,
+        step_scale=0.5, min_accepts=1, replacement_chains=1,
+        replacement_chain_schedule=None, bound="none", jax_block_size=32,
+        jax_vectorized=False, vectorized=False, batch_size=128, max_attempts=None,
+    ),
     "custom": {},
 }
+
+#: Settings that need TinyNS >= 0.2.0 (the release with the live-cov proposal
+#: and the dimension-resolved ``walks``).
+TINYNS_LIVECOV_MIN_VERSION = "0.2.0"
 
 BASE_DEFAULTS = dict(
     sample="rwalk", kernel="jax", vectorized=False, max_attempts=None,
@@ -108,8 +122,8 @@ class TinyNSConfig:
     sample: str
     kernel: str
     vectorized: bool
-    max_attempts: int
-    walks: int
+    max_attempts: int | None
+    walks: int | None
     step_scale: float
     batch_size: int
     min_accepts: int
@@ -217,7 +231,7 @@ def build_tinyns_config(opts):
         if values["replacement_chain_schedule"]
         else int(values["replacement_chains"])
     )
-    if values.get("max_attempts") is None:
+    if values.get("max_attempts") is None and values.get("walks") is not None:
         values["max_attempts"] = max(10000, int(values["walks"]) * max_active)
 
     config = TinyNSConfig(
@@ -303,8 +317,12 @@ def validate_tinyns_config(config):
             "replacement_chain_schedule and replacement_chains != 1 are mutually "
             "exclusive."
         )
+    if config.walks is None and config.sample != "rwalk":
+        raise ValueError("TinyNS walks=None (resolved by TinyNS from ndim) requires sample='rwalk'.")
+    if config.walks is None and config.max_attempts is not None:
+        raise ValueError("TinyNS walks=None needs max_attempts=None: TinyNS resolves both from ndim.")
     if (
-        config.walks <= 0
+        (config.walks is not None and config.walks <= 0)
         or config.step_scale <= 0
         or config.batch_size <= 0
         or config.min_accepts <= 0
@@ -317,7 +335,7 @@ def validate_tinyns_config(config):
         if config.replacement_chain_schedule
         else config.replacement_chains
     )
-    if config.max_attempts < config.walks * max_active:
+    if config.walks is not None and config.max_attempts < config.walks * max_active:
         raise ValueError(
             "TinyNS max_attempts must be >= walks * max_active_chains."
         )
@@ -409,7 +427,12 @@ def tinyns_sampler_kwargs(config):
         "allow_unused_bound", "fused_bound_rwalk", "bound_rebuild_on_failure",
         "bound_failure_rebuild_threshold", "jax_vectorized", "jax_block_size",
     ]
-    return {key: getattr(config, key) for key in keys}
+    kwargs = {key: getattr(config, key) for key in keys}
+    # max_attempts=None (walks=None) is left to TinyNS's own default: TinyNS
+    # takes it as an int and refuses an explicit None.
+    if kwargs["max_attempts"] is None:
+        del kwargs["max_attempts"]
+    return kwargs
 
 
 def tinyns_run_kwargs(config):

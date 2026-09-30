@@ -196,3 +196,59 @@ def test_zero_max_samples_means_no_tinyns_iteration_cap():
 def test_invalid_configurations_fail_eagerly(kwargs, message):
     with pytest.raises(ValueError, match=message):
         build_tinyns_config(SimpleNamespace(**kwargs))
+
+
+# --- the livecov preset (TinyNS >= 0.2.0) -----------------------------------
+
+from types import SimpleNamespace as _NS  # noqa: E402
+
+from darksirens.inference.tinyns_adapter import require_tinyns_for_config  # noqa: E402
+from darksirens.inference.tinyns_config import (  # noqa: E402
+    PRESETS as _PRESETS,
+    build_tinyns_config as _build,
+    tinyns_sampler_kwargs as _kwargs,
+    validate_tinyns_config as _validate,
+)
+
+
+def test_livecov_preset_leaves_walks_and_max_attempts_to_tinyns():
+    config = _build(_NS(tinyns_preset="livecov"))
+    _validate(config)
+    assert config.rwalk_proposal == "live-cov" and config.bound == "none"
+    assert config.walks is None and config.max_attempts is None
+    kw = _kwargs(config)
+    # walks=None goes through (TinyNS resolves it); max_attempts is not passed,
+    # since TinyNS refuses an explicit None and applies its own default.
+    assert kw["walks"] is None and "max_attempts" not in kw and kw["step_scale"] == 0.5
+    assert _kwargs(_build(_NS()))["max_attempts"] == max(10000, 5)
+
+
+def test_livecov_with_explicit_walks_resolves_max_attempts_in_core():
+    config = _build(_NS(tinyns_preset="livecov", tinyns_walks=78))
+    _validate(config)
+    assert config.walks == 78 and config.max_attempts == max(10000, 78)
+
+
+def test_walks_none_with_a_fixed_max_attempts_is_refused():
+    with pytest.raises(ValueError, match="walks=None needs max_attempts=None"):
+        _build(_NS(tinyns_preset="livecov", tinyns_max_attempts=5000))
+
+
+def test_existing_presets_are_unchanged_by_the_livecov_addition():
+    assert _PRESETS["recommended"]["walks"] == 5 and _PRESETS["recommended"]["rwalk_proposal"] == "isotropic"
+    assert _build(_NS()).max_attempts == max(10000, 5)
+
+
+@pytest.mark.parametrize("version, ok", [("0.1.0", False), (None, False), ("0.2.0", True), ("0.3.1", True)])
+def test_livecov_needs_tinyns_0_2_0(version, ok):
+    config = _build(_NS(tinyns_preset="livecov"))
+    module = _NS() if version is None else _NS(__version__=version)
+    if ok:
+        require_tinyns_for_config(config, module)
+    else:
+        with pytest.raises(ValueError, match="needs tinyns >= 0.2.0"):
+            require_tinyns_for_config(config, module)
+
+
+def test_isotropic_presets_run_on_old_tinyns():
+    require_tinyns_for_config(_build(_NS()), _NS(__version__="0.1.0"))
