@@ -72,9 +72,10 @@ PRESETS = {
         jax_block_size=1,
     ),
     # TinyNS >= 0.2.0: the live-covariance rwalk proposal, unbounded by design.
-    # walks=None is resolved by TinyNS (walks = max(25, 6 * ndim)) and
-    # max_attempts=None is not passed, so TinyNS's default applies; step_scale is the initial scale, which live-cov adapts
-    # to its target acceptance.
+    # walks=None leaves the walk length to TinyNS, which chooses it from the
+    # dimension (the rule depends on the TinyNS release). max_attempts=None is
+    # not passed, so TinyNS's default applies. step_scale is the initial scale,
+    # which live-cov adapts to its target acceptance.
     "livecov": dict(
         sample="rwalk", kernel="jax", rwalk_proposal="live-cov", walks=None,
         step_scale=0.5, min_accepts=1, replacement_chains=1,
@@ -320,7 +321,7 @@ def validate_tinyns_config(config):
     if config.walks is None and config.sample != "rwalk":
         raise ValueError("TinyNS walks=None (resolved by TinyNS from ndim) requires sample='rwalk'.")
     if config.walks is None and config.max_attempts is not None:
-        raise ValueError("TinyNS walks=None needs max_attempts=None: TinyNS resolves both from ndim.")
+        raise ValueError("TinyNS walks=None needs max_attempts=None: TinyNS chooses both.")
     if (
         (config.walks is not None and config.walks <= 0)
         or config.step_scale <= 0
