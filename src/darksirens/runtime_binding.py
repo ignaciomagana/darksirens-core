@@ -298,6 +298,47 @@ class BoundAnalysis:
             operands += (self.kernel_pin,)
         return self._log_likelihood(*operands)
 
+    def as_pytree_callable(self):
+        """This binding's log-likelihood as a pytree callable: data as leaves, not constants.
+
+        Returns a :class:`jax.tree_util.Partial` whose array leaves are the
+        operands :meth:`__call__` passes (PE and selection samples, compact
+        catalog, observed-density cache, kernel pin) plus the distance table
+        and the ambient jit channels (e.g. the smoothing operator), resolved
+        once here. Calling it with ``theta`` returns exactly ``self(theta)``.
+
+        A caller that traces the likelihood inside its own program (a sampler
+        kernel under ``jax.jit`` or ``vmap``) and receives this object as an
+        argument sees the data as arguments of that program. A plain closure
+        over ``self`` would instead make every data array a constant of the
+        caller's program (compile time and host memory grow with the data).
+        The table and channels are snapshots: rebind after changing them.
+        """
+        import jax
+        from darksirens.cosmology.distances import _AMBIENT_JIT_CHANNELS, resolve_distance_table
+
+        jitted = self._log_likelihood.jitted
+        table = resolve_distance_table(None)
+        ambient = tuple(resolve() for resolve, _ in _AMBIENT_JIT_CHANNELS)
+
+        def _evaluate_operands(gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin,
+                               distance_table, ambient_extras, theta):
+            args = (jnp.asarray(theta), gw_pe, gw_selection, catalog, observed_density_cache)
+            if kernel_pin is not None:
+                args += (kernel_pin,)
+            return jitted(*args, distance_table=distance_table, _ambient_extras=ambient_extras)
+
+        return jax.tree_util.Partial(
+            _evaluate_operands,
+            self.gw_pe,
+            self.gw_selection,
+            self.catalog,
+            self.observed_density_cache,
+            self.kernel_pin,
+            table,
+            ambient,
+        )
+
     def _evaluate(
         self,
         theta,
