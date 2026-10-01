@@ -107,6 +107,10 @@ def build_incomplete_catalog_prior_state_from_curves(
     log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
     if pin_ok is not None:
         log_Z = log_Z + jnp.where(pin_ok, 0.0, jnp.nan)
+    if kernels.layout_ok is not None:
+        # A galaxy list that is not this catalog's real galaxies: the same
+        # poison as a failed pin probe (opt-in kernel_layout="galaxy_list").
+        log_Z = log_Z + jnp.where(kernels.layout_ok, 0.0, jnp.nan)
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_Nobs,
@@ -197,6 +201,11 @@ def build_complete_catalog_prior_state(
     """
 
     complete_params = params._replace(z_depth=None)
+    # The galaxy-list layout is an incomplete-catalog opt-in: this model has
+    # no row normaliser to spend the list's check on, so it reads the padded
+    # catalog.
+    if getattr(catalog, "galaxy_index", None) is not None:
+        catalog = catalog._replace(galaxy_index=None)
     kernels = build_catalog_kernel_state(cosmo, complete_params, catalog)
     row_has = jnp.asarray(catalog.ngals) > 0
     pvol = normalized_comoving_volume_grid(cosmo)

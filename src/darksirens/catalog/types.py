@@ -47,13 +47,30 @@ class CatalogParameters(NamedTuple):
     z_depth: Any = None
 
 
+class GalaxyIndex(NamedTuple):
+    """Where the real galaxies of a padded catalog sit, as one flat list.
+
+    ``flat[k] = row * N_max + slot`` for every real galaxy (``slot <
+    ngals[row]``), in strictly increasing order, so ``flat // N_max`` is each
+    galaxy's row.  It is derived from ``ngals`` on the host
+    (:func:`darksirens.catalog.redshift.galaxy_index`) and lets the opt-in
+    ``kernel_layout="galaxy_list"`` evaluate per-galaxy quantities on the real
+    galaxies only (:mod:`darksirens.catalog.settings`).
+    """
+
+    flat: Any
+
+
 class GalaxyCatalog(NamedTuple):
     """Padded, pixel-row catalog in the core standardized schema.
 
     The first ``ngals[row]`` columns of each row are real galaxies.  Remaining
     columns are padding and are ignored regardless of their stored values.
     ``unique_pixels`` maps compact rows back to global HEALPix ids; ``None``
-    means row ``r`` is global pixel ``r``.
+    means row ``r`` is global pixel ``r``.  ``galaxy_index`` is ``None``
+    (default) or the :class:`GalaxyIndex` of this catalog's real galaxies,
+    attached with :func:`darksirens.catalog.redshift.with_galaxy_index`; only
+    the opt-in galaxy-list kernel layout reads it.
     """
 
     apix: Any
@@ -62,6 +79,7 @@ class GalaxyCatalog(NamedTuple):
     wgals: Any
     ngals: Any
     unique_pixels: Any = None
+    galaxy_index: Any = None
 
 
 class CatalogSampleView(NamedTuple):

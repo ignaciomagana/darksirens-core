@@ -42,7 +42,7 @@ from darksirens.cosmology._grid import log_interp_zgrid, zgrid
 from darksirens.cosmology.distances import dV_of_z, threads_distance_table
 from darksirens.cosmology.parameters import H0_FID, CosmologyParameters
 
-from .types import CatalogParameters, GalaxyCatalog
+from .types import CatalogParameters, GalaxyCatalog, GalaxyIndex
 
 jax.config.update("jax_enable_x64", True)
 
@@ -63,6 +63,14 @@ _KERNEL_SENTINEL_CUT: float = -1.0e29
 _ROW_CHUNK_AUTO_THRESHOLD: int = 2**25
 _ROW_CHUNK_SIZE: int = 512
 
+# Opt-in galaxy-list layout (``kernel_layout="galaxy_list"``): the per-galaxy
+# normaliser runs over the real galaxies in at most _GALAXY_CHUNKS_MAX chunks of
+# at least _GALAXY_CHUNK_MIN galaxies, evaluated one after another, so its node
+# arrays are (chunk x 24) rather than (N_galaxies x 24).  Each galaxy executes
+# the same arithmetic in any chunk.
+_GALAXY_CHUNK_MIN: int = 2**16
+_GALAXY_CHUNKS_MAX: int = 32
+
 
 class CatalogKernelState(NamedTuple):
     """Per-proposal ordinary observed-catalog kernel state.
@@ -72,6 +80,12 @@ class CatalogKernelState(NamedTuple):
     evaluator reads only the fused leaves (``log_kw_eff``,
     ``log_kw_eff_rowmax``, ``inv_sig_eff``, ``row_empty``) and the prior state
     reads ``log_depth_mass``, so the pin does not keep the other three.
+
+    ``layout_ok`` is ``None`` except on a state built from a catalog that
+    carries a galaxy list (``kernel_layout="galaxy_list"``): there it is the
+    traced verdict that the list is exactly the catalog's real galaxies,
+    which the incomplete-catalog prior spends on its normaliser (a stale list
+    makes the likelihood ``-inf``, never a finite wrong value).
     """
 
     log_g_grid: Any
@@ -84,6 +98,7 @@ class CatalogKernelState(NamedTuple):
     log_kw_eff: Any
     log_kw_eff_rowmax: Any
     inv_sig_eff: Any
+    layout_ok: Any = None
 
 
 def log_galaxy_measure_grid(
@@ -125,7 +140,93 @@ def _log_ndtr_span(lo, hi):
     return log_hi + jnp.log(-jnp.expm1(jnp.minimum(log_lo - log_hi, -1.0e-16)))
 
 
-def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
+# Cephes ndtri coefficients exactly as ``jax.scipy.special.ndtri`` (jax
+# 0.4.34) spells them, constant term first.  P0 has five; the four zero
+# high-order terms appended leave its Horner value bit for bit unchanged.
+_NDTRI_P0 = tuple(reversed((
+    -5.99633501014107895267E1, 9.80010754185999661536E1, -5.66762857469070293439E1,
+    1.39312609387279679503E1, -1.23916583867381258016E0,
+))) + (0.0,) * 4
+_NDTRI_Q0 = tuple(reversed((
+    1.0, 1.95448858338141759834E0, 4.67627912898881538453E0, 8.63602421390890590575E1,
+    -2.25462687854119370527E2, 2.00260212380060660359E2, -8.20372256168333339912E1,
+    1.59056225126211695515E1, -1.18331621121330003142E0,
+)))
+_NDTRI_P1 = tuple(reversed((
+    4.05544892305962419923E0, 3.15251094599893866154E1, 5.71628192246421288162E1,
+    4.40805073893200834700E1, 1.46849561928858024014E1, 2.18663306850790267539E0,
+    -1.40256079171354495875E-1, -3.50424626827848203418E-2, -8.57456785154685413611E-4,
+)))
+_NDTRI_Q1 = tuple(reversed((
+    1.0, 1.57799883256466749731E1, 4.53907635128879210584E1, 4.13172038254672030440E1,
+    1.50425385692907503408E1, 2.50464946208309415979E0, -1.42182922854787788574E-1,
+    -3.80806407691578277194E-2, -9.33259480895457427372E-4,
+)))
+_NDTRI_P2 = tuple(reversed((
+    3.23774891776946035970E0, 6.91522889068984211695E0, 3.93881025292474443415E0,
+    1.33303460815807542389E0, 2.01485389549179081538E-1, 1.23716634817820021358E-2,
+    3.01581553508235416007E-4, 2.65806974686737550832E-6, 6.23974539184983293730E-9,
+)))
+_NDTRI_Q2 = tuple(reversed((
+    1.0, 6.02427039364742014255E0, 3.67983563856160859403E0, 1.37702099489081330271E0,
+    2.16236993594496635890E-1, 1.34204006088543189037E-2, 3.28014464682127739104E-4,
+    2.89247864745380683936E-6, 6.79019408009981274425E-9,
+)))
+
+
+def _ndtri_one_pass(p):
+    """``jax.scipy.special.ndtri`` with one rational evaluation per element.
+
+    The library function evaluates all three Cephes rational branches for
+    every element and then selects one.  Here each element selects its
+    branch's coefficients first and runs a single Horner pair over them;
+    every operation of the chosen branch is the library's, in the library's
+    order, so the value is the library's (checked bit for bit in the tests).
+    Used only by the opt-in galaxy-list layout.
+    """
+
+    dtype = lax.dtype(p).type
+    shape = jnp.shape(p)
+    maybe_complement_p = jnp.where(p > dtype(-np.expm1(-2.0)), dtype(1.0) - p, p)
+    sanitized_mcp = jnp.where(
+        maybe_complement_p == dtype(0.0),
+        jnp.full(shape, dtype(0.5)),
+        maybe_complement_p,
+    )
+    big = sanitized_mcp > dtype(np.exp(-2.0))
+    w = sanitized_mcp - dtype(0.5)
+    ww = lax.square(w)
+    z = lax.sqrt(dtype(-2.0) * lax.log(sanitized_mcp))
+    tail = z >= dtype(8.0)
+    var = jnp.where(big, ww, dtype(1.0) / z)
+
+    def coefficients(c_big, c_tail, c_mid):
+        return [
+            jnp.where(big, dtype(b), jnp.where(tail, dtype(t), dtype(m)))
+            for b, t, m in zip(c_big, c_tail, c_mid)
+        ]
+
+    def horner(coeffs):
+        out = jnp.zeros_like(var)
+        for c in reversed(coeffs):
+            out = c + out * var
+        return out
+
+    ratio = horner(coefficients(_NDTRI_P0, _NDTRI_P2, _NDTRI_P1)) / horner(
+        coefficients(_NDTRI_Q0, _NDTRI_Q2, _NDTRI_Q1)
+    )
+    x_for_big_p = w + w * ww * ratio
+    x_for_big_p *= -dtype(np.sqrt(2.0 * np.pi))
+    x_for_tail = z - lax.log(z) / z - ratio / z
+    x = jnp.where(big, x_for_big_p, x_for_tail)
+    x = jnp.where(p > dtype(1.0 - np.exp(-2.0)), x, -x)
+    infinity = jnp.full(shape, dtype(np.inf))
+    return jnp.where(
+        p == dtype(0.0), -infinity, jnp.where(p == dtype(1.0), infinity, x)
+    )
+
+
+def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX, ndtri_fn=ndtri):
     """Legacy 24-node CDF-space Gauss-Legendre ``log Z_i`` for one row."""
 
     a = ndtr(-zs / sig_eff)
@@ -134,7 +235,7 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX):
     u = a[..., None] + span[..., None] * _GL_X
     u = jnp.clip(u, 1.0e-12, 1.0 - 1.0e-12)
     z_node = jnp.clip(
-        zs[..., None] + sig_eff[..., None] * ndtri(u), 0.0, z_hi
+        zs[..., None] + sig_eff[..., None] * ndtri_fn(u), 0.0, z_hi
     )
     g = jnp.exp(log_interp_zgrid(z_node.reshape(-1), log_g_grid)).reshape(
         z_node.shape
@@ -163,16 +264,20 @@ def _renormalize_below_depth(
     log_g_grid,
     z_depth,
     has_galaxies,
+    log_Z_depth=None,
 ):
     """Renormalize the observed mixture onto ``[0, z_depth]``.
 
     The returned scalar is the mixture mass below the depth before
     renormalization.  Phase 5B uses it to scale the observed-count amplitude.
+    ``log_Z_depth``, when given, is the truncated normaliser already
+    evaluated (zero on padding), as :func:`_row_log_kernel_norms` returns it.
     """
 
-    log_Z_depth = _row_log_kernel_norms(
-        zs, sig_eff, real, log_g_grid, z_hi=z_depth
-    )
+    if log_Z_depth is None:
+        log_Z_depth = _row_log_kernel_norms(
+            zs, sig_eff, real, log_g_grid, z_hi=z_depth
+        )
     log_m = jnp.where(
         has_galaxies,
         _logsumexp_neginf_safe(log_kw + log_Z_depth),
@@ -189,6 +294,8 @@ def _row_kernel_state(
     sigma_kde,
     log_g_grid,
     z_depth=None,
+    log_Z=None,
+    log_Z_depth=None,
 ):
     real = _row_real_mask(zs, ws, ngal)
     sig_eff = jnp.maximum(
@@ -201,7 +308,8 @@ def _row_kernel_state(
         real, log_w - jnp.where(has_galaxies, lse, 0.0), -jnp.inf
     )
 
-    log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
+    if log_Z is None:
+        log_Z = _row_log_kernel_norms(zs, sig_eff, real, log_g_grid)
     log_kw = jnp.where(real, log_w_norm - log_Z, -jnp.inf)
     log_depth_mass = jnp.zeros((), dtype=sig_eff.dtype)
     if z_depth is not None:
@@ -213,6 +321,7 @@ def _row_kernel_state(
             log_g_grid,
             z_depth,
             has_galaxies,
+            log_Z_depth=log_Z_depth,
         )
     return log_kw, sig_eff, log_depth_mass
 
@@ -269,27 +378,183 @@ def _log_kw_eff_rowmax(log_kw_eff):
     return jnp.where(rowmax > _KERNEL_SENTINEL_CUT, rowmax, 0.0)
 
 
+# ------------------------------------------------------------------------
+# Opt-in galaxy-list layout of the per-galaxy normaliser
+# ------------------------------------------------------------------------
+def galaxy_index(catalog: GalaxyCatalog) -> GalaxyIndex:
+    """The flat positions of ``catalog``'s real galaxies (host side, NumPy).
+
+    Real galaxies are the first ``ngals[row]`` slots of each row, the mask
+    the kernel builder uses.  The positions are ``row * N_max + slot``,
+    strictly increasing, int32 (int64 if the padded catalog has 2**31 or more
+    slots).  Concrete arrays only: build it outside any trace.
+    """
+
+    if any(
+        isinstance(leaf, jax.core.Tracer)
+        for leaf in jax.tree_util.tree_leaves((catalog.zgals, catalog.ngals))
+    ):
+        raise TypeError(
+            "galaxy_index reads the catalog on the host: build it outside any jit or trace"
+        )
+    n_rows, n_max = (int(n) for n in np.shape(catalog.zgals))
+    ngals = np.asarray(catalog.ngals).astype(np.int64)
+    if ngals.shape != (n_rows,) or np.any(ngals < 0) or np.any(ngals > n_max):
+        raise ValueError("ngals must be (N_rows,) counts in [0, N_max]")
+    dtype = np.int32 if n_rows * n_max < 2**31 else np.int64
+    real = np.arange(n_max)[None, :] < ngals[:, None]
+    return GalaxyIndex(flat=np.flatnonzero(real.reshape(-1)).astype(dtype))
+
+
+def with_galaxy_index(catalog: GalaxyCatalog) -> GalaxyCatalog:
+    """``catalog`` carrying its :class:`GalaxyIndex` (the galaxy-list opt-in).
+
+    With the index attached, :func:`build_catalog_kernel_state` evaluates the
+    per-galaxy kernel normaliser on the real galaxies only
+    (``kernel_layout="galaxy_list"``, :mod:`darksirens.catalog.settings`).
+    The index is a device array when the catalog's arrays are, so a jitted
+    caller receives it as an operand like the rest of the catalog.  Attach it
+    to the final catalog view (after compaction), and again whenever the view
+    changes: a list that does not match ``ngals`` makes the incomplete-catalog
+    likelihood ``-inf``.
+    """
+
+    index = galaxy_index(catalog)
+    if isinstance(catalog.zgals, jax.Array):
+        index = GalaxyIndex(flat=jnp.asarray(index.flat))
+    return catalog._replace(galaxy_index=index)
+
+
+def _galaxy_index_ok(flat, ngals, n_rows: int, n_max: int):
+    """Traced check that ``flat`` lists exactly the real galaxies, in order."""
+
+    n = int(flat.shape[0])
+    ngals = jnp.asarray(ngals)
+    row = flat // n_max
+    slot = flat - row * n_max
+    in_range = (flat >= 0) & (row < n_rows)
+    is_real = slot < ngals[jnp.clip(row, 0, max(n_rows - 1, 0))]
+    ok = (jnp.sum(ngals) == n) & jnp.all(in_range & is_real)
+    if n > 1:
+        ok = ok & jnp.all(flat[1:] > flat[:-1])
+    return ok
+
+
+def _map_galaxy_chunks(fn, zs, sig):
+    """``fn`` over flat per-galaxy arrays, chunk after chunk.
+
+    The chunks are unrolled, not looped: XLA on CPU runs the body of a loop
+    on one thread, while each unrolled chunk is an ordinary top-level
+    computation.  Each chunk's inputs take a data dependence on the previous
+    chunk's output (``+ 0.0 * [flag]`` with the flag 0 or 1, which leaves
+    every value as it is and lets no NaN or inf in), so the chunks run in
+    order and only
+    one chunk's node arrays need be live at a time.  (``lax.optimization_barrier``
+    would say this directly, but in jax 0.4.34 it has no batching or
+    differentiation rule.)
+    """
+
+    n = int(zs.shape[0])
+    n_chunks = min(_GALAXY_CHUNKS_MAX, -(-n // _GALAXY_CHUNK_MIN))
+    if n_chunks <= 1:
+        return fn(zs, sig)
+    bounds = [round(k * n / n_chunks) for k in range(n_chunks + 1)]
+    outs = []
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        z_k, s_k = zs[lo:hi], sig[lo:hi]
+        if outs:
+            previous = outs[-1][0]
+            after = (previous[0] > previous[-1]).astype(z_k.dtype) * 0.0
+            z_k, s_k = z_k + after, s_k + after
+        outs.append(fn(z_k, s_k))
+    return tuple(jnp.concatenate(parts) for parts in zip(*outs))
+
+
+def _galaxy_list_log_kernel_norms(catalog, sigma_kde, log_g_grid, z_depth):
+    """Padded ``log Z`` (and ``log Z`` below the depth) from the galaxy list.
+
+    Each real galaxy runs the per-row normaliser's arithmetic
+    (:func:`_row_log_kernel_norms`, with the one-pass ndtri); padding slots
+    get 0.0, as the per-row normaliser writes there.  Returns the padded
+    normaliser(s) and the traced verdict of :func:`_galaxy_index_ok`.
+    """
+
+    flat = jnp.asarray(catalog.galaxy_index.flat)
+    n_rows, n_max = (int(n) for n in catalog.zgals.shape)
+    zs = jnp.asarray(catalog.zgals).reshape(-1)[flat]
+    dzs = jnp.asarray(catalog.dzgals).reshape(-1)[flat]
+    sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
+    z_his = (_ZMAX,) if z_depth is None else (_ZMAX, z_depth)
+
+    def norms(z, s):
+        return tuple(
+            _row_log_kernel_norms(
+                z, s, True, log_g_grid, z_hi=z_hi, ndtri_fn=_ndtri_one_pass
+            )
+            for z_hi in z_his
+        )
+
+    flat_norms = _map_galaxy_chunks(norms, zs, sig_eff)
+    padded = tuple(
+        jnp.zeros((n_rows * n_max,), dtype=values.dtype)
+        .at[flat]
+        .set(values, indices_are_sorted=True, unique_indices=True)
+        .reshape(n_rows, n_max)
+        for values in flat_norms
+    )
+    ok = _galaxy_index_ok(flat, catalog.ngals, n_rows, n_max)
+    return padded[0], (padded[1] if z_depth is not None else None), ok
+
+
 def build_catalog_kernel_state(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
     catalog: GalaxyCatalog,
 ) -> CatalogKernelState:
-    """Build per-galaxy observed-host kernel quantities once per proposal."""
+    """Build per-galaxy observed-host kernel quantities once per proposal.
+
+    A catalog that carries a galaxy list (:func:`with_galaxy_index`) has its
+    per-galaxy normaliser evaluated on the real galaxies only (the opt-in
+    ``kernel_layout="galaxy_list"``); every other step, and the state
+    returned, is the padded one.
+    """
 
     log_g_grid = log_galaxy_measure_grid(cosmo, params)
     z, dz, w, ng = catalog.zgals, catalog.dzgals, catalog.wgals, catalog.ngals
-    log_kw, sig_eff, log_depth_mass = _map_rows(
-        lambda zs, dzs, ws, ngal: _row_kernel_state(
-            zs,
-            dzs,
-            ws,
-            ngal,
-            params.sigma_kde,
-            log_g_grid,
-            params.z_depth,
-        ),
-        (z, dz, w, ng),
-    )
+    layout_ok = None
+    if getattr(catalog, "galaxy_index", None) is None:
+        log_kw, sig_eff, log_depth_mass = _map_rows(
+            lambda zs, dzs, ws, ngal: _row_kernel_state(
+                zs,
+                dzs,
+                ws,
+                ngal,
+                params.sigma_kde,
+                log_g_grid,
+                params.z_depth,
+            ),
+            (z, dz, w, ng),
+        )
+    else:
+        log_Z, log_Z_depth, layout_ok = _galaxy_list_log_kernel_norms(
+            catalog, params.sigma_kde, log_g_grid, params.z_depth
+        )
+        if log_Z_depth is None:
+            log_kw, sig_eff, log_depth_mass = _map_rows(
+                lambda zs, dzs, ws, ngal, lz: _row_kernel_state(
+                    zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
+                    params.z_depth, log_Z=lz,
+                ),
+                (z, dz, w, ng, log_Z),
+            )
+        else:
+            log_kw, sig_eff, log_depth_mass = _map_rows(
+                lambda zs, dzs, ws, ngal, lz, lzd: _row_kernel_state(
+                    zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
+                    params.z_depth, log_Z=lz, log_Z_depth=lzd,
+                ),
+                (z, dz, w, ng, log_Z, log_Z_depth),
+            )
     row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1.0e30)
     log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
@@ -304,6 +569,7 @@ def build_catalog_kernel_state(
         log_kw_eff=log_kw_eff,
         log_kw_eff_rowmax=_log_kw_eff_rowmax(log_kw_eff),
         inv_sig_eff=_inv_sig_eff(log_kw_eff, sig_eff),
+        layout_ok=layout_ok,
     )
 
 
@@ -647,6 +913,11 @@ def build_pinned_catalog_kernel(
         ref, params, catalog, H0_ref=KERNEL_PIN_H0_REF, probe_rows=probe_rows
     )
     state = _state(catalog)
+    if state.layout_ok is not None and not bool(state.layout_ok):
+        raise ValueError(
+            "the catalog's galaxy list does not match its ngals: attach it with "
+            "with_galaxy_index to the catalog view the pin is built from"
+        )
     return PinnedCatalogKernel(
         H0_ref=ref.H0,
         log_kw_eff=state.log_kw_eff,
@@ -834,8 +1105,10 @@ __all__ = [
     "check_pinned_catalog_kernel",
     "eval_log_catalog_prior_state",
     "eval_log_catalog_prior_state_vmap",
+    "galaxy_index",
     "log_catalog_prior",
     "log_catalog_prior_vmap",
     "log_galaxy_measure_grid",
     "pinned_catalog_kernel_state",
+    "with_galaxy_index",
 ]

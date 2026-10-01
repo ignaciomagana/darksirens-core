@@ -256,6 +256,11 @@ def build_field_incomplete_catalog_prior_state_from_curves(
     from another catalog or premise (:func:`check_field_kernel_pin`); under
     the jit the target checks that on the host.  Without a pin the state is
     built exactly as before.
+
+    A catalog carrying a galaxy list
+    (:func:`~darksirens.catalog.redshift.with_galaxy_index`, the opt-in
+    ``kernel_layout="galaxy_list"``) has its per-galaxy kernel normaliser
+    evaluated on the real galaxies only.
     """
 
     if pinned_kernel is not None:
