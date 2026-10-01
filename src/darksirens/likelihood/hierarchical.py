@@ -101,8 +101,14 @@ def spectral_siren_log_likelihood(
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
+    compute_dtype: str | None = None,
 ):
-    """Evaluate the catalog-free spectral-siren hierarchical likelihood."""
+    """Evaluate the catalog-free spectral-siren hierarchical likelihood.
+
+    ``compute_dtype`` (default ``None``, the float64 program): ``"float32"``
+    evaluates the per-sample PE and selection weights in float32 and keeps
+    every reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
+    """
     pop_params = jnp.asarray(pop_params)
     if pop_params.ndim == 0 or int(pop_params.shape[0]) == 0:
         raise ValueError(
@@ -158,6 +164,21 @@ def spectral_siren_log_likelihood(
             dL_grid=dL_grid,
         )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+    compute_dtype = _resolve_compute_dtype(
+        compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
+    )
+    if compute_dtype is not None:
+        from .mixed_precision import make_log_weight, volume_log_prior
+
+        _log_weight = make_log_weight(
+            dtype=compute_dtype,
+            cosmology=cosmology,
+            pop_params=pop_params,
+            dL_grid=dL_grid,
+            log_p_pop=log_p_pop,
+            log_prior_z=volume_log_prior(cosmology, compute_dtype),
+        )
 
     def _selection_weight(m1det, q, dL, chieff, pix, prior_wt, _catalog, spin=None):
         return _log_weight(m1det, q, dL, chieff, pix, prior_wt, spin=spin)
@@ -217,6 +238,30 @@ def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw):
     return pop_params
 
 
+def _resolve_compute_dtype(
+    compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
+):
+    """``None`` (default program) or the low-precision dtype, after the scope checks."""
+    if compute_dtype is None:
+        return None
+    from .mixed_precision import (
+        require_angular_support,
+        require_population_support,
+        resolve_compute_dtype,
+    )
+
+    compute_dtype = resolve_compute_dtype(compute_dtype)
+    if compute_dtype is not None:
+        require_population_support(
+            pop_model,
+            shared_beta=shared_beta,
+            shared_spin=shared_spin,
+            shared_gamma=shared_gamma,
+        )
+        require_angular_support(angular_model)
+    return compute_dtype
+
+
 def _ordinary_hierarchical_likelihood(
     cosmology: CosmologyParameters,
     pop_params,
@@ -241,8 +286,17 @@ def _ordinary_hierarchical_likelihood(
     return_diagnostics: bool,
     angular_model: str = "isotropic",
     angular_params=None,
+    compute_dtype: str | None = None,
+    log_prior_pe_lowp=None,
+    log_prior_sel_lowp=None,
 ):
-    """Shared PE/selection reduction for explicit ordinary redshift models."""
+    """Shared PE/selection reduction for explicit ordinary redshift models.
+
+    With ``compute_dtype`` (already resolved, not ``None``), the PE and
+    selection weights are evaluated in that dtype with the redshift priors
+    ``log_prior_pe_lowp(z, pix)`` / ``log_prior_sel_lowp(z, pix)``, which must
+    evaluate in it; ``None`` is the default float64 program.
+    """
 
     pop_params = _validate_hierarchy_inputs(
         pop_params, pop_model, n_events, nsamp, n_draw
@@ -290,6 +344,18 @@ def _ordinary_hierarchical_likelihood(
 
     pe_weight = _weight(log_prior_pe, catalog_pe)
     sel_weight_core = _weight(log_prior_sel, catalog_sel)
+    if compute_dtype is not None:
+        from .mixed_precision import make_log_weight
+
+        lowp = dict(
+            dtype=compute_dtype,
+            cosmology=cosmology,
+            pop_params=pop_params,
+            dL_grid=dL_grid,
+            log_p_pop=log_p_pop,
+        )
+        pe_weight = make_log_weight(log_prior_z=log_prior_pe_lowp, **lowp)
+        sel_weight_core = make_log_weight(log_prior_z=log_prior_sel_lowp, **lowp)
 
     def selection_weight(m1det, q, dL, chieff, pix, prior_wt, _catalog, spin=None):
         return sel_weight_core(m1det, q, dL, chieff, pix, prior_wt, spin=spin)
@@ -360,6 +426,7 @@ def dark_siren_log_likelihood(
     return_diagnostics: bool = False,
     pinned_kernel_pe=None,
     pinned_kernel_sel=None,
+    compute_dtype: str | None = None,
 ):
     """Ordinary incomplete-catalog conditional dark-siren likelihood.
 
@@ -367,6 +434,11 @@ def dark_siren_log_likelihood(
     pins of the PE and selection catalog views
     (:func:`darksirens.catalog.redshift.build_pinned_catalog_kernel`), valid
     only while ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` are fixed.
+
+    ``compute_dtype`` (default ``None``, the float64 program): ``"float32"``
+    evaluates the per-sample PE and selection weights in float32, reading the
+    float64 per-proposal catalog state rounded to float32, and keeps every
+    reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
     """
 
     from darksirens.catalog.models import (
@@ -389,6 +461,23 @@ def dark_siren_log_likelihood(
     def prior_sel(z, pix, catalog):
         return eval_incomplete_catalog_prior_state_vmap(z, pix, state_sel, catalog)
 
+    lowp = {}
+    compute_dtype = _resolve_compute_dtype(
+        compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
+    )
+    if compute_dtype is not None:
+        from .mixed_precision import incomplete_catalog_log_prior
+
+        lowp = dict(
+            compute_dtype=compute_dtype,
+            log_prior_pe_lowp=incomplete_catalog_log_prior(
+                state_pe, catalog_pe, compute_dtype
+            ),
+            log_prior_sel_lowp=incomplete_catalog_log_prior(
+                state_sel, catalog_sel, compute_dtype
+            ),
+        )
+
     return _ordinary_hierarchical_likelihood(
         cosmology, pop_params, gw_pe, catalog_pe, gw_sel, catalog_sel,
         n_events, nsamp, n_draw,
@@ -405,6 +494,7 @@ def dark_siren_log_likelihood(
         return_diagnostics=return_diagnostics,
         angular_model=angular_model,
         angular_params=angular_params,
+        **lowp,
     )
 
 

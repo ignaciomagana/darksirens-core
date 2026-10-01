@@ -106,6 +106,7 @@ def infer(
     max_likelihood_variance=None,
     sel_batch_size=None,
     pe_event_block=None,
+    compute_dtype=None,
     **sampler_options,
 ):
     """Run an ordinary analysis or specialized target through core samplers."""
@@ -121,6 +122,7 @@ def infer(
         max_likelihood_variance=max_likelihood_variance,
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
+        compute_dtype=compute_dtype,
         **sampler_options,
     )
 

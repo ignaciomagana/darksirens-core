@@ -241,12 +241,25 @@ class BoundAnalysis:
     sel_batch_size: int | None = None
     pe_event_block: int | None = None
     kernel_pin: Any = None
+    # Opt-in: per-sample weights in this dtype ("float32"), every reduction in
+    # float64. None is the default float64 program (see bind_analysis).
+    compute_dtype: str | None = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.kernel_pin is not None:
             _require_admissible_kernel_pin(
                 self.analysis, self.catalog, self.kernel_pin, self.z_depth
+            )
+        if self.compute_dtype is not None:
+            object.__setattr__(
+                self,
+                "compute_dtype",
+                _require_compute_dtype_support(
+                    self.analysis,
+                    self.compute_dtype,
+                    spin_block=self.gw_pe.spin is not None,
+                ),
             )
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python
@@ -370,6 +383,10 @@ class BoundAnalysis:
             angular_model=self.analysis.angular_model,
             angular_params=angular,
         )
+        if self.compute_dtype is not None:
+            # Only spectral and incomplete-catalog bindings carry one (checked
+            # in __post_init__); the default call is left exactly as it was.
+            ordinary_common["compute_dtype"] = self.compute_dtype
 
         if isinstance(self.analysis.redshift, SpectralRedshift):
             return spectral_siren_log_likelihood(
@@ -530,6 +547,46 @@ def _kernel_pin_premise(analysis: Analysis, z_depth):
     return cosmology, catalog_params
 
 
+def _require_compute_dtype_support(analysis: Analysis, compute_dtype, *, spin_block: bool):
+    """The resolved ``compute_dtype`` of a binding, after its scope checks.
+
+    ``None`` and ``"float64"`` resolve to ``None`` (the default program).
+    ``"float32"`` is refused, with a ``ValueError``, for bright and
+    complete-catalog analyses, anisotropic angular models, component-spin
+    populations and Gaussian-process populations
+    (:mod:`darksirens.likelihood.mixed_precision` says why).
+    """
+    from darksirens.likelihood.mixed_precision import (
+        require_angular_support,
+        require_population_support,
+        resolve_compute_dtype,
+    )
+
+    compute_dtype = resolve_compute_dtype(compute_dtype)
+    if compute_dtype is None:
+        return None
+    if not isinstance(analysis.redshift, (SpectralRedshift, IncompleteCatalogRedshift)):
+        raise ValueError(
+            f"compute_dtype={compute_dtype!r} is implemented for spectral and "
+            "incomplete-catalog analyses only, got a "
+            f"{type(analysis.redshift).__name__} analysis"
+        )
+    population = analysis.population
+    require_population_support(
+        population.model_name,
+        shared_beta=population.shared_beta,
+        shared_spin=population.shared_spin,
+        shared_gamma=population.shared_gamma,
+    )
+    require_angular_support(analysis.angular_model)
+    if spin_block:
+        raise ValueError(
+            f"compute_dtype={compute_dtype!r} is not implemented for a "
+            "component-spin population"
+        )
+    return compute_dtype
+
+
 def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
     """The bind-time catalog kernel pin of a plan that admits one, else None.
 
@@ -561,7 +618,22 @@ def bind_analysis(
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
+    compute_dtype: str | None = None,
 ) -> BoundAnalysis:
+    """Bind an analysis to its GW stores and return the jitted log-likelihood.
+
+    ``compute_dtype`` is opt-in. ``None`` (default) and ``"float64"`` bind the
+    float64 program. ``"float32"`` evaluates the per-sample PE and selection
+    weights in float32 (the per-sample columns are rounded to float32 here, at
+    bind time) and returns each per-sample log weight as float64, so every
+    reduction (log-sum-exp, Monte-Carlo variances, ``N_eff``, soft guard,
+    final sum) stays float64; per-proposal grids are computed in float64. The
+    float32 likelihood is value-only (for gradient-free samplers): taking its
+    gradient raises ``TypeError``. It is available for spectral and
+    incomplete-catalog analyses with an isotropic angular model and a chi_eff,
+    non-Gaussian-process population; anything else raises ``ValueError``. See
+    :mod:`darksirens.likelihood.mixed_precision`.
+    """
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
     if not isinstance(events, GWStore):
@@ -572,6 +644,17 @@ def bind_analysis(
         )
 
     required = required_fit_columns(analysis)
+    if compute_dtype is not None:
+        from darksirens.likelihood.mixed_precision import resolve_compute_dtype
+
+        compute_dtype = resolve_compute_dtype(compute_dtype)
+        if compute_dtype is not None:
+            # Refuse an unsupported analysis before any store work.
+            _require_compute_dtype_support(
+                analysis,
+                compute_dtype,
+                spin_block=any(name in COMPONENT_SPIN_DATASETS for name in required),
+            )
     # The opt-in pairing m1 grid clamps above its ceiling; size and check it
     # against this model's support once, here, before any likelihood traces.
     ensure_pairing_grid_covers(
@@ -644,10 +727,19 @@ def bind_analysis(
     kernel_pin = (
         None if catalog is None else _build_kernel_pin(analysis, catalog, z_depth)
     )
+    gw_pe = _make_runtime_event(events, pe_pixels, required)
+    gw_selection = _make_runtime_event(injections, sel_pixels, required)
+    lowp = {}
+    if compute_dtype is not None:
+        from darksirens.likelihood.mixed_precision import cast_event
+
+        gw_pe = cast_event(gw_pe, compute_dtype)
+        gw_selection = cast_event(gw_selection, compute_dtype)
+        lowp["compute_dtype"] = compute_dtype
     return BoundAnalysis(
         analysis=analysis,
-        gw_pe=_make_runtime_event(events, pe_pixels, required),
-        gw_selection=_make_runtime_event(injections, sel_pixels, required),
+        gw_pe=gw_pe,
+        gw_selection=gw_selection,
         n_events=int(events.n_events),
         nsamp=int(events.nsamp),
         n_draw=float(injections.ndraw),
@@ -660,6 +752,7 @@ def bind_analysis(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         kernel_pin=kernel_pin,
+        **lowp,
     )
 
 
