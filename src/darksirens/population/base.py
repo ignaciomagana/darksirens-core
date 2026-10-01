@@ -127,6 +127,18 @@ def pack_specs(*specs: ParamSpec):
 
 # ── Stick-breaking ───────────────────────────────────────────────────────────
 
+def _match_dtype(x, ref):
+    """``x`` in ``ref``'s dtype; ``x`` itself (no op traced) when they agree.
+
+    The static check keeps the default float64 program untouched; only the
+    EXPERIMENTAL float32 per-sample path (``compute_dtype``) ever casts, so a
+    float64 normaliser or quadrature constant does not silently promote its
+    float32 per-sample arithmetic back to float64.
+    """
+    rd = jnp.result_type(ref)
+    return x if jnp.result_type(x) == rd else jnp.asarray(x).astype(rd)
+
+
 def _stick_breaking_weights(v_raw: jnp.ndarray) -> jnp.ndarray:
     """
     Map k−1 stick-breaking inputs v ∈ [0,1]^{k-1} to k mixture weights
@@ -246,6 +258,7 @@ class MassComponent(ABC):
         """
         p = self._eval_unnorm(m, theta)
         n = norm if norm is not None else self._norm(theta)
+        n = _match_dtype(n, p)
         return self._mask_to_support(m, p / jnp.where(n > 0, n, 1.0))
 
 
@@ -575,6 +588,7 @@ class PairingModel(ABC):
             # cosmology sees -- see _panel_nodes for both measurements and their
             # configuration.
             t_p, w_p = get_pairing_panel_quadrature()    # (16,) static nodes
+            t_p, w_p = _match_dtype(t_p, m1_a), _match_dtype(w_p, m1_a)
             n_sc, scale_p = self._panel_norm(m1_a, m_min, dm_min, theta, t_p, w_p)
             n_sc    = n_sc.reshape(jnp.shape(m1))
             scale_m = scale_p.reshape(jnp.shape(m1))
@@ -751,6 +765,7 @@ class SpinModel(ABC):
         """Evaluate the normalised effective-spin density at ``chieff``."""
         p = self._eval_unnorm(chieff, theta)
         n = norm if norm is not None else self._norm(theta)
+        n = _match_dtype(n, p)
         return p / jnp.where(n > 0, n, 1.0)
 
 
@@ -828,6 +843,7 @@ class MixtureModel:
 
         # Stick-breaking: all weights guaranteed ≥ 0, Σ = 1.
         w = _stick_breaking_weights(theta[:n_w]) if n_w > 0 else jnp.array([1.0])
+        w = _match_dtype(w, theta)
 
         # Slice per-component sub-vectors.
         idx = n_w

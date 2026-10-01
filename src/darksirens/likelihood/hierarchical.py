@@ -101,8 +101,14 @@ def spectral_siren_log_likelihood(
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
+    compute_dtype: str | None = None,
 ):
-    """Evaluate the catalog-free spectral-siren hierarchical likelihood."""
+    """Evaluate the catalog-free spectral-siren hierarchical likelihood.
+
+    ``compute_dtype`` (EXPERIMENTAL, default ``None``): evaluate the per-sample
+    weights in that dtype (see :mod:`darksirens.likelihood.mixed_precision`);
+    ``None`` is the unchanged float64 program.
+    """
     pop_params = jnp.asarray(pop_params)
     if pop_params.ndim == 0 or int(pop_params.shape[0]) == 0:
         raise ValueError(
@@ -158,6 +164,20 @@ def spectral_siren_log_likelihood(
             dL_grid=dL_grid,
         )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+
+    if compute_dtype is not None:
+        from .mixed_precision import make_lowp_weight, volume_log_prior_lowp
+
+        if angular_weight is not None:
+            raise NotImplementedError("compute_dtype with an anisotropic angular model")
+        _log_weight = make_lowp_weight(
+            dtype=compute_dtype,
+            cosmology=cosmology,
+            pop_params=pop_params,
+            dL_grid=dL_grid,
+            log_p_pop=log_p_pop,
+            log_prior_z=volume_log_prior_lowp(cosmology, compute_dtype),
+        )
 
     def _selection_weight(m1det, q, dL, chieff, pix, prior_wt, _catalog, spin=None):
         return _log_weight(m1det, q, dL, chieff, pix, prior_wt, spin=spin)
@@ -241,8 +261,15 @@ def _ordinary_hierarchical_likelihood(
     return_diagnostics: bool,
     angular_model: str = "isotropic",
     angular_params=None,
+    compute_dtype: str | None = None,
+    lowp_priors=None,
 ):
-    """Shared PE/selection reduction for explicit ordinary redshift models."""
+    """Shared PE/selection reduction for explicit ordinary redshift models.
+
+    ``compute_dtype``/``lowp_priors`` (EXPERIMENTAL): with a dtype, the PE and
+    selection weights use ``lowp_priors = (log_prior_pe(z, pix),
+    log_prior_sel(z, pix))`` evaluated in that dtype; ``None`` is unchanged.
+    """
 
     pop_params = _validate_hierarchy_inputs(
         pop_params, pop_model, n_events, nsamp, n_draw
@@ -290,6 +317,15 @@ def _ordinary_hierarchical_likelihood(
 
     pe_weight = _weight(log_prior_pe, catalog_pe)
     sel_weight_core = _weight(log_prior_sel, catalog_sel)
+    if compute_dtype is not None:
+        from .mixed_precision import make_lowp_weight
+
+        if angular_weight is not None:
+            raise NotImplementedError("compute_dtype with an anisotropic angular model")
+        lowp = dict(dtype=compute_dtype, cosmology=cosmology, pop_params=pop_params,
+                    dL_grid=dL_grid, log_p_pop=log_p_pop)
+        pe_weight = make_lowp_weight(log_prior_z=lowp_priors[0], **lowp)
+        sel_weight_core = make_lowp_weight(log_prior_z=lowp_priors[1], **lowp)
 
     def selection_weight(m1det, q, dL, chieff, pix, prior_wt, _catalog, spin=None):
         return sel_weight_core(m1det, q, dL, chieff, pix, prior_wt, spin=spin)
@@ -360,6 +396,7 @@ def dark_siren_log_likelihood(
     return_diagnostics: bool = False,
     pinned_kernel_pe=None,
     pinned_kernel_sel=None,
+    compute_dtype: str | None = None,
 ):
     """Ordinary incomplete-catalog conditional dark-siren likelihood.
 
@@ -389,6 +426,18 @@ def dark_siren_log_likelihood(
     def prior_sel(z, pix, catalog):
         return eval_incomplete_catalog_prior_state_vmap(z, pix, state_sel, catalog)
 
+    extra = {}
+    if compute_dtype is not None:
+        from .mixed_precision import incomplete_catalog_log_prior_lowp
+
+        extra = dict(
+            compute_dtype=compute_dtype,
+            lowp_priors=(
+                incomplete_catalog_log_prior_lowp(state_pe, catalog_pe, compute_dtype),
+                incomplete_catalog_log_prior_lowp(state_sel, catalog_sel, compute_dtype),
+            ),
+        )
+
     return _ordinary_hierarchical_likelihood(
         cosmology, pop_params, gw_pe, catalog_pe, gw_sel, catalog_sel,
         n_events, nsamp, n_draw,
@@ -405,6 +454,7 @@ def dark_siren_log_likelihood(
         return_diagnostics=return_diagnostics,
         angular_model=angular_model,
         angular_params=angular_params,
+        **extra,
     )
 
 

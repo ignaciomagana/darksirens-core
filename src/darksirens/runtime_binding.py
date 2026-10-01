@@ -241,6 +241,9 @@ class BoundAnalysis:
     sel_batch_size: int | None = None
     pe_event_block: int | None = None
     kernel_pin: Any = None
+    # EXPERIMENTAL opt-in (exp/likelihood-profile-mixed-precision): per-sample
+    # weights in this dtype, reductions in float64. None = default program.
+    compute_dtype: str | None = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -370,6 +373,15 @@ class BoundAnalysis:
             angular_model=self.analysis.angular_model,
             angular_params=angular,
         )
+        if self.compute_dtype is not None:
+            if not isinstance(
+                self.analysis.redshift, (SpectralRedshift, IncompleteCatalogRedshift)
+            ):
+                raise NotImplementedError(
+                    "compute_dtype is implemented for spectral and incomplete-catalog "
+                    "analyses only"
+                )
+            ordinary_common["compute_dtype"] = self.compute_dtype
 
         if isinstance(self.analysis.redshift, SpectralRedshift):
             return spectral_siren_log_likelihood(
@@ -561,7 +573,16 @@ def bind_analysis(
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
+    compute_dtype: str | None = None,
 ) -> BoundAnalysis:
+    """Bind an analysis to its stores.
+
+    ``compute_dtype`` is EXPERIMENTAL and opt-in: ``"float32"`` evaluates the
+    per-sample PE and selection weights in float32 (stored per-sample columns
+    are rounded to float32 at bind time) while every reduction stays float64;
+    see :mod:`darksirens.likelihood.mixed_precision`.  The default ``None``
+    binds exactly the float64 program.
+    """
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
     if not isinstance(events, GWStore):
@@ -644,10 +665,24 @@ def bind_analysis(
     kernel_pin = (
         None if catalog is None else _build_kernel_pin(analysis, catalog, z_depth)
     )
+    gw_pe = _make_runtime_event(events, pe_pixels, required)
+    gw_selection = _make_runtime_event(injections, sel_pixels, required)
+    extra = {}
+    if compute_dtype is not None:
+        from darksirens.likelihood.mixed_precision import (
+            cast_event,
+            resolve_compute_dtype,
+        )
+
+        compute_dtype = resolve_compute_dtype(compute_dtype)
+        if compute_dtype is not None:
+            gw_pe = cast_event(gw_pe, compute_dtype)
+            gw_selection = cast_event(gw_selection, compute_dtype)
+            extra["compute_dtype"] = compute_dtype
     return BoundAnalysis(
         analysis=analysis,
-        gw_pe=_make_runtime_event(events, pe_pixels, required),
-        gw_selection=_make_runtime_event(injections, sel_pixels, required),
+        gw_pe=gw_pe,
+        gw_selection=gw_selection,
         n_events=int(events.n_events),
         nsamp=int(events.nsamp),
         n_draw=float(injections.ndraw),
@@ -660,6 +695,7 @@ def bind_analysis(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         kernel_pin=kernel_pin,
+        **extra,
     )
 
 
