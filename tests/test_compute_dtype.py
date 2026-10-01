@@ -318,14 +318,23 @@ def test_float32_binding_rounds_the_columns_once():
     assert _same_bits(again(t), b(t))
 
 
-def test_a_column_outside_the_float32_range_is_refused():
+def test_a_column_below_the_float32_range_is_refused_and_overflow_is_zero_weight():
     events, injections = _stores()
-    cols = dict(injections.columns)
     tiny = np.array(injections.prior_wt, copy=True)
     tiny[0] = 1e-50
-    bad = replace(injections, columns=cols, prior_wt=tiny)
-    with pytest.raises(ValueError, match="'prior_wt'.*outside the normal float32 range"):
+    bad = replace(injections, prior_wt=tiny)
+    with pytest.raises(ValueError, match="'prior_wt'.*below the normal float32 range"):
         bind_analysis(_analysis("spectral"), events=events, injections=bad, compute_dtype="float32")
+    # A 1e300 marker (as in the real injection store) rounds to
+    # +inf: weight zero in float32, a weight exp(-690) below the rest in float64.
+    huge = np.array(injections.prior_wt, copy=True)
+    huge[:50] = 1e300
+    marked = replace(injections, prior_wt=huge)
+    b64 = bind_analysis(_analysis("spectral"), events=events, injections=marked)
+    b32 = bind_analysis(_analysis("spectral"), events=events, injections=marked, compute_dtype="float32")
+    assert np.isinf(np.asarray(b32.gw_selection.prior_wt[:50])).all()
+    t = jnp.asarray(_near_map_thetas(_bind("spectral"))[0])
+    assert abs(float(b32(t)) - float(b64(t))) < TOL
 
 
 # ---------------------------------------------------------------------------

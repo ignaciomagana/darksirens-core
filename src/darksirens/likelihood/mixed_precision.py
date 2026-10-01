@@ -137,20 +137,28 @@ def require_angular_support(angular_model: str) -> None:
         )
 
 
-def _float32_safe(name: str, x, dtype) -> None:
-    """Refuse a column that rounding to ``dtype`` would overflow or flush."""
+def _refuse_underflow(name: str, x, dtype) -> None:
+    """Refuse a column with finite nonzero values below ``dtype``'s normal range.
+
+    Rounding would flush them to zero or keep only a few significant bits; a
+    flushed ``prior_wt`` would silently drop its sample (``valid`` requires
+    ``prior_wt > 0``) although its float64 weight is the LARGEST. Values above
+    the dtype's maximum round to infinity instead, which is benign: for
+    ``prior_wt`` (the real O3/O4 injection store marks 6462 of its 1067946
+    injections with ``1e300``) the sample gets weight zero, where its float64
+    weight is below ``1/3.4e38`` of the population density.
+    """
     a = np.asarray(x)
     if not np.issubdtype(a.dtype, np.floating) or a.size == 0:
         return
-    info = np.finfo(dtype)
-    finite = np.isfinite(a)
-    mag = np.abs(a[finite & (a != 0.0)])
-    if mag.size and (mag.max() > info.max or mag.min() < info.tiny):
+    tiny = np.finfo(dtype).tiny
+    mag = np.abs(a[np.isfinite(a) & (a != 0.0)])
+    if mag.size and mag.min() < tiny:
         raise ValueError(
             f"compute_dtype={np.dtype(dtype).name!r}: column {name!r} has finite "
-            f"nonzero values in [{mag.min():.3e}, {mag.max():.3e}], outside the "
-            f"normal {np.dtype(dtype).name} range [{info.tiny:.3e}, {info.max:.3e}]; "
-            "rounding would overflow or flush them. Use the default compute_dtype=None."
+            f"nonzero values down to {mag.min():.3e}, below the normal "
+            f"{np.dtype(dtype).name} range (smallest {tiny:.3e}); rounding would "
+            "flush them to zero. Use the default compute_dtype=None."
         )
 
 
@@ -158,8 +166,8 @@ def cast_event(event: GWEvent, dtype) -> GWEvent:
     """Round the floating per-sample columns to ``dtype`` (bind time, host side).
 
     Integer and boolean columns (pixels, validity) are kept. A finite nonzero
-    value outside ``dtype``'s normal range raises instead of being rounded to
-    zero or infinity (a flushed ``prior_wt`` would silently drop the sample).
+    value below ``dtype``'s normal range raises instead of being flushed (see
+    :func:`_refuse_underflow`).
     """
     dtype = np.dtype(dtype)
 
@@ -169,7 +177,7 @@ def cast_event(event: GWEvent, dtype) -> GWEvent:
             return None
         if not jnp.issubdtype(jnp.asarray(x).dtype, jnp.floating):
             return x
-        _float32_safe(name, x, dtype)
+        _refuse_underflow(name, x, dtype)
         return jnp.asarray(x).astype(dtype)
 
     return event._replace(**{name: c(name) for name in event._fields})
