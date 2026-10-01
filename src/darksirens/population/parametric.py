@@ -330,6 +330,24 @@ _PLATEAU_Q_FLOOR = 1.0e-12
 _PLATEAU_SUP_LOG_CAP = 700.0
 
 
+def _powerlaw_taper_scale_bound(pairing, m1, q_cut, m_min, dm_min, theta):
+    r"""``max(q_cut**beta, 1) * p_unnorm(1 | m1)``: a bound on ``q**beta S(q m1)``.
+
+    For ``q`` in ``(q_cut, 1]``, ``q**beta <= max(q_cut**beta, 1)`` because a
+    power law is monotone, and ``S(q m1) <= S(m1)`` because the low-mass taper
+    never decreases (checked on 400 random tapers x 200,001 masses). So the
+    product bounds the integrand. ``p_unnorm(1 | m1)`` is ``S(m1)``, or 0 below
+    the cut, so the bound falls with the integrand in the taper toe and keeps
+    its underflow protection. Above the shoulder it reduces to the plateau
+    supremum ``max(q_cut**beta, 1)``.
+    """
+    beta = theta[0]
+    taper = pairing._eval_unnorm(m1, jnp.ones_like(m1), m_min, dm_min, theta)
+    safe_q = jnp.where(q_cut > 0.0, q_cut, 1.0)
+    q_sup = jnp.exp(jnp.maximum(beta * jnp.log(safe_q), 0.0))
+    return q_sup * taper
+
+
 def _powerlaw_plateau_integral(q_lo, beta):
     r"""Exact :math:`\int_{q_{lo}}^{1} q^\beta\,dq` and :math:`\sup q^\beta` on it.
 
@@ -609,6 +627,10 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
         """
         del m1, m_min, dm_min
         return _powerlaw_plateau_integral(q_lo, theta[0])
+
+    def _scale_bound(self, m1, q_cut, m_min, dm_min, theta):
+        """``max(q_cut**beta, 1) * p_unnorm(1 | m1)``; see :func:`_powerlaw_taper_scale_bound`."""
+        return _powerlaw_taper_scale_bound(self, m1, q_cut, m_min, dm_min, theta)
 
     def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
         del m_min, dm_min
@@ -1309,6 +1331,10 @@ class PowerLawPairing(PairingModel):
         """
         del m1, m_min, dm_min
         return _powerlaw_plateau_integral(q_lo, t[0])
+
+    def _scale_bound(self, m1, q_cut, m_min, dm_min, theta):
+        """``max(q_cut**beta, 1) * p_unnorm(1 | m1)``; see :func:`_powerlaw_taper_scale_bound`."""
+        return _powerlaw_taper_scale_bound(self, m1, q_cut, m_min, dm_min, theta)
 
     def _eval_unnorm(self, m1, q, m_min, dm_min, t):
         """Evaluate the unnormalised conditional density ``p(q | m1)``."""

@@ -499,6 +499,23 @@ class PairingModel(ABC):
         del m1, q_lo, m_min, dm_min, theta
         return None
 
+    def _scale_bound(self, m1, q_cut, m_min, dm_min, theta):
+        r"""Closed-form upper bound on ``p_unnorm(q | m1)`` over ``(q_cut, 1]``, or ``None``.
+
+        Used by :meth:`_panel_norm` when ``pairing_scale="analytic"``.
+        Replacing the node maximum with a bound that does not depend on the node
+        values lets each panel's nodes feed its reduction directly, so XLA no
+        longer keeps an ``(N_samples x n_nodes)`` array per panel.
+
+        A bound has to stay TIGHT in the low-mass taper: a row whose whole
+        integrand is ~exp(-130)-tiny must be rescaled by a comparably tiny
+        number. An O(1) bound would give back the underflow the factoring
+        exists to prevent (see the scale-invariance note in :meth:`_panel_norm`).
+        ``None`` (the default) keeps the node maximum for that model.
+        """
+        del m1, q_cut, m_min, dm_min, theta
+        return None
+
     def _panel_norm(self, m1, m_min, dm_min, theta, t, w):
         r"""Scale-factored panel-sum normaliser ``(n_sc, scale)``; ``N = scale n_sc``.
 
@@ -517,8 +534,16 @@ class PairingModel(ABC):
         added to the scaled sum and its analytic supremum joins the maximum, so
         the scale still bounds the whole integrand and still cancels out of
         ``(p / scale) / n_sc``.  Every other panel's arithmetic is untouched.
+
+        With ``pairing_scale="analytic"`` and a model that supplies
+        :meth:`_scale_bound`, that bound replaces the node maximum. The
+        quadrature rule and the sums are the same; only the factored constant
+        changes, and it cancels out of the density.
         """
         edges = self._panel_boundaries(m1, m_min, dm_min, theta)
+        bound = None
+        if normalization_grid_settings().pairing_scale == "analytic":
+            bound = self._scale_bound(m1, edges[0], m_min, dm_min, theta)
         # Closed form for the LAST panel, if this class has one; edges[-2] is
         # its lower edge and edges[-1] is the literal 1.0.
         closed = self._plateau_integral(m1, edges[-2], m_min, dm_min, theta)
@@ -528,9 +553,12 @@ class PairingModel(ABC):
                 for nodes, width in (self._panel_from_edges(lo, hi, t)
                                      for lo, hi in zip(edges[:n_quad],
                                                        edges[1:n_quad + 1]))]
-        scale = jnp.max(vals[0][0], axis=-1, keepdims=True)
-        for p_i, _ in vals[1:]:
-            scale = jnp.maximum(scale, jnp.max(p_i, axis=-1, keepdims=True))
+        if bound is None:
+            scale = jnp.max(vals[0][0], axis=-1, keepdims=True)
+            for p_i, _ in vals[1:]:
+                scale = jnp.maximum(scale, jnp.max(p_i, axis=-1, keepdims=True))
+        else:
+            scale = bound[..., None]
         if closed is not None:
             scale = jnp.maximum(scale, closed[1][..., None])
         scale_s = jnp.where(scale > 0, scale, 1.0)
