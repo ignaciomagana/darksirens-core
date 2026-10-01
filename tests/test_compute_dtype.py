@@ -17,6 +17,7 @@ value-only (for nested samplers): differentiating it raises.
 from __future__ import annotations
 
 import collections
+import contextlib
 import pickle
 from dataclasses import replace
 
@@ -43,7 +44,10 @@ from darksirens.likelihood.mixed_precision import (
 from darksirens.population import pop_model_parser
 from darksirens.population.gp import GP_MODEL_NAMES
 from darksirens.population.registry import get_fixed_population_params, get_model
-from darksirens.population.utils import configure_normalization_grids
+from darksirens.population.utils import (
+    configure_normalization_grids,
+    normalization_grid_settings,
+)
 from darksirens.runtime_binding import bind_analysis
 
 FIT = ("m1det", "q", "dL", "chieff")
@@ -246,13 +250,15 @@ def _near_map_thetas(bound64):
     return out
 
 
-@pytest.fixture
-def analytic_pairing():
-    configure_normalization_grids(pairing_scale="analytic")
+@contextlib.contextmanager
+def _pairing_scale(scale):
+    """Set the pairing normaliser's scale, restoring the previous (default) one."""
+    before = normalization_grid_settings().pairing_scale
+    configure_normalization_grids(pairing_scale=scale)
     try:
         yield
     finally:
-        configure_normalization_grids(pairing_scale="node_max")
+        configure_normalization_grids(pairing_scale=before)
 
 
 def _same_bits(a, b):
@@ -344,8 +350,7 @@ def test_a_column_below_the_float32_range_is_refused_and_overflow_is_zero_weight
 @pytest.mark.parametrize("kind", ["spectral", "dark"])
 @pytest.mark.parametrize("scale", ["node_max", "analytic"])
 def test_float32_is_within_tolerance_near_the_mock_map(kind, scale):
-    configure_normalization_grids(pairing_scale=scale)
-    try:
+    with _pairing_scale(scale):
         b64 = _bind(kind)
         b32 = _bind(kind, compute_dtype="float32")
         diffs = []
@@ -355,21 +360,20 @@ def test_float32_is_within_tolerance_near_the_mock_map(kind, scale):
             diffs.append(abs(got - want))
         assert max(diffs) < TOL, diffs
         assert np.asarray(b32(jnp.asarray(t))).dtype == jnp.float64
-    finally:
-        configure_normalization_grids(pairing_scale="node_max")
 
 
-def test_float32_composes_with_the_analytic_pairing_scale(analytic_pairing):
+def test_float32_composes_with_both_pairing_scales():
+    # "analytic" is the default pairing scale; "node_max" reproduces the
+    # historical arithmetic. The scale cancels from the density, so in float32
+    # the two agree to rounding.
+    assert normalization_grid_settings().pairing_scale == "analytic"
+    thetas = _near_map_thetas(_bind("spectral"))[:3]
     b_an = _bind("spectral", compute_dtype="float32")
-    configure_normalization_grids(pairing_scale="node_max")
-    b_nm = _bind("spectral", compute_dtype="float32")
-    for t in _near_map_thetas(_bind("spectral"))[:3]:
-        configure_normalization_grids(pairing_scale="analytic")
-        a = float(b_an(jnp.asarray(t)))
-        configure_normalization_grids(pairing_scale="node_max")
-        n = float(b_nm(jnp.asarray(t)))
-        # The scale cancels from the density; in float32 they agree to rounding.
-        assert abs(a - n) < TOL
+    an = [float(b_an(jnp.asarray(t))) for t in thetas]
+    with _pairing_scale("node_max"):
+        b_nm = _bind("spectral", compute_dtype="float32")
+        nm = [float(b_nm(jnp.asarray(t))) for t in thetas]
+    assert max(abs(a - n) for a, n in zip(an, nm)) < TOL
 
 
 def _walk(jaxpr, visit):
@@ -384,7 +388,13 @@ def _walk(jaxpr, visit):
 
 
 @pytest.mark.parametrize("kind", ["spectral", "dark"])
-def test_per_sample_work_is_float32_and_every_reduction_float64(kind):
+@pytest.mark.parametrize("scale", ["node_max", "analytic"])
+def test_per_sample_work_is_float32_and_every_reduction_float64(kind, scale):
+    with _pairing_scale(scale):
+        _check_per_sample_dtypes(kind)
+
+
+def _check_per_sample_dtypes(kind):
     b32 = _bind(kind, compute_dtype="float32")
     n_sel = int(b32.gw_selection.dL.shape[0])
     sample_axes = {N_EVENTS * NSAMP, NSAMP, n_sel}
