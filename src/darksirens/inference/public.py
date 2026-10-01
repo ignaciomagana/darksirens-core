@@ -55,6 +55,16 @@ def _resolve_selection_neff_soft_guard(mode, sampler):
     return mode == "soft" or (mode == "auto" and sampler == "numpyro")
 
 
+def _is_float32(compute_dtype):
+    """Whether ``compute_dtype`` names float32 (the binder validates every value)."""
+    import numpy as np
+
+    try:
+        return np.dtype(compute_dtype).name == "float32"
+    except (TypeError, ValueError):
+        return False
+
+
 def _apply_angular_prior_volume_correction(result, analysis):
     """Record the angular prior-box offset carried by a reported evidence.
 
@@ -112,19 +122,22 @@ def infer(
     max_likelihood_variance=None,
     sel_batch_size=None,
     pe_event_block=None,
+    compute_dtype=None,
     **sampler_options,
 ):
     """Run an ordinary analysis or specialized target through core samplers.
 
     Ordinary analyses retain the existing API and require both standardized GW
     stores. An :class:`InferenceTarget` already owns its likelihood, so stores
-    and the four likelihood options below must be omitted. Backend-specific
+    and the five likelihood options below must be omitted. Backend-specific
     options keep their existing names.
 
     ``selection_neff_guard`` is ``'auto'``, ``'hard'`` or ``'soft'``; the
     remaining likelihood options fall back to the accepted likelihood defaults
-    when left unset. These four names are likelihood options, not sampler
-    options, and never enter the sampler namespace.
+    when left unset. ``compute_dtype`` is the opt-in per-sample precision of
+    :func:`darksirens.runtime_binding.bind_analysis` (``None``/``'float64'``
+    default, or ``'float32'``). These five names are likelihood options, not
+    sampler options, and never enter the sampler namespace.
 
     Ordinary results also carry ``log_prior_volume_fraction`` and, when the
     sampler reports a finite ``logZ``, ``logZ_corrected``. The raw ``logZ``
@@ -145,12 +158,14 @@ def infer(
         # to correct on its behalf.
         if selection_neff_guard != "auto" or any(
             value is not None
-            for value in (max_likelihood_variance, sel_batch_size, pe_event_block)
+            for value in (
+                max_likelihood_variance, sel_batch_size, pe_event_block, compute_dtype
+            )
         ):
             raise TypeError(
-                "selection_neff_guard, max_likelihood_variance, sel_batch_size "
-                "and pe_event_block must be omitted for an InferenceTarget; "
-                "build the target's likelihood with them instead"
+                "selection_neff_guard, max_likelihood_variance, sel_batch_size, "
+                "pe_event_block and compute_dtype must be omitted for an "
+                "InferenceTarget; build the target's likelihood with them instead"
             )
         return _execute_target(
             analysis.log_likelihood,
@@ -163,6 +178,14 @@ def infer(
         raise TypeError(
             "ordinary analyses require both events and injections"
         )
+    if compute_dtype is not None and sampler == "numpyro" and _is_float32(compute_dtype):
+        raise ValueError(
+            "compute_dtype='float32' is a value-only likelihood option and cannot "
+            "be used with the gradient sampler 'numpyro': float32 population "
+            "densities underflow in the population tails, where their gradients "
+            "are NaN. Use a nested sampler (tinyns, dynesty) or the default "
+            "compute_dtype=None."
+        )
     from darksirens.runtime_binding import bind_analysis
 
     likelihood_options = dict(
@@ -172,6 +195,8 @@ def infer(
     )
     if max_likelihood_variance is not None:
         likelihood_options["max_likelihood_variance"] = float(max_likelihood_variance)
+    if compute_dtype is not None:
+        likelihood_options["compute_dtype"] = compute_dtype
 
     likelihood = bind_analysis(
         analysis,

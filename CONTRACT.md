@@ -160,9 +160,28 @@ parameter decoders or sampler adapters.
   robustness approximation. `empty_policy` is illegal with any other
   composition.
 - `infer(..., selection_neff_guard="auto"|"hard"|"soft",
-  max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None)` are
-  likelihood options, never sampler options. `auto` resolves to `soft` for
-  NumPyro and `hard` otherwise. They are refused for an `InferenceTarget`.
+  max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None,
+  compute_dtype=None)` are likelihood options, never sampler options. `auto`
+  resolves to `soft` for NumPyro and `hard` otherwise. They are refused for an
+  `InferenceTarget`.
+- `bind_analysis(..., compute_dtype=None|"float64"|"float32")`: `None` and
+  `"float64"` are the default float64 program, unchanged bit for bit (the
+  option is not even passed to the likelihood). `"float32"` rounds the
+  per-sample columns to float32 at bind time and evaluates the per-sample PE
+  and selection log weights in float32. Each weight is returned as float64, so
+  the log-sum-exp reductions, Monte-Carlo variances, `N_eff`, soft guard and
+  final sum stay float64. Per-proposal grids (distance table, comoving volume,
+  catalog kernel normalisers and completeness curves) are computed in float64.
+  The float32 likelihood is value-only: differentiating it raises `TypeError`
+  (float32 population densities underflow in the tails, where reverse-mode
+  derivatives are NaN), and `infer(..., sampler="numpyro")` refuses it.
+  It is refused with a `ValueError` for bright and complete-catalog analyses,
+  anisotropic angular models, component-spin populations and every
+  Gaussian-process population (`population/gp.py`): the GP covariance algebra
+  stays float64 (`cond(K)` reaches 5e5-2e7), so float32 gains nothing there,
+  and binned GP models showed the largest float32 shifts. Core does not
+  fingerprint likelihood options; a caller that fingerprints its run should
+  record a non-default `compute_dtype` (`BoundAnalysis.compute_dtype`).
 - `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
   `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
   raises when none has a finite likelihood (and warns when very few do);

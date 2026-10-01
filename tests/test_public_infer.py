@@ -427,6 +427,23 @@ def test_likelihood_options_reach_the_binder_and_never_the_sampler(monkeypatch):
         assert not hasattr(calls["opts"], name)
 
 
+def test_compute_dtype_reaches_the_binder_only_when_set(monkeypatch):
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+          sampler="tinyns", compute_dtype="float32")
+    assert calls["likelihood_options"]["compute_dtype"] == "float32"
+    assert not hasattr(calls["opts"], "compute_dtype")
+    infer(_angular_analysis("isotropic"), events=object(), injections=object(), sampler="tinyns")
+    assert "compute_dtype" not in calls["likelihood_options"]
+
+
+def test_float32_is_refused_with_the_gradient_sampler(monkeypatch):
+    _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(ValueError, match="value-only likelihood option"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="numpyro", compute_dtype="float32")
+
+
 def test_likelihood_options_are_refused_for_an_inference_target(monkeypatch):
     import darksirens as ds
 
@@ -438,3 +455,5 @@ def test_likelihood_options_are_refused_for_an_inference_target(monkeypatch):
     )
     with pytest.raises(TypeError, match="must be omitted for an InferenceTarget"):
         infer(target, max_likelihood_variance=0.005)
+    with pytest.raises(TypeError, match="compute_dtype must be omitted"):
+        infer(target, compute_dtype="float32")

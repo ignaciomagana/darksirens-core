@@ -155,8 +155,22 @@ user typed them rather than as a silent `-inf`:
   gwcat pairing contracts, and warns when their declared cosmologies differ.
 - `ds.infer(..., selection_neff_guard="auto"|"hard"|"soft")` selects the
   sparse-selection guard; `auto` uses the soft penalized wall for NumPyro and
-  the hard `-inf` wall otherwise. `max_likelihood_variance`, `sel_batch_size`
-  and `pe_event_block` are likelihood options on the same call.
+  the hard `-inf` wall otherwise. `max_likelihood_variance`, `sel_batch_size`,
+  `pe_event_block` and `compute_dtype` are likelihood options on the same call.
+- `ds.infer(..., compute_dtype="float32")` (or `bind_analysis(...,
+  compute_dtype="float32")`) is an opt-in speed option: the per-sample PE and
+  selection weights are evaluated in float32, while every reduction
+  (log-sum-exp, Monte-Carlo variances, `N_eff`, soft guard, final sum) and every
+  per-proposal grid stays float64. The default (`None` or `"float64"`) is the
+  float64 program, bit for bit. The float32 likelihood is value-only, for the
+  nested samplers (TinyNS, dynesty): differentiating it raises, and
+  `sampler="numpyro"` refuses it, because float32 population densities
+  underflow in the tails, where their gradients are NaN. It covers spectral and
+  incomplete-catalog analyses with an isotropic angular model and a chi_eff
+  population. Bright
+  and complete-catalog analyses, angular models, component spins and
+  Gaussian-process populations are refused. The GP code keeps its covariance
+  algebra in float64, so float32 gains nothing there.
 - Ordinary `ds.infer` results carry `log_prior_volume_fraction` and
   `logZ_corrected` next to the raw `logZ`, so evidences from angular models
   that reject part of their prior box are comparable.
