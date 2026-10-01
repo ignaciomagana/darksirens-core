@@ -115,6 +115,13 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
 # :func:`get_pairing_panel_quadrature` for the measured corner and the cost.
 PAIRING_PANEL_NQ: int = 32
 
+#: How the pairing normaliser factors its scale out of the q-quadrature (see
+#: ``PairingModel._panel_norm``): ``"node_max"`` (default) takes the maximum
+#: of the integrand over every quadrature node; ``"analytic"`` uses the
+#: model's closed-form upper bound (``PairingModel._scale_bound``) where it
+#: has one, so the node values feed a single reduction.
+PAIRING_SCALES = ("node_max", "analytic")
+
 
 @dataclass(frozen=True)
 class NormalizationGridSettings:
@@ -196,6 +203,7 @@ class NormalizationGridSettings:
     pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
     pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 48)
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
+    pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "node_max")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -229,6 +237,11 @@ class NormalizationGridSettings:
                 f"(env DARKSIRENS_GW_PAIRING_EDGE_NQ)"
             )
         object.__setattr__(self, "pairing_edge_nq", pe)
+        if self.pairing_scale not in PAIRING_SCALES:
+            raise ValueError(
+                f"pairing_scale must be one of {PAIRING_SCALES}, got "
+                f"{self.pairing_scale!r} (env DARKSIRENS_GW_PAIRING_SCALE)"
+            )
         pt = float(self.pairing_edge_tol)
         if not pt > 0.0:
             raise ValueError(f"pairing_edge_tol must be > 0, got {pt}")
@@ -252,8 +265,13 @@ class NormalizationGridSettings:
                                    _min_pairing_m1_grid(self.m_lo, pairing_m_hi,
                                                         self.n_q)))
 
-    def to_dict(self) -> dict[str, int | float]:
-        return asdict(self)
+    def to_dict(self) -> dict[str, int | float | str]:
+        out = asdict(self)
+        # The default pairing scale is the historical arithmetic; leaving it out
+        # keeps every existing run fingerprint unchanged.
+        if out["pairing_scale"] == "node_max":
+            del out["pairing_scale"]
+        return out
 
 
 _NORMALIZATION_GRID_SETTINGS = NormalizationGridSettings()
@@ -277,6 +295,7 @@ def configure_normalization_grids(
     pairing_m_hi: float | None = None,
     pairing_edge_nq: int | None = None,
     pairing_edge_tol: float | None = None,
+    pairing_scale: str | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -287,6 +306,9 @@ def configure_normalization_grids(
     ``pairing_m1_grid=None``.  ``pairing_m_hi`` raises the opt-in pairing
     grid's upper bound (see :func:`size_pairing_grid_to_support`); callers
     should normally use that helper rather than setting the bound directly.
+    ``pairing_scale`` is ``"node_max"`` (default) or ``"analytic"``; see
+    :data:`PAIRING_SCALES`. Like every setting here it is read when a
+    likelihood is traced, so configure it before binding the analysis.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
@@ -295,7 +317,8 @@ def configure_normalization_grids(
     for key, value in {"n_mass": n_mass, "n_q": n_q, "n_chi": n_chi,
                         "pairing_m_hi": pairing_m_hi,
                         "pairing_edge_nq": pairing_edge_nq,
-                        "pairing_edge_tol": pairing_edge_tol}.items():
+                        "pairing_edge_tol": pairing_edge_tol,
+                        "pairing_scale": pairing_scale}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:
