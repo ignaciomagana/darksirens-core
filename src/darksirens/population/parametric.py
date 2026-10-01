@@ -23,6 +23,7 @@ component's.
 """
 
 import math
+import os
 from dataclasses import dataclass
 
 import jax.numpy as jnp
@@ -1298,6 +1299,35 @@ class PowerLawPairing(PairingModel):
     def param_specs(self):
         """Return the single ``beta`` parameter spec."""
         return [self.beta_spec]
+
+    def _panel_norm(self, m1, m_min, dm_min, theta, t, w):
+        """EXPERIMENTAL opt-in single-pass normaliser (env flag, default off).
+
+        With ``DARKSIRENS_EXP_PAIRING_ANALYTIC_SCALE=1`` (read at trace time)
+        the taper panel is factored by the analytic bound
+        ``max(q_cut**beta, 1, plateau sup) >= sup p`` instead of the node
+        maximum.  Same quadrature rule; the node values then feed ONE
+        reduction, so XLA no longer materialises the (N_samples x 32) node
+        array.  Unset, this is exactly the base-class normaliser.  Not
+        validated for gradients in the taper toe (the node maximum exists for
+        that); experiment branch only.
+        """
+        if os.environ.get("DARKSIRENS_EXP_PAIRING_ANALYTIC_SCALE") != "1":
+            return super()._panel_norm(m1, m_min, dm_min, theta, t, w)
+        edges = self._panel_boundaries(m1, m_min, dm_min, theta)
+        if len(edges) != 3:
+            return super()._panel_norm(m1, m_min, dm_min, theta, t, w)
+        closed = self._plateau_integral(m1, edges[-2], m_min, dm_min, theta)
+        beta = theta[0]
+        q_cut = edges[0]
+        safe_q = jnp.where(q_cut > 0.0, q_cut, 1.0)
+        bound = jnp.maximum(jnp.where(q_cut > 0.0, safe_q**beta, 1.0), 1.0)
+        scale = jnp.maximum(bound, closed[1])
+        scale_s = jnp.where(scale > 0, scale, 1.0)
+        nodes, width = self._panel_from_edges(edges[0], edges[1], t)
+        p0 = self._eval_unnorm(m1[..., None], nodes, m_min, dm_min, theta)
+        n_sc = jnp.sum(w * (p0 / scale_s[..., None]), axis=-1) * width
+        return n_sc + closed[0] / scale_s, scale_s
 
     def _plateau_integral(self, m1, q_lo, m_min, dm_min, t):
         """The kernel above ``m_min + dm_min`` is a bare ``q**beta``.
