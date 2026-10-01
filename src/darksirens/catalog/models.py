@@ -16,7 +16,14 @@ from darksirens.cosmology._grid import log_interp_zgrid, zgrid, zgrid_upper_inde
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.cosmology.volume import normalized_comoving_volume_grid
 
-from .completeness import CompletionCurves, ObservedDensityCache, completion_curves
+from .completeness import (
+    CompletionCurves,
+    GatheredCompletionCurves,
+    ObservedDensityCache,
+    completion_curves,
+    gathered_completion_curves,
+    gathered_missing_density,
+)
 from .redshift import (
     CatalogKernelState,
     PinnedCatalogKernel,
@@ -24,13 +31,20 @@ from .redshift import (
     eval_log_catalog_prior_state,
     pinned_catalog_kernel_state,
 )
+from .settings import catalog_evaluation_settings
 from .types import CatalogParameters, GalaxyCatalog
 
 jax.config.update("jax_enable_x64", True)
 
 
 class IncompleteCatalogPriorState(NamedTuple):
-    """Frozen ordinary conditional dark-siren prior state."""
+    """Frozen ordinary conditional dark-siren prior state.
+
+    ``dN_miss`` is the ``(N_rows, N_z)`` missing-host density grid, or, under
+    the opt-in ``missing_density="gather"``, the
+    :class:`~darksirens.catalog.completeness.GatheredCompletionCurves` it is
+    built from, read per sample.
+    """
 
     kernels: CatalogKernelState
     log_Nobs: Any
@@ -90,8 +104,11 @@ def build_incomplete_catalog_prior_state_from_curves(
     ``redshift/prior.py:641-652``).
     """
 
-    if not isinstance(curves, CompletionCurves):
-        raise TypeError("curves must be darksirens.catalog.completeness.CompletionCurves")
+    if not isinstance(curves, (CompletionCurves, GatheredCompletionCurves)):
+        raise TypeError(
+            "curves must be darksirens.catalog.completeness.CompletionCurves or "
+            "GatheredCompletionCurves"
+        )
 
     pin_ok = None
     if pinned_kernel is None:
@@ -114,7 +131,7 @@ def build_incomplete_catalog_prior_state_from_curves(
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_Nobs,
-        dN_miss=curves.dN_miss,
+        dN_miss=curves if isinstance(curves, GatheredCompletionCurves) else curves.dN_miss,
         log_Z=log_Z,
     )
 
@@ -141,10 +158,19 @@ def build_incomplete_catalog_prior_state(
 
     ``pinned_kernel`` is passed to
     :func:`build_incomplete_catalog_prior_state_from_curves`; the completeness
-    curves are evaluated per proposal either way.
+    curves are evaluated per proposal either way.  Under the opt-in
+    ``missing_density="gather"`` (:mod:`darksirens.catalog.settings`) they are
+    :func:`~darksirens.catalog.completeness.gathered_completion_curves`, read
+    per sample from ``observed_cache`` (without a cache, the grid).
     """
 
-    curves = completion_curves(cosmo, params, catalog, observed_cache)
+    if (
+        observed_cache is not None
+        and catalog_evaluation_settings().missing_density == "gather"
+    ):
+        curves = gathered_completion_curves(cosmo, params, catalog, observed_cache)
+    else:
+        curves = completion_curves(cosmo, params, catalog, observed_cache)
     return build_incomplete_catalog_prior_state_from_curves(
         cosmo,
         params,
@@ -165,11 +191,18 @@ def eval_incomplete_catalog_prior_state(
     log_p_cat = eval_log_catalog_prior_state(z, row, state.kernels, catalog)
     log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
     idx, t = _grid_bracket(z)
-    miss = _interp_row(
-        state.dN_miss[row, idx],
-        state.dN_miss[row, idx + 1],
-        t,
-    )
+    if isinstance(state.dN_miss, GatheredCompletionCurves):
+        miss = _interp_row(
+            gathered_missing_density(state.dN_miss, row, idx),
+            gathered_missing_density(state.dN_miss, row, idx + 1),
+            t,
+        )
+    else:
+        miss = _interp_row(
+            state.dN_miss[row, idx],
+            state.dN_miss[row, idx + 1],
+            t,
+        )
     log_miss = jnp.where(
         miss > 0.0,
         jnp.log(jnp.maximum(miss, 1.0e-300)),

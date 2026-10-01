@@ -257,10 +257,14 @@ def build_field_incomplete_catalog_prior_state_from_curves(
     the jit the target checks that on the host.  Without a pin the state is
     built exactly as before.
 
-    A catalog carrying a galaxy list
-    (:func:`~darksirens.catalog.redshift.with_galaxy_index`, the opt-in
-    ``kernel_layout="galaxy_list"``) has its per-galaxy kernel normaliser
-    evaluated on the real galaxies only.
+    ``curves`` may also be the opt-in
+    :class:`~darksirens.catalog.completeness.GatheredCompletionCurves` (for a
+    row-fraction selection target,
+    :func:`~darksirens.selection.footprint.gathered_selection_completion_curves_with_row_fraction`):
+    the missing-host density is then read per sample from its factors instead
+    of from ``(N_rows, N_z)`` grids, with the same arithmetic.  A catalog
+    carrying a galaxy list (:func:`~darksirens.catalog.redshift.with_galaxy_index`)
+    has its per-galaxy kernel normaliser evaluated on the real galaxies only.
     """
 
     if pinned_kernel is not None:

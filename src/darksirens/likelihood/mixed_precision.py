@@ -330,8 +330,17 @@ def incomplete_catalog_log_prior(state, catalog, dtype):
 
     ``state`` is the float64 ``IncompleteCatalogPriorState`` built per
     proposal exactly as on the default path (pinned or not); only the values a
-    per-sample evaluation reads are rounded.
+    per-sample evaluation reads are rounded.  Under the opt-in
+    ``missing_density="gather"`` the state's ``dN_miss`` is a
+    :class:`~darksirens.catalog.completeness.GatheredCompletionCurves`: the two
+    bracketing values are then evaluated in float64 from its factors and
+    rounded, the same numbers the grid path rounds.
     """
+    from darksirens.catalog.completeness import (
+        GatheredCompletionCurves,
+        gathered_missing_density,
+    )
+
     dtype = np.dtype(dtype)
     k = state.kernels
     log_g = k.log_g_grid.astype(dtype)
@@ -342,7 +351,8 @@ def incomplete_catalog_log_prior(state, catalog, dtype):
     row_empty = k.row_empty
     z_depth = k.z_depth
     log_Nobs = state.log_Nobs.astype(dtype)
-    dN_miss = state.dN_miss.astype(dtype)
+    gathered = isinstance(state.dN_miss, GatheredCompletionCurves)
+    dN_miss = state.dN_miss if gathered else state.dN_miss.astype(dtype)
     log_Z = state.log_Z.astype(dtype)
     zg = _zgrid_mod.zgrid.astype(dtype)
     floor = jnp.finfo(dtype).tiny
@@ -363,7 +373,11 @@ def incomplete_catalog_log_prior(state, catalog, dtype):
         log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
         idx = jnp.clip(i_up - 1, 0, zg.size - 2)  # catalog.models._grid_bracket
         t = jnp.clip((z - zg[idx]) / (zg[idx + 1] - zg[idx]), 0.0, 1.0)
-        lo, hi = dN_miss[row, idx], dN_miss[row, idx + 1]
+        if gathered:
+            lo = gathered_missing_density(dN_miss, row, idx).astype(dtype)
+            hi = gathered_missing_density(dN_miss, row, idx + 1).astype(dtype)
+        else:
+            lo, hi = dN_miss[row, idx], dN_miss[row, idx + 1]
         miss = lo + t * (hi - lo)
         log_miss = jnp.where(miss > 0.0, jnp.log(jnp.maximum(miss, floor)), -jnp.inf)
         num = jnp.logaddexp(log_Nobs[row] + log_p_cat, log_miss)

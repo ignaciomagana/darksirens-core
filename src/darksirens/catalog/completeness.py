@@ -136,6 +136,33 @@ class CompletionCurves(NamedTuple):
     C: Any
 
 
+class GatheredCompletionCurves(NamedTuple):
+    """Missing-host density kept as row-by-redshift factors (opt-in).
+
+    The ``missing_density="gather"`` form of :class:`CompletionCurves`
+    (:mod:`darksirens.catalog.settings`).  Instead of the ``(N_rows, N_z)``
+    grids, it keeps what they are built from and evaluates
+
+        C(row, i)       = clip(observed[row, i] / z_factor[i], 0, 1)   (count ratio)
+                        = row_fraction[row] * z_factor[i]              (row-fraction selection)
+        dN_miss(row, i) = (1 - C(row, i)) dN_exp[i],  or dN_exp[i] where depth_mask[i] is False
+
+    at one ``(row, i)`` with :func:`gathered_missing_density`, the arithmetic
+    of the grid builders element by element.  Exactly one of ``observed``
+    (the theta-independent observed-count cache) and ``row_fraction`` is set.
+    ``N_miss`` is the per-row trapezoid of ``dN_miss`` over the redshift grid,
+    as on the grid.  The incomplete-catalog prior states accept it wherever
+    they accept :class:`CompletionCurves`; nothing else reads it.
+    """
+
+    observed: Any
+    row_fraction: Any
+    z_factor: Any
+    dN_exp: Any
+    depth_mask: Any
+    N_miss: Any
+
+
 def _observed_density_row(row, catalog: GalaxyCatalog):
     """Frozen per-row observed-count KDE used only by completeness.
 
@@ -263,6 +290,108 @@ def _assemble_row(C, state: CompletionState):
     return f, dN_miss, C_eff, N_miss
 
 
+def gathered_missing_density(curves: GatheredCompletionCurves, row, idx):
+    """``dN_miss[row, idx]`` of the grid ``curves`` stands for (paired arrays)."""
+
+    if curves.observed is not None:
+        C = jnp.clip(curves.observed[row, idx] / curves.z_factor[idx], 0.0, 1.0)
+    else:
+        C = curves.row_fraction[row] * curves.z_factor[idx]
+    dN_exp = curves.dN_exp[idx]
+    dN_miss = (1.0 - C) * dN_exp
+    if curves.depth_mask is not None:
+        dN_miss = jnp.where(curves.depth_mask[idx], dN_miss, dN_exp)
+    return dN_miss
+
+
+#: Rows per block of the gathered ``N_miss`` reduction: its integrand is
+#: (block x N_z), never (N_rows x N_z).  Each row's sum is the same in any block.
+_MISSING_ROW_BLOCK: int = 256
+
+
+def _missing_count_rows(rows, z_factor, dN_exp, depth_mask, observed_rows: bool):
+    if observed_rows:
+        C = jnp.clip(rows / z_factor[None, :], 0.0, 1.0)
+    else:
+        C = rows[:, None] * z_factor[None, :]
+    dN_miss = (1.0 - C) * dN_exp[None, :]
+    if depth_mask is not None:
+        dN_miss = jnp.where(depth_mask[None, :], dN_miss, dN_exp[None, :])
+    return jnp.trapezoid(dN_miss, zgrid, axis=-1)
+
+
+def gathered_missing_count(
+    *, observed=None, row_fraction=None, z_factor, dN_exp, depth_mask=None
+):
+    """Per-row ``N_miss``: the trapezoid of ``dN_miss`` over the redshift grid.
+
+    The grid arithmetic row by row, in blocks of ``_MISSING_ROW_BLOCK`` rows,
+    so the ``(N_rows, N_z)`` integrand is never formed at once.
+    """
+
+    observed_rows = observed is not None
+    rows = observed if observed_rows else row_fraction
+    n = int(rows.shape[0])
+    block = _MISSING_ROW_BLOCK
+    if n <= block:
+        return _missing_count_rows(rows, z_factor, dN_exp, depth_mask, observed_rows)
+
+    # Slice blocks in place (no padded copy of the rows); the last block is
+    # shifted back to end at row n and rewrites rows it shares with the one
+    # before with the same values.
+    def body(i, out):
+        start = jnp.minimum(i * block, n - block)
+        part = jax.lax.dynamic_slice_in_dim(rows, start, block, axis=0)
+        value = _missing_count_rows(part, z_factor, dN_exp, depth_mask, observed_rows)
+        return jax.lax.dynamic_update_slice_in_dim(out, value, start, axis=0)
+
+    dtype = jnp.result_type(rows.dtype, z_factor.dtype, dN_exp.dtype)
+    return jax.lax.fori_loop(0, -(-n // block), body, jnp.zeros((n,), dtype))
+
+
+def _gathered_completion_curves_impl(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    observed_cache: ObservedDensityCache,
+) -> GatheredCompletionCurves:
+    state = _build_completion_state_impl(cosmo, params, catalog)
+    safe = jnp.where(state.dN_exp_smooth > 0.0, state.dN_exp_smooth, 1.0)
+    depth_mask = None if params.z_depth is None else zgrid <= params.z_depth
+    observed = observed_cache.dN_obs_kde
+    return GatheredCompletionCurves(
+        observed=observed,
+        row_fraction=None,
+        z_factor=safe,
+        dN_exp=state.dN_exp,
+        depth_mask=depth_mask,
+        N_miss=gathered_missing_count(
+            observed=observed, z_factor=safe, dN_exp=state.dN_exp, depth_mask=depth_mask
+        ),
+    )
+
+
+@threads_distance_table()
+def gathered_completion_curves(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    observed_cache: ObservedDensityCache,
+    distance_table=None,
+) -> GatheredCompletionCurves:
+    """:func:`completion_curves` kept as factors (``missing_density="gather"``).
+
+    The count-ratio completeness of :func:`completion_curves`, with the
+    ``(N_rows, N_z)`` ``C`` and ``dN_miss`` grids never formed: the prior
+    reads ``dN_miss`` at each sample's two bracketing grid nodes from the
+    observed-density cache (:func:`gathered_missing_density`), and ``N_miss``
+    is reduced in row blocks.  Needs the cache (bind time).  The diagnostic
+    ``f``, ``C`` and ``C_eff`` are not formed.
+    """
+
+    return _gathered_completion_curves_impl(cosmo, params, catalog, observed_cache)
+
+
 def _completion_curves_impl(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -303,11 +432,15 @@ def completion_curves(
 __all__ = [
     "CompletionCurves",
     "CompletionState",
+    "GatheredCompletionCurves",
     "ObservedDensityCache",
     "SIGMA_SMOOTH",
     "build_completion_state",
     "build_observed_density_cache",
     "bound_smoothing_operator",
     "completion_curves",
+    "gathered_completion_curves",
+    "gathered_missing_count",
+    "gathered_missing_density",
     "smoothing_operator",
 ]

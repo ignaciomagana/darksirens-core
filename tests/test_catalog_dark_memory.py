@@ -1,17 +1,23 @@
 """Opt-in memory layouts of the incomplete-catalog (dark-siren) likelihood.
 
-``kernel_layout="galaxy_list"`` (:mod:`darksirens.catalog.settings`) evaluates
-the per-galaxy 24-node kernel normaliser on the flat list of real galaxies (in
-fixed-size chunks) instead of on the padded ``(N_rows, N_max)`` catalog, with
-a one-pass ``ndtri``.  It changes where the terms live in memory, not what
-they compute.
+Two settings (:mod:`darksirens.catalog.settings`) change where the dark-siren
+catalog terms live in memory, not what they compute:
 
-These tests pin: the setting and its fingerprint entry (absent at the
-default); the one-pass ``ndtri`` bit for bit against the library; the galaxy
-list and its traced check; the kernel state against the padded one; and the
-conditional and field likelihoods, values and gradients, against the default
-program, with the kernel pin on and off, delta and sigma_kde fixed and
-sampled, a survey depth and none, and the h-scaled ``n0``.
+- ``kernel_layout="galaxy_list"``: the per-galaxy 24-node kernel normaliser is
+  evaluated on the flat list of real galaxies (in fixed-size chunks) instead
+  of on the padded ``(N_rows, N_max)`` catalog, with a one-pass ``ndtri``.
+- ``missing_density="gather"``: the missing-host density is read per sample
+  from its row-by-redshift factors (the observed-density cache, or a field
+  target's row fraction and selection curve) instead of from ``(N_rows, N_z)``
+  grids rebuilt on every proposal.
+
+These tests pin: the settings and their fingerprint entry (absent at the
+defaults); the one-pass ``ndtri`` bit for bit against the library; the
+galaxy list and its traced check; the kernel state and the gathered missing
+density against the padded grids; and the conditional and field likelihoods,
+values and gradients, against the default program, with the kernel pin on and
+off, delta and sigma_kde fixed and sampled, a survey depth and none, and the
+h-scaled ``n0``.
 """
 
 from __future__ import annotations
@@ -29,8 +35,15 @@ from jax.scipy.special import ndtri
 from darksirens import Cosmology, Population, model
 from darksirens.analysis import ParameterPlan
 from darksirens.catalog import redshift as _redshift
+from darksirens.catalog import completeness as _completeness
 from darksirens.catalog.compact import compact_pe_selection_catalog
-from darksirens.catalog.completeness import build_observed_density_cache
+from darksirens.catalog.completeness import (
+    GatheredCompletionCurves,
+    build_observed_density_cache,
+    completion_curves,
+    gathered_completion_curves,
+    gathered_missing_density,
+)
 from darksirens.catalog.field import (
     build_field_incomplete_catalog_prior_state_from_curves,
     build_pinned_field_kernel,
@@ -38,7 +51,10 @@ from darksirens.catalog.field import (
 )
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.io import CatalogStore
-from darksirens.catalog.models import build_incomplete_catalog_prior_state
+from darksirens.catalog.models import (
+    build_incomplete_catalog_prior_state,
+    eval_incomplete_catalog_prior_state_vmap,
+)
 from darksirens.catalog.redshift import (
     KERNEL_PIN_H0_REF,
     build_catalog_kernel_state,
@@ -53,6 +69,7 @@ from darksirens.catalog.settings import (
 )
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, GalaxyIndex
 from darksirens.cosmology import distances as _cosmo
+from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw import make_gw_event
 from darksirens.gw.types import GWStore, SelectionStore
@@ -61,7 +78,10 @@ from darksirens.likelihood.host_density import host_density_log_likelihood
 from darksirens.population import get_fixed_population_params, pop_model_prior_parser
 from darksirens.runtime_binding import bind_analysis
 from darksirens.selection.catalog import GaussianMagnitudeSelection
-from darksirens.selection.footprint import selection_completion_curves_with_row_fraction
+from darksirens.selection.footprint import (
+    gathered_selection_completion_curves_with_row_fraction,
+    selection_completion_curves_with_row_fraction,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -81,7 +101,7 @@ def _settings(**kwargs):
         yield
     finally:
         configure_catalog_evaluation(
-            kernel_layout=before.kernel_layout
+            kernel_layout=before.kernel_layout, missing_density=before.missing_density
         )
 
 
@@ -121,17 +141,19 @@ def _galaxies(n_rows=40, n_max=9, seed=20261001, empty=(1, 7, 30)):
 
 
 def test_defaults_are_the_historical_layouts_and_stay_out_of_the_fingerprint():
-    defaults = CatalogEvaluationSettings(kernel_layout="padded")
+    defaults = CatalogEvaluationSettings(kernel_layout="padded", missing_density="grid")
     assert defaults.to_dict() == {}
     assert "catalog_evaluation" not in core_numerics_semantic()
     with _settings(kernel_layout="galaxy_list"):
         assert core_numerics_semantic()["catalog_evaluation"] == {
             "kernel_layout": "galaxy_list"
         }
+    with _settings(missing_density="gather"):
+        assert core_numerics_semantic()["catalog_evaluation"] == {"missing_density": "gather"}
     assert "catalog_evaluation" not in core_numerics_semantic()
 
 
-@pytest.mark.parametrize("kwargs", [dict(kernel_layout="flat")])
+@pytest.mark.parametrize("kwargs", [dict(kernel_layout="flat"), dict(missing_density="lazy")])
 def test_settings_are_checked(kwargs):
     with pytest.raises(ValueError, match="must be one of"):
         configure_catalog_evaluation(**kwargs)
@@ -263,6 +285,87 @@ def test_a_stale_galaxy_list_poisons_the_prior_and_is_refused_by_the_pin():
 
 
 # ---------------------------------------------------------------------------
+# The gathered missing-host density
+
+
+@pytest.mark.parametrize("block", [None, 7])
+@pytest.mark.parametrize("z_depth", [None, 0.2])
+def test_gathered_count_ratio_density_is_the_grid_density(monkeypatch, z_depth, block):
+    if block is not None:
+        # Row blocks of N_miss, with a shifted tail block (40 rows).
+        monkeypatch.setattr(_completeness, "_MISSING_ROW_BLOCK", block)
+    catalog = _galaxies()
+    cache = build_observed_density_cache(catalog)
+    params = CatalogParameters(n0=3e-3, delta=0.6, sigma_kde=0.01, z_depth=z_depth)
+    rows, idx = np.meshgrid(np.arange(catalog.zgals.shape[0]), np.arange(zgrid.size),
+                            indexing="ij")
+
+    # Both under one jit: eager and compiled arithmetic may differ in the last bit.
+    @jax.jit
+    def both(cat, cache):
+        grid = completion_curves(COSMO, params, cat, cache)
+        gathered = gathered_completion_curves(COSMO, params, cat, cache)
+        assert isinstance(gathered, GatheredCompletionCurves)
+        return grid, gathered, gathered_missing_density(gathered, rows.ravel(), idx.ravel())
+
+    grid, gathered, values = both(catalog, cache)
+    assert _same_bits(values.reshape(grid.dN_miss.shape), grid.dN_miss)
+    assert _same_bits(gathered.N_miss, grid.N_miss)
+
+
+@pytest.mark.parametrize("block", [None, 7])
+@pytest.mark.parametrize("z_depth", [None, 0.2])
+def test_gathered_row_fraction_density_is_the_grid_density(monkeypatch, z_depth, block):
+    if block is not None:
+        # Row blocks of N_miss, with a shifted tail block (40 rows).
+        monkeypatch.setattr(_completeness, "_MISSING_ROW_BLOCK", block)
+    catalog = _galaxies()
+    params = CatalogParameters(n0=3e-3, delta=0.6, sigma_kde=0.01, z_depth=z_depth)
+    selection = GaussianMagnitudeSelection(21.0, -20.3, 0.72, (1.13, -4.89, 8.59))
+    fraction = np.linspace(0.0, 1.0, catalog.zgals.shape[0])
+    rows, idx = np.meshgrid(np.arange(catalog.zgals.shape[0]), np.arange(zgrid.size),
+                            indexing="ij")
+
+    @jax.jit
+    def both(cat):
+        grid = selection_completion_curves_with_row_fraction(COSMO, params, cat, selection,
+                                                             fraction)
+        gathered = gathered_selection_completion_curves_with_row_fraction(
+            COSMO, params, cat, selection, fraction)
+        return grid, gathered, gathered_missing_density(gathered, rows.ravel(), idx.ravel())
+
+    grid, gathered, values = both(catalog)
+    assert _same_bits(values.reshape(grid.dN_miss.shape), grid.dN_miss)
+    assert _same_bits(gathered.N_miss, grid.N_miss)
+
+
+def test_gathered_prior_state_evaluates_as_the_grid_state():
+    catalog = _galaxies()
+    cache = build_observed_density_cache(catalog)
+    params = CatalogParameters(n0=3e-3, delta=0.6, sigma_kde=0.01, z_depth=0.3)
+    rng = np.random.default_rng(9)
+    z = jnp.asarray(np.concatenate([rng.uniform(0.0, 0.6, 3000), [0.0, 1e-5, 4.999, 5.0]]))
+    row = jnp.asarray(rng.integers(0, catalog.zgals.shape[0], z.shape[0]), dtype=jnp.int32)
+
+    def evaluator():
+        # A new function per jit: the setting is read when it traces.
+        def evaluate(cat):
+            state = build_incomplete_catalog_prior_state(COSMO, params, cat, cache)
+            return state, eval_incomplete_catalog_prior_state_vmap(z, row, state, cat)
+        return jax.jit(evaluate)
+
+    grid_state, grid = evaluator()(catalog)
+    with _settings(missing_density="gather"):
+        state, values = evaluator()(catalog)
+        assert isinstance(state.dN_miss, GatheredCompletionCurves)
+        _, both = evaluator()(with_galaxy_index(catalog))
+    assert isinstance(grid_state.dN_miss, jax.Array)
+    np.testing.assert_allclose(values, grid, rtol=1e-13, atol=0.0)
+    np.testing.assert_allclose(both, grid, rtol=1e-13, atol=0.0)
+    np.testing.assert_array_equal(np.isfinite(values), np.isfinite(grid))
+
+
+# ---------------------------------------------------------------------------
 # The bound conditional likelihood
 
 
@@ -380,12 +483,16 @@ def _default(survey, z_depth, n0_units, grads):
     return _DEFAULT[key]
 
 
-ARMS = {"galaxy_list": dict(kernel_layout="galaxy_list")}
+ARMS = {
+    "galaxy_list": dict(kernel_layout="galaxy_list"),
+    "gather": dict(missing_density="gather"),
+    "both": dict(kernel_layout="galaxy_list", missing_density="gather"),
+}
 # delta and sigma_kde sampled (gradients checked), fixed with the kernel pin
 # on, and fixed with kernel_pin="off"; a depth and none; the h-scaled n0.
 # (The opt-ins share no code, so each is pinned alone by the unit tests above.)
-CASES = [("galaxy_list", "sampled", 0.3, "physical", True), ("galaxy_list", "fixed", None, "physical", False),
-         ("galaxy_list", "fixed_pin_off", None, "h_scaled", False)]
+CASES = [("both", "sampled", 0.3, "physical", True), ("both", "fixed", None, "physical", False),
+         ("both", "fixed_pin_off", None, "h_scaled", False)]
 
 
 @pytest.mark.parametrize("arm,survey,z_depth,n0_units,with_grads", CASES)
@@ -401,6 +508,27 @@ def test_opt_in_layouts_give_the_default_likelihood(arm, survey, z_depth, n0_uni
     if with_grads:
         assert np.all(np.isfinite(grads)) and np.all(np.isfinite(ref_grads))
         np.testing.assert_allclose(grads, ref_grads, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("survey,z_depth", [("sampled", 0.3)])
+def test_opt_in_layouts_compose_with_float32_weights(survey, z_depth):
+    # compute_dtype="float32" reads the float64 per-proposal state rounded to
+    # float32; with both layouts on, it reads the same numbers.
+    analysis = _analysis(survey, z_depth)
+    thetas = _thetas(analysis)
+
+    def values():
+        bound = bind_analysis(analysis, events=STORES[0], injections=STORES[1],
+                              max_likelihood_variance=CAP, compute_dtype="float32")
+        f = jax.jit(jax.vmap(lambda f, t: f(t), in_axes=(None, 0)))
+        return bound, np.asarray(f(bound.as_pytree_callable(), jnp.asarray(thetas)))
+
+    _, ref = values()
+    with _settings(kernel_layout="galaxy_list", missing_density="gather"):
+        bound, got = values()
+        assert bound.catalog.galaxy_index is not None
+    assert np.all(np.isfinite(ref))
+    np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-9)
 
 
 def test_default_binding_attaches_no_galaxy_list_and_keeps_grids():
@@ -469,8 +597,9 @@ def _field_values(thetas, catalog, *, gathered, pinned):
         cosmo = COSMO._replace(H0=theta[0])
         selection = GaussianMagnitudeSelection(21.0, theta[1], theta[2], (1.13, -4.89, 8.59))
         params = FIELD_PARAMS._replace(delta=theta[3])
-        curves = selection_completion_curves_with_row_fraction(
-            cosmo, params, catalog, selection, fraction)
+        fn = (gathered_selection_completion_curves_with_row_fraction if gathered
+              else selection_completion_curves_with_row_fraction)
+        curves = fn(cosmo, params, catalog, selection, fraction)
         prior = build_field_incomplete_catalog_prior_state_from_curves(
             cosmo, params, catalog, curves, pinned_kernel=pin)
         prepared = _Prepared(catalog=catalog, prior=prior)
@@ -495,9 +624,32 @@ def test_field_seam_opt_ins_give_the_default_field_likelihood(pinned):
               ((KERNEL_PIN_H0_REF, 0.5), (45.0, 1.3), (110.0, -0.4))]
     ref = _field_values(thetas, catalog, gathered=False, pinned=pinned)
     assert np.all(np.isfinite(ref))
-    for cat, gathered in ((listed, False),):
+    for cat, gathered in ((listed, True),):
         got = _field_values(thetas, cat, gathered=gathered, pinned=pinned)
         np.testing.assert_allclose(got, ref, rtol=1e-13, atol=1e-10)
+
+
+def test_field_seam_accepts_count_ratio_gathered_curves():
+    catalog = FIELD[2]
+    cache = build_observed_density_cache(catalog)
+    rng = np.random.default_rng(23)
+    z = jnp.asarray(rng.uniform(0.0, 0.5, 500))
+    row = jnp.asarray(rng.integers(0, catalog.zgals.shape[0], 500), dtype=jnp.int32)
+
+    def evaluator(fn):
+        @_cosmo.threads_distance_table()
+        def evaluate(cat, distance_table=None):
+            curves = fn(COSMO, FIELD_PARAMS, cat, cache)
+            state = build_field_incomplete_catalog_prior_state_from_curves(
+                COSMO, FIELD_PARAMS, cat, curves)
+            return eval_field_incomplete_catalog_prior_state_vmap(z, row, state, cat)
+        return evaluate
+
+    ref = evaluator(completion_curves)(catalog)
+    got = evaluator(gathered_completion_curves)(with_galaxy_index(catalog))
+    assert np.any(np.isfinite(ref))
+    np.testing.assert_array_equal(np.isfinite(got), np.isfinite(ref))
+    np.testing.assert_allclose(got, ref, rtol=1e-13, atol=0.0)
 
 
 def test_complete_catalog_ignores_the_galaxy_list():
