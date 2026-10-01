@@ -247,8 +247,11 @@ def core_numerics_semantic() -> dict:
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
     ``DARKSIRENS_SKY_ZNORM_HI``, ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
-    ``DARKSIRENS_GW_N_*`` and ``DARKSIRENS_GW_PAIRING_*``); the normalisation
-    grids can also be changed at runtime by ``configure_normalization_grids``.
+    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
+    ``DARKSIRENS_Z_OF_DL_LOOKUP``); the normalisation grids can also be
+    changed at runtime by ``configure_normalization_grids`` and the z(dL)
+    lookup by ``configure_z_of_dL_lookup``, which is recorded only when it is
+    not the default ``"search"``.
     Values are read from the resolved module state, not from ``os.environ``,
     so they are what the likelihood actually uses.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
@@ -260,12 +263,15 @@ def core_numerics_semantic() -> dict:
     from darksirens.cosmology import _grid, distances
     from darksirens.population import angular_advanced, gp, utils
 
+    distance_table_grid = {"zmax": distances.zMax, "nodes": distances._ZGRID_NODES}
+    # The default z(dL) bracket search is the historical arithmetic; leaving it
+    # out keeps every existing run fingerprint unchanged.
+    if distances.z_of_dL_lookup() != "search":
+        distance_table_grid["z_of_dL_lookup"] = distances.z_of_dL_lookup()
+
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
-        "distance_table_grid": {
-            "zmax": distances.zMax,
-            "nodes": distances._ZGRID_NODES,
-        },
+        "distance_table_grid": distance_table_grid,
         "gp_redshift_normaliser": {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N},
         "gp_population_edges": {
             "mass": list(gp._GPPOP_M_EDGES),

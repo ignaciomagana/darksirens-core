@@ -43,7 +43,8 @@ The float32 interpolation kernels below mirror the default float64 kernels
 ``cosmology._grid.log_interp_zgrid``,
 ``catalog.models.eval_incomplete_catalog_prior_state``) term for term; the
 ``DARKSIRENS_INTERP_SCAN`` / ``DARKSIRENS_INTERP_SEARCHSORTED`` debugging
-switches do not apply to them.
+switches do not apply to them. The opt-in ``z_of_dL`` lookup ``"direct"``
+(``configure_z_of_dL_lookup``) does.
 """
 
 from __future__ import annotations
@@ -202,10 +203,18 @@ def log_jacobian(z, dL, cosmo: CosmologyParameters):
 
 
 def z_of_dL(dL, dL_grid):
-    """``cosmology.distances.z_of_dL_precomputed`` with the redshift nodes in dL's dtype."""
+    """``cosmology.distances.z_of_dL_precomputed`` with the redshift nodes in dL's dtype.
+
+    Follows ``configure_z_of_dL_lookup``: the opt-in ``"direct"`` bracket lookup
+    finds the same bracket in float32 (its cells are ~1e3 float32 roundings of
+    ``log dL`` wide, and adjacent float32 nodes stay distinct).
+    """
     zg = _dist.zgrid.astype(dL.dtype)
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
-    z = _dist._interp_unrolled(dL, dL_grid, zg)
+    if _dist.z_of_dL_lookup() == "direct":
+        z = _dist._interp_direct(dL, dL_grid, zg)
+    else:
+        z = _dist._interp_unrolled(dL, dL_grid, zg)
     return jnp.where(in_grid, z, jnp.nan)
 
 

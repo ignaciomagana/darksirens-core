@@ -11,6 +11,7 @@ import contextlib
 import contextvars
 import functools
 import inspect
+import math
 import os
 
 import jax
@@ -133,6 +134,84 @@ def _interp_unrolled(x, xp, fp):
 
 
 _USE_INTERP_SCAN = os.environ.get("DARKSIRENS_INTERP_SCAN") == "1"
+
+#: How :func:`z_of_dL_precomputed` finds the distance-table interval that
+#: brackets each luminosity distance. ``"search"`` (default) is the
+#: historical unrolled binary search over the per-proposal ``dL_grid``.
+#: ``"direct"`` computes the interval from ``log(dL)`` with index arithmetic
+#: on a per-proposal cell table (see :func:`_interp_direct`) and applies the
+#: same linear interpolation to the same two nodes, so the redshift agrees
+#: with the default to one rounding. ``"direct"`` takes precedence over
+#: ``DARKSIRENS_INTERP_SCAN``.
+Z_OF_DL_LOOKUPS = ("search", "direct")
+
+
+def _validated_z_of_dL_lookup(value, source):
+    if value not in Z_OF_DL_LOOKUPS:
+        raise ValueError(
+            f"z_of_dL lookup must be one of {Z_OF_DL_LOOKUPS}, got {value!r} ({source})"
+        )
+    return value
+
+
+_Z_OF_DL_LOOKUP = _validated_z_of_dL_lookup(
+    os.environ.get("DARKSIRENS_Z_OF_DL_LOOKUP", "search"),
+    "env DARKSIRENS_Z_OF_DL_LOOKUP",
+)
+
+
+def z_of_dL_lookup() -> str:
+    """The active :data:`Z_OF_DL_LOOKUPS` setting."""
+    return _Z_OF_DL_LOOKUP
+
+
+def configure_z_of_dL_lookup(lookup: str | None = None) -> str:
+    """Select the z(dL) bracket lookup and return the active setting.
+
+    ``lookup`` is ``"search"`` (default; env ``DARKSIRENS_Z_OF_DL_LOOKUP``)
+    or ``"direct"``; ``None`` leaves the setting untouched. The setting is
+    read when a likelihood is traced, so configure it before binding the
+    analysis. Changing it clears the trace cache of this module's jitted
+    :func:`z_of_dL`; a likelihood that was already jitted keeps the lookup
+    it was traced with.
+    """
+
+    global _Z_OF_DL_LOOKUP
+    if lookup is not None:
+        lookup = _validated_z_of_dL_lookup(lookup, "configure_z_of_dL_lookup")
+        if lookup != _Z_OF_DL_LOOKUP:
+            _Z_OF_DL_LOOKUP = lookup
+            z_of_dL.jitted.clear_cache()
+    return _Z_OF_DL_LOOKUP
+
+
+def _direct_lookup_geometry():
+    """Static cell width and cell count of the ``"direct"`` z(dL) lookup.
+
+    The lookup cuts ``u = log(dL / dL_grid[1])`` into cells of width ``h``.
+    Consecutive table nodes ``k-1 < k`` (``k >= 2``) are separated in ``u``
+    by ``log((1 + z_k) / (1 + z_{k-1})) + log(r_k / r_{k-1})``. The comoving
+    distance never decreases along the grid, so the separation is at least
+    the first term for any table and any H0 (H0 only shifts ``u``). With
+    ``h`` below half of that, no window of two cells holds two nodes, so a
+    cell index that rounding moved by one cell still puts the bracket within
+    one node of the truth, and one comparison on each side fixes it.
+
+    The cell count covers ``log(dL_grid[-1] / dL_grid[1])`` for every point
+    of the module table: the multilinear interpolation in (Om0, w0, wa) is a
+    nonnegative combination of table rows, so the ratio is bounded by its
+    maximum over the rows.
+    """
+
+    log_one_plus_z = np.log1p(_zgrid_numpy)
+    h = 0.45 * float(np.min(np.diff(log_one_plus_z)[1:]))
+    table = np.asarray(rs, dtype=np.float64)
+    span = float(log_one_plus_z[-1] - log_one_plus_z[1]) + float(
+        np.max(np.log(table[..., -1]) - np.log(table[..., 1]))
+    )
+    return h, int(math.ceil(span / h)) + 2
+
+
 _Z_FIRST_NODE = float(np.asarray(zgrid)[1])
 _R_SLOPE_AT_ZERO = float(speed_of_light / H0Planck)
 
@@ -144,6 +223,7 @@ def _low_z_hermite_correction(r_lin, z):
 
 
 rs = jnp.asarray(_build_cpl_distance_grid())
+_DIRECT_CELL_WIDTH, _DIRECT_CELLS = _direct_lookup_geometry()
 
 _ACTIVE_DISTANCE_TABLE = contextvars.ContextVar(
     "darksirens_active_distance_table", default=None
@@ -314,6 +394,12 @@ def z_of_dL(
 
 
 def z_of_dL_precomputed(dL, dL_grid):
+    """Invert ``dL_grid = dL_of_z(zgrid, ...)``; NaN outside its support.
+
+    The bracket lookup follows :func:`configure_z_of_dL_lookup`. The
+    ``"direct"`` lookup relies on ``dL_grid`` being a distance-table row (a
+    positive multiple of ``(1 + z) r(z)`` on ``zgrid``, strictly increasing).
+    """
     dL_grid = jnp.asarray(dL_grid)
     n = dL_grid.shape[0]
     if dL_grid.ndim != 1 or n != zgrid.shape[0]:
@@ -322,12 +408,91 @@ def z_of_dL_precomputed(dL, dL_grid):
             f"{zgrid.shape[0]} nodes to match zgrid, got shape {dL_grid.shape}"
         )
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
-    z = (
-        jnp.interp(dL, dL_grid, zgrid)
-        if _USE_INTERP_SCAN
-        else _interp_unrolled(dL, dL_grid, zgrid)
-    )
+    if _Z_OF_DL_LOOKUP == "direct":
+        z = _interp_direct(dL, dL_grid, zgrid)
+    elif _USE_INTERP_SCAN:
+        z = jnp.interp(dL, dL_grid, zgrid)
+    else:
+        z = _interp_unrolled(dL, dL_grid, zgrid)
     return jnp.where(in_grid, z, jnp.nan)
+
+
+def _direct_cells(log_value, log_first):
+    """Cell of ``log_value`` in the ``"direct"`` lookup, before clipping."""
+    u = (log_value - log_first) / _DIRECT_CELL_WIDTH
+    return jnp.floor(jnp.clip(u, -1.0, float(_DIRECT_CELLS))).astype(jnp.int32)
+
+
+def _direct_cell_table(xp, fp):
+    """Per-proposal table of the ``"direct"`` z(dL) lookup.
+
+    Cell ``j`` (width ``h`` in ``u = log(dL / xp[1])``) gets ``i0_j``, one
+    plus the number of nodes ``k >= 1`` in cells below ``j``, clipped to
+    ``[1, n - 1]``; for a sample in cell ``j`` this is within one node of
+    the searched upper bracket (see :func:`_direct_lookup_geometry`). Row
+    ``j`` stores ``xp`` and ``fp`` at nodes ``i0_j - 2 .. i0_j + 1`` (clamped
+    to the table), which covers the bracket after a one-node correction, so
+    a sample needs one row gather. ``i0_j`` comes from an unrolled search of
+    the ``cells`` edges over the ``n - 1`` sorted node cells (once per
+    proposal; no scatter, which XLA:CPU lowers to a serial loop). The cell
+    assignment carries no gradient; the stored ``xp`` values do.
+    """
+
+    n = xp.shape[0]
+    xs = jax.lax.stop_gradient(xp)
+    log_first = jnp.log(xs[1])
+    node_cells = _direct_cells(jnp.log(xs[1:]), log_first)
+    i0 = 1 + jnp.searchsorted(
+        node_cells,
+        jnp.arange(_DIRECT_CELLS, dtype=node_cells.dtype),
+        side="left",
+        method="scan_unrolled",
+    )
+    i0 = jnp.clip(i0, 1, n - 1)
+    idx = jnp.clip(i0[:, None] + jnp.arange(-2, 2)[None, :], 0, n - 1)
+    return jnp.concatenate([xp[idx], fp[idx]], axis=1), log_first
+
+
+def _interp_direct(x, xp, fp):
+    """``_interp_unrolled`` with the bracket found by index arithmetic.
+
+    The row of the sample's cell holds ``xp`` and ``fp`` at nodes ``i0 - 2 ..
+    i0 + 1`` with ``i0`` within one node of the searched bracket ``i``.
+    Comparing ``x`` with ``xp[i0 - 1]`` and ``xp[i0]`` recovers ``i`` exactly,
+    including its clipping to ``[1, n - 1]`` (``i0 < n - 1`` is
+    ``xp[i0] < xp[n - 1]`` and ``i0 > 1`` is ``xp[i0 - 1] > xp[0]`` on a
+    strictly increasing table). The interpolation is the default's formula
+    on the same two nodes; XLA may contract it differently, so ``z`` agrees
+    with the default to the last bit or one rounding.
+    """
+
+    table, log_first = _direct_cell_table(xp, fp)
+    xs = jax.lax.stop_gradient(x)
+    cell = jnp.clip(
+        _direct_cells(jnp.log(jnp.maximum(xs, jnp.finfo(xp.dtype).tiny)), log_first),
+        0,
+        _DIRECT_CELLS - 1,
+    )
+    row = table[cell]
+    x_m2, x_m1, x_0, x_p1, f_m2, f_m1, f_0, f_p1 = (row[..., k] for k in range(8))
+    up = (x >= x_0) & (x_0 < xp[-1])
+    down = (x < x_m1) & (x_m1 > xp[0])
+    x_lo = jnp.where(down, x_m2, jnp.where(up, x_0, x_m1))
+    x_hi = jnp.where(down, x_m1, jnp.where(up, x_p1, x_0))
+    f_lo = jnp.where(down, f_m2, jnp.where(up, f_0, f_m1))
+    f_hi = jnp.where(down, f_m1, jnp.where(up, f_p1, f_0))
+    df = f_hi - f_lo
+    dx = x_hi - x_lo
+    delta = x - x_lo
+    dx0 = jnp.abs(dx) <= _interp_dx0_eps(x, xp)
+    f = jnp.where(
+        dx0,
+        f_lo,
+        f_lo + (delta / jnp.where(dx0, 1, dx)) * df,
+    )
+    f = jnp.where(x < xp[0], fp[0], f)
+    f = jnp.where(x > xp[-1], fp[-1], f)
+    return f
 
 
 @threads_distance_table()

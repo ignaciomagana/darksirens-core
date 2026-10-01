@@ -12,6 +12,8 @@ from .distances import (
     E,
     H0Planck,
     Om0Planck,
+    Z_OF_DL_LOOKUPS,
+    configure_z_of_dL_lookup,
     dL_grid_bounds,
     dL_in_z_grid,
     dL_of_z,
@@ -20,6 +22,7 @@ from .distances import (
     distance_modulus,
     r_of_z,
     z_of_dL,
+    z_of_dL_lookup,
     z_of_dL_precomputed,
 )
 from .volume import dV_of_z, differential_comoving_volume, expansion_rate
@@ -48,6 +51,9 @@ __all__ = [
     "z_of_dL",
     "redshift_from_luminosity_distance",
     "z_of_dL_precomputed",
+    "Z_OF_DL_LOOKUPS",
+    "configure_z_of_dL_lookup",
+    "z_of_dL_lookup",
     "dL_grid_bounds",
     "dL_in_z_grid",
     "ddL_of_z",
