@@ -116,10 +116,14 @@ def _min_pairing_m1_grid(m_lo: float, pairing_m_hi: float, n_q: int) -> int:
 PAIRING_PANEL_NQ: int = 32
 
 #: How the pairing normaliser factors its scale out of the q-quadrature (see
-#: ``PairingModel._panel_norm``): ``"node_max"`` (default) takes the maximum
-#: of the integrand over every quadrature node; ``"analytic"`` uses the
-#: model's closed-form upper bound (``PairingModel._scale_bound``) where it
-#: has one, so the node values feed a single reduction.
+#: ``PairingModel._panel_norm``): ``"analytic"`` (default since 2026-10-01)
+#: uses the model's closed-form upper bound (``PairingModel._scale_bound``)
+#: where it has one, so the node values feed a single reduction; the density
+#: equals the historical one to rounding (|dlogL| <= 2.2e-11 on the real
+#: 259-event likelihood) at about half the time and a third of the memory.
+#: ``"node_max"`` is the historical arithmetic, the maximum of the integrand
+#: over every quadrature node; set it to reproduce a run made before the
+#: change bit for bit, or to resume its checkpoint.
 PAIRING_SCALES = ("node_max", "analytic")
 
 
@@ -203,7 +207,7 @@ class NormalizationGridSettings:
     pairing_m1_grid: int | None = _env_int_opt("DARKSIRENS_GW_PAIRING_M1_GRID", None)
     pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 48)
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
-    pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "node_max")
+    pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -267,8 +271,11 @@ class NormalizationGridSettings:
 
     def to_dict(self) -> dict[str, int | float | str]:
         out = asdict(self)
-        # The default pairing scale is the historical arithmetic; leaving it out
-        # keeps every existing run fingerprint unchanged.
+        # "node_max" is the arithmetic every run before 2026-10-01 used, whose
+        # fingerprints carry no pairing_scale entry: leaving it out for that
+        # value keeps them matching, while a run under the "analytic" default
+        # records it, so resuming an old checkpoint under the new default is
+        # refused as a settings change (set "node_max" to resume it).
         if out["pairing_scale"] == "node_max":
             del out["pairing_scale"]
         return out
@@ -306,7 +313,7 @@ def configure_normalization_grids(
     ``pairing_m1_grid=None``.  ``pairing_m_hi`` raises the opt-in pairing
     grid's upper bound (see :func:`size_pairing_grid_to_support`); callers
     should normally use that helper rather than setting the bound directly.
-    ``pairing_scale`` is ``"node_max"`` (default) or ``"analytic"``; see
+    ``pairing_scale`` is ``"analytic"`` (default) or ``"node_max"``; see
     :data:`PAIRING_SCALES`. Like every setting here it is read when a
     likelihood is traced, so configure it before binding the analysis.
     """

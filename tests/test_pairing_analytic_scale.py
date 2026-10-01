@@ -1,9 +1,9 @@
 """``pairing_scale="analytic"``: the pairing normaliser's scale from a closed-form bound.
 
-The default (``"node_max"``) factors the maximum of the integrand over every
+The historical ``"node_max"`` factors the maximum of the integrand over every
 quadrature node out of the q-integral, which makes XLA keep an
-``(N_samples x n_nodes)`` array per panel. The opt-in ``"analytic"`` setting
-uses ``max(q_cut**beta, 1) * p_unnorm(1 | m1)`` instead. The quadrature rule
+``(N_samples x n_nodes)`` array per panel. ``"analytic"`` (the default since
+2026-10-01) uses ``max(q_cut**beta, 1) * p_unnorm(1 | m1)`` instead. The quadrature rule
 and its sums are unchanged and the scale cancels, so the density is the same
 to rounding. The bound must hold at every node and must stay tight in the
 low-mass taper, where the default's node maximum exists to keep gradients
@@ -34,7 +34,7 @@ def analytic():
     try:
         yield
     finally:
-        configure_normalization_grids(pairing_scale="node_max")
+        configure_normalization_grids(pairing_scale="analytic")
 
 
 def _pairings():
@@ -87,7 +87,7 @@ def test_the_bound_holds_at_every_node_and_is_tight_in_the_toe(name):
 
 
 @pytest.mark.parametrize("name", ["powerlaw", "gwtc5"])
-def test_density_matches_the_default(name, analytic):
+def test_density_matches_node_max(name, analytic):
     pairing = _pairings()[name]
     rng = np.random.default_rng(12)
     for theta, m_min, dm_min, m1 in _draws(name, rng, n_theta=20, n_m1=200):
@@ -126,17 +126,19 @@ def test_population_gradients_stay_finite_in_the_toe_under_jit(pop_model, analyt
     np.testing.assert_allclose(grad_a, grad_n, rtol=1e-9, atol=1e-9)
 
 
-def test_setting_default_validation_and_fingerprint_omission():
+def test_setting_default_validation_and_fingerprint_entry():
     s = normalization_grid_settings()
-    assert s.pairing_scale == "node_max"
-    assert "pairing_scale" not in s.to_dict()
+    assert s.pairing_scale == "analytic"
+    # The default is recorded, so a run under it never matches a pre-change
+    # fingerprint (which has no entry); "node_max" is left out, so it does.
+    assert s.to_dict()["pairing_scale"] == "analytic"
     try:
-        assert configure_normalization_grids(pairing_scale="analytic").to_dict()["pairing_scale"] == "analytic"
+        assert "pairing_scale" not in configure_normalization_grids(pairing_scale="node_max").to_dict()
     finally:
-        configure_normalization_grids(pairing_scale="node_max")
+        configure_normalization_grids(pairing_scale="analytic")
     with pytest.raises(ValueError, match="pairing_scale must be one of"):
         configure_normalization_grids(pairing_scale="median")
-    assert normalization_grid_settings().pairing_scale == "node_max"
+    assert normalization_grid_settings().pairing_scale == "analytic"
 
 
 def test_a_model_without_a_bound_keeps_the_node_maximum(analytic):
