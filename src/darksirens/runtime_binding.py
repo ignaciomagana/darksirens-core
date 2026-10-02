@@ -195,8 +195,10 @@ class DecodedParameters(NamedTuple):
         ``completeness="complete"``, which has no ``log10n0``), a parameter
         fixed with ``model(..., fixed_survey={...})`` enters as a 0-d array of
         ``theta``'s dtype, and ``z_depth`` is the catalog's survey depth (a
-        Python float or ``None``, never traced). ``None`` for spectral and
-        bright sirens.
+        Python float or ``None``, never traced). ``selection`` is ``None``,
+        or for ``completeness="selection"`` the analysis's runtime selection
+        model with every nuisance sampled through ``survey_priors`` replaced
+        by its entry of ``theta``. ``None`` for spectral and bright sirens.
     ``angular``
         The angular-model coordinates (``ParameterPlan.angular_labels``), a
         slice of ``theta``; empty for the isotropic model.
@@ -269,10 +271,28 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
             sigma_kde=survey("sigma_kde"),
             z_depth=z_depth,
         )
+        selection = getattr(analysis.redshift, "selection", None)
+        if selection is not None:
+            # completeness="selection": the selection model with its sampled
+            # nuisances (survey_priors) in place; the rest are its own values.
+            catalog_params = catalog_params._replace(
+                selection=_decode_selection_model(selection, free)
+            )
 
     angular_start = plan.n_cosmology + plan.n_population + plan.n_catalog
     angular = theta[angular_start : angular_start + plan.n_angular]
     return DecodedParameters(cosmology, population, catalog_params, angular)
+
+
+def _decode_selection_model(selection, sampled, suffix=""):
+    """``selection`` with every sampled nuisance (``label + suffix``) in place."""
+    from darksirens.analysis import SELECTION_NUISANCES, selection_family
+
+    names = [name for name, _, _ in SELECTION_NUISANCES[selection_family(selection)]]
+    values = {
+        name: sampled[name + suffix] for name in names if name + suffix in sampled
+    }
+    return selection._replace(**values) if values else selection
 
 
 def decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH) -> DecodedParameters:
@@ -361,6 +381,10 @@ class BoundAnalysis:
     # Opt-in: per-sample weights in this dtype ("float32"), every reduction in
     # float64. None is the default float64 program (see bind_analysis).
     compute_dtype: str | None = None
+    # Data operands of an opt-in catalog model (a mapping of arrays, e.g. the
+    # compact rows' coverage fraction of completeness="selection"); None for
+    # every other binding, whose call and program are then unchanged.
+    model_operands: Any = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -426,6 +450,8 @@ class BoundAnalysis:
         # the traced program, is exactly the unpinned one.
         if self.kernel_pin is not None:
             operands += (self.kernel_pin,)
+        if self.model_operands is not None:
+            return self._log_likelihood(*operands, model_operands=self.model_operands)
         return self._log_likelihood(*operands)
 
     def as_pytree_callable(self):
@@ -452,11 +478,14 @@ class BoundAnalysis:
         ambient = tuple(resolve() for resolve, _ in _AMBIENT_JIT_CHANNELS)
 
         def _evaluate_operands(gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin,
-                               distance_table, ambient_extras, theta):
+                               distance_table, ambient_extras, model_operands, theta):
             args = (jnp.asarray(theta), gw_pe, gw_selection, catalog, observed_density_cache)
             if kernel_pin is not None:
                 args += (kernel_pin,)
-            return jitted(*args, distance_table=distance_table, _ambient_extras=ambient_extras)
+            extra = {} if model_operands is None else {"model_operands": model_operands}
+            return jitted(
+                *args, distance_table=distance_table, _ambient_extras=ambient_extras, **extra
+            )
 
         return jax.tree_util.Partial(
             _evaluate_operands,
@@ -467,6 +496,7 @@ class BoundAnalysis:
             self.kernel_pin,
             table,
             ambient,
+            self.model_operands,
         )
 
     def _evaluate(
@@ -477,6 +507,7 @@ class BoundAnalysis:
         catalog,
         observed_density_cache,
         kernel_pin=None,
+        model_operands=None,
     ):
         """Evaluate at ``theta`` with the data operands passed explicitly."""
         cosmology, population, catalog_params, angular = _decode_theta(
@@ -532,6 +563,11 @@ class BoundAnalysis:
             )
 
         if isinstance(self.analysis.redshift, IncompleteCatalogRedshift):
+            if model_operands is not None and "row_fraction" in model_operands:
+                # completeness="selection" with a coverage fraction per row of
+                # the (shared PE/selection) compact view.
+                ordinary_common["row_fraction_pe"] = model_operands["row_fraction"]
+                ordinary_common["row_fraction_sel"] = model_operands["row_fraction"]
             return dark_siren_log_likelihood(
                 cosmology,
                 catalog_params,
@@ -588,9 +624,11 @@ def _jit_log_likelihood(bound: BoundAnalysis):
         observed_density_cache,
         kernel_pin=None,
         distance_table=None,
+        model_operands=None,
     ):
         return bound._evaluate(
-            theta, gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin
+            theta, gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin,
+            model_operands,
         )
 
     return log_likelihood
@@ -726,6 +764,16 @@ def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
     return build_pinned_catalog_kernel(cosmology, catalog_params, catalog)
 
 
+def _compact_rows_of(values, store_catalog, compact_catalog):
+    """``values`` (one per row of the store's catalog) on the compact view's rows."""
+    from darksirens.catalog.compact import _source_rows_for_pixels
+
+    rows = _source_rows_for_pixels(
+        store_catalog, np.asarray(compact_catalog.unique_pixels, dtype=np.int64)
+    )
+    return np.asarray(values)[rows]
+
+
 def bind_analysis(
     analysis: Analysis,
     *,
@@ -787,6 +835,8 @@ def bind_analysis(
     require_matching_contract(events, injections)
     warn_pair_cosmology(events, injections)
 
+    model_operands = None
+    lowp = {}
     if events.n_events < 1 or events.nsamp < 1:
         raise ValueError("events store must contain at least one event and sample")
     if injections.ndraw <= 0:
@@ -842,19 +892,34 @@ def bind_analysis(
             catalog = with_galaxy_index(catalog)
         pe_pixels = views.pe_sample_to_row
         sel_pixels = views.selection_sample_to_row
+        selection_completeness = (
+            isinstance(analysis.redshift, IncompleteCatalogRedshift)
+            and analysis.redshift.selection is not None
+        )
+        # completeness="selection" reads no observed-density cache.
         cache = (
             build_observed_density_cache(catalog)
             if isinstance(analysis.redshift, IncompleteCatalogRedshift)
+            and not selection_completeness
             else None
         )
+        if selection_completeness and analysis.redshift.row_fraction is not None:
+            model_operands = {
+                "row_fraction": jnp.asarray(
+                    _compact_rows_of(
+                        analysis.redshift.row_fraction, catalog_store.catalog, views.catalog
+                    )
+                )
+            }
         z_depth = catalog_store.z_depth
 
     kernel_pin = (
         None if catalog is None else _build_kernel_pin(analysis, catalog, z_depth)
     )
+    if model_operands is not None:
+        lowp["model_operands"] = model_operands
     gw_pe = _make_runtime_event(events, pe_pixels, required)
     gw_selection = _make_runtime_event(injections, sel_pixels, required)
-    lowp = {}
     if compute_dtype is not None:
         from darksirens.likelihood.mixed_precision import cast_event
 

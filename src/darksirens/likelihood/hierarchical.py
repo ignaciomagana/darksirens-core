@@ -427,6 +427,8 @@ def dark_siren_log_likelihood(
     pinned_kernel_pe=None,
     pinned_kernel_sel=None,
     compute_dtype: str | None = None,
+    row_fraction_pe=None,
+    row_fraction_sel=None,
 ):
     """Ordinary incomplete-catalog conditional dark-siren likelihood.
 
@@ -439,21 +441,50 @@ def dark_siren_log_likelihood(
     evaluates the per-sample PE and selection weights in float32, reading the
     float64 per-proposal catalog state rounded to float32, and keeps every
     reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
+
+    ``catalog_params.selection`` selects the completeness. ``None`` (the
+    default) is the frozen per-row count ratio read from the observed-density
+    caches. A runtime magnitude-selection model is the opt-in
+    ``completeness="selection"``: its radial curve, times ``row_fraction_pe``
+    / ``row_fraction_sel`` (one coverage fraction per row of each catalog
+    view) when given, is every row's completeness
+    (:func:`darksirens.selection.footprint.selection_missing_host_curves`),
+    and the caches are not read.
     """
 
     from darksirens.catalog.models import (
         build_incomplete_catalog_prior_state,
+        build_incomplete_catalog_prior_state_from_curves,
         eval_incomplete_catalog_prior_state_vmap,
     )
 
-    state_pe = build_incomplete_catalog_prior_state(
-        cosmology, catalog_params, catalog_pe, observed_cache_pe,
-        pinned_kernel=pinned_kernel_pe,
-    )
-    state_sel = build_incomplete_catalog_prior_state(
-        cosmology, catalog_params, catalog_sel, observed_cache_sel,
-        pinned_kernel=pinned_kernel_sel,
-    )
+    selection_model = getattr(catalog_params, "selection", None)
+    if selection_model is None:
+        state_pe = build_incomplete_catalog_prior_state(
+            cosmology, catalog_params, catalog_pe, observed_cache_pe,
+            pinned_kernel=pinned_kernel_pe,
+        )
+        state_sel = build_incomplete_catalog_prior_state(
+            cosmology, catalog_params, catalog_sel, observed_cache_sel,
+            pinned_kernel=pinned_kernel_sel,
+        )
+    else:
+        from darksirens.selection.footprint import selection_missing_host_curves
+
+        state_pe = build_incomplete_catalog_prior_state_from_curves(
+            cosmology, catalog_params, catalog_pe,
+            selection_missing_host_curves(
+                cosmology, catalog_params, catalog_pe, selection_model, row_fraction_pe
+            ),
+            pinned_kernel=pinned_kernel_pe,
+        )
+        state_sel = build_incomplete_catalog_prior_state_from_curves(
+            cosmology, catalog_params, catalog_sel,
+            selection_missing_host_curves(
+                cosmology, catalog_params, catalog_sel, selection_model, row_fraction_sel
+            ),
+            pinned_kernel=pinned_kernel_sel,
+        )
 
     def prior_pe(z, pix, catalog):
         return eval_incomplete_catalog_prior_state_vmap(z, pix, state_pe, catalog)

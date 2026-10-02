@@ -413,3 +413,29 @@ still calls it, so there is one implementation: on a clean `main`
 comparison the default likelihood's optimized HLO and logL are bitwise
 unchanged. The package-root surface gains `decode_parameters`; see
 "Parameter decoding" in `CONTRACT.md` for the stability promise.
+
+### Selection completeness in `ds.model` (opt-in, default unchanged)
+
+`ds.model(..., completeness="selection", selection=<model or payload>,
+row_fraction=None)` is the ordinary path's form of the frozen reference's
+`c_mode="selection"`: every catalog row's completeness is the radial
+magnitude-selection curve `C_sel(z)` (Gaussian or Schechter luminosity
+function, `darksirens.selection.catalog`), optionally times a coverage
+fraction per row (`darksirens.selection.footprint`), in place of the per-row
+count ratio. It reuses the accepted curve builders and the incomplete
+catalog's conditional prior state, so the kernel, depth convention, kernel
+pin, `n0_units`, `missing_density="gather"` and float32 weights all work as
+for `completeness="incomplete"`. The selection nuisances (`M0hat`/`sigma_M`
+or `Mstar_hat`/`alpha`) are fixed at the selection model's values unless the
+new `survey_priors={label: prior}` samples them (the reference sampled them
+by default, flat or under the fit's normal prior; core makes that explicit).
+`survey_priors` also overrides the bounds or sets a truncated-normal prior of
+`log10n0`, `delta`, `sigma_kde` for any catalog analysis.
+`CatalogParameters` gains a `selection` field (default `None`), which
+`decode_parameters` fills for a selection analysis; `ParameterPlan` gains
+`catalog_model`, the canonical JSON of the selection payload and row-fraction
+digest, which `parameter_plan_semantic` records only when set. Parity with the
+reference's `darksiren_log_likelihood(..., c_mode=selection)` on a synthetic
+fixture: 3e-14 (`tools/probe_selection_completeness.py`, in the phase-5
+workflow). Every default plan, fingerprint and bound program is unchanged
+(optimized HLO and logL bit for bit against a clean `main`).

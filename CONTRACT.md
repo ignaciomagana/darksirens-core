@@ -163,6 +163,40 @@ below).
   default `"zero"` is the frozen behavior; `"volume"` is the explicit opt-in
   robustness approximation. `empty_policy` is illegal with any other
   composition.
+- `model(..., completeness="selection", selection=..., row_fraction=None)`
+  (opt-in) completes an incomplete catalog with an explicit
+  magnitude-selection model instead of the per-row count ratio. `selection`
+  is a `GaussianMagnitudeSelection`, a `SchechterMagnitudeSelection`
+  (`darksirens.selection.catalog`) or its runtime payload mapping
+  (`darksirens-catalog-selection-1.0`). Every row's completeness is the radial
+  curve `C_sel(z)` (`selection_completion_curves`), times the row's coverage
+  fraction when `row_fraction` (one value in [0, 1] per row of the catalog
+  store) is given (`selection_completion_curves_with_row_fraction`); the
+  kernel, the finite-depth convention and the missing-host budget are the
+  incomplete catalog's, and no observed-density cache is built. The survey
+  block is `log10n0`, `delta`, `sigma_kde` (with `n0_units`, `fixed_survey`
+  and the kernel pin as for `completeness="incomplete"`). The selection
+  nuisances (`M0hat`, `sigma_M` for the Gaussian family; `Mstar_hat`, `alpha`
+  for the Schechter family) are fixed at the model's values unless
+  `survey_priors` names them, which samples them; `m_lim`, `M_faint_offset`
+  and the K-correction are never sampled. `ParameterPlan.catalog_model`
+  records the selection payload and the row fraction's sha256, and
+  `parameter_plan_semantic(plan)` adds it to a run fingerprint (only when it
+  is set, so default fingerprints are unchanged). `decode_parameters`
+  returns the selection model, with its sampled nuisances in place, as
+  `catalog.selection` (`CatalogParameters.selection`, `None` otherwise). On
+  the frozen reference's `c_mode="selection"` fixture the likelihood agrees
+  with it to 3e-14 (`tools/probe_selection_completeness.py`).
+- `model(..., survey_priors={label: prior})` (opt-in) sets the prior of named
+  survey parameters of a catalog analysis: `(lower, upper)` or
+  `("uniform", lower, upper)`, a normal `("normal", loc, scale)` truncated to
+  the parameter's default bounds, or `("normal", loc, scale, lower, upper)`.
+  The defaults are uniform: `log10n0` [-4, -1], `delta` [-3, 3], `sigma_kde`
+  [0, 0.05], and for the selection nuisances `M0hat` [-23, -18], `sigma_M`
+  [0.05, 3], `Mstar_hat` [-23, -18], `alpha` [-1.9, 0]. Lower bounds may not
+  reach `sigma_kde < 0`, `sigma_M <= 0` or `alpha <= -2`. A parameter cannot
+  be both fixed and given a prior; unknown labels raise. The bounds and prior
+  kinds are part of the plan, so a run fingerprint changes with them.
 - `infer(..., selection_neff_guard="auto"|"hard"|"soft",
   max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None,
   compute_dtype=None)` are likelihood options, never sampler options. `auto`
@@ -284,7 +318,9 @@ named record `darksirens.runtime_binding.DecodedParameters`:
   (Mpc^-3): `10**log10n0`, times `(H0 / 100)**3` under `n0_units="h_scaled"`,
   and `1.0` for `completeness="complete"`. Survey parameters fixed with
   `fixed_survey` enter as 0-d arrays of `theta`'s dtype. `z_depth` is
-  structural (a Python float or `None`, never traced);
+  structural (a Python float or `None`, never traced). `selection` is
+  `None`, or for `completeness="selection"` the runtime selection model with
+  any sampled nuisance (`survey_priors`) in place of its value;
 - `angular`: the angular-model coordinates (`angular_labels`), empty for the
   isotropic model.
 

@@ -223,3 +223,21 @@ jobs:
         run: |
           python candidate/tools/compare_catalog_completeness_probe.py \
             /tmp/selection-legacy.json /tmp/selection-candidate.json --rtol 1e-12
+
+      - name: Evaluate pinned legacy selection-completeness likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_selection_completeness.py \
+            --implementation legacy --out /tmp/selection-completeness-legacy.json
+
+      - name: Evaluate reconstructed selection-completeness likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_selection_completeness.py \
+            --implementation candidate --out /tmp/selection-completeness-candidate.json
+
+      - name: Require completeness="selection" legacy/new likelihood parity
+        run: |
+          python candidate/tools/probe_selection_completeness.py \
+            --compare /tmp/selection-completeness-legacy.json \
+            /tmp/selection-completeness-candidate.json --rtol 1e-12
