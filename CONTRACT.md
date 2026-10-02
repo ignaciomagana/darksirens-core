@@ -179,9 +179,18 @@ parameter decoders or sampler adapters.
   anisotropic angular models, component-spin populations and every
   Gaussian-process population (`population/gp.py`): the GP covariance algebra
   stays float64 (`cond(K)` reaches 5e5-2e7), so float32 gains nothing there,
-  and binned GP models showed the largest float32 shifts. Core does not
-  fingerprint likelihood options; a caller that fingerprints its run should
-  record a non-default `compute_dtype` (`BoundAnalysis.compute_dtype`).
+  and binned GP models showed the largest float32 shifts.
+- Run fingerprints record the likelihood options that can change the
+  likelihood value: `core_numerics_semantic(bound)` (in
+  `darksirens.inference.run_fingerprint`) adds a `"likelihood_options"`
+  entry with a non-default `compute_dtype`, `max_likelihood_variance` and
+  `selection_neff_soft_guard=True`, and no entry for a default binding, so
+  `core_numerics_semantic(bound)` then equals `core_numerics_semantic()` and
+  every existing digest is unchanged. `sel_batch_size` and `pe_event_block`
+  are never recorded: they split the same log-sum-exp sums into blocks
+  (padding rows carry `-inf` weight and `Ndraw` is unchanged) and move the
+  value by floating-point reassociation only (within the pinned 1e-12
+  relative contract; 4e-16 on the DESI P12.4 target).
 - `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
   `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
   raises when none has a finite likelihood (and warns when very few do);
@@ -230,6 +239,31 @@ result = ds.infer(target)
 ```
 
 This seam knows nothing about specialized physics.
+
+A target run that writes or resumes a dynesty or TinyNS checkpoint is
+fingerprinted by `ds.infer`
+(`run_fingerprint.inference_target_semantic`): the target's parameter plan
+(`parameter_plan_semantic`), `core_numerics_semantic()`, the sampler and its
+target-setting options (`sampler_semantic`: everything except checkpoint and
+resume machinery, progress printing and the preflight), and the target's
+optional `identity` and `provenance`. `run_fingerprint.json` is written beside
+every checkpoint the run writes; a resume whose checkpoint directory holds a
+different or no fingerprint raises `ResumeFingerprintError`, naming each
+differing entry, unless the sampler option `resume_force=True` is given (the
+reference's forced-resume rules apply). The result then carries
+`run_fingerprint_digest`. A run without a checkpoint builds and writes nothing,
+and its result is unchanged.
+
+`InferenceTarget(..., identity=None, provenance=None)` are keyword-only:
+`identity` is a JSON-like value naming the target, and `provenance` is a
+mapping, or a zero-argument callable returning one, that a companion fills
+with the state its likelihood was built from (artifact content hashes, e.g.
+`run_fingerprint.file_identity(path)`, fixed values, its likelihood options
+through `likelihood_options_semantic`). Core hashes both as given and
+interprets neither; the callable runs only when a fingerprint is built. A
+checkpointing target that sets neither warns, because its fingerprint cannot
+tell its likelihood from another target's with the same plan. Ordinary
+analyses are not fingerprinted by `ds.infer`.
 
 ### Host-density/redshift seam
 

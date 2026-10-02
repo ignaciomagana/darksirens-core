@@ -223,13 +223,19 @@ def test_resumed_dynesty_runs_report_the_termination_of_the_whole_run(tmp_path):
 
     finished = str(tmp_path / "finished.pkl")
     options = dict(nlive=nlive, dlogz=0.5, show_progress=False, seed=1)
-    with _trace_dynesty_loop() as exits:
+    # The killed checkpoint was written by dynesty directly, with no run
+    # fingerprint beside it, so ds.infer resumes it only when forced; the
+    # forced resume stamps this run's fingerprint, which gates the second
+    # resume below.
+    no_fingerprint = pytest.warns(RuntimeWarning, match="WITHOUT a fingerprint match")
+    with no_fingerprint, _trace_dynesty_loop() as exits:
         result = ds.infer(
             _target(),
             sampler="dynesty",
             resume_from_resolved=killed,
             checkpoint_interval_seconds=1e-6,
             checkpoint_file_resolved=finished,
+            resume_force=True,
             **options,
         )
     final = exits[-1]

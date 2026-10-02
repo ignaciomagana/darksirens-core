@@ -177,7 +177,9 @@ first follow-up had left open. Only one of them changes numerics:
   before. Semantic blocks with non-string keys, sets, complex numbers,
   datetimes or bytes now raise. `core_numerics_semantic()` and
   `core_environment_advisory()` record the settings core resolved at import
-  from `DARKSIRENS_*` variables; `infer()` calls neither, nor the resume gate.
+  from `DARKSIRENS_*` variables; `infer()` calls neither, nor the resume gate
+  (for `InferenceTarget` runs it now does: see "Run-fingerprint coverage"
+  below).
 - **Missing-galaxy budget count check (no likelihood change).**
   `darksirens.selection.catalog.selection_budget_audit` ports the frozen
   reference's diagnostic: under parametric magnitude selection it compares the
@@ -350,3 +352,47 @@ whenever it replaces either; an eager call of the seam (nothing traced) runs
 the check itself. The digest is not a jit operand and splits no jit cache: a
 target's compiled program is unchanged and still serves a rebuilt pin without
 retracing.
+
+### Run-fingerprint coverage (no likelihood change)
+
+Two provenance gaps are closed; no likelihood value changes, and the
+fingerprint schema stays 4 (the canonical hashing is unchanged; only new,
+optional entries are added).
+
+- **Likelihood options.** `core_numerics_semantic(likelihood=None)` takes the
+  `BoundAnalysis` (or a mapping of `bind_analysis` likelihood options) and adds
+  `"likelihood_options"` with each value-changing option that differs from its
+  default: `compute_dtype` (`"float32"`), `max_likelihood_variance` (a cap
+  other than 1.0) and `selection_neff_soft_guard` (`True`).
+  `likelihood_options_semantic` returns that entry alone. `sel_batch_size` and
+  `pe_event_block` are layout: the blocked passes compute the same log-sum-exp
+  sums (padding rows carry `-inf`, `Ndraw` is unchanged) and differ from the
+  single pass by reassociation only (the pinned 1e-12 relative contract; 4e-16
+  on the DESI P12.4 target, consumer Phase 12J), so recording them would only
+  make a requeue with another memory budget refuse its own checkpoint, as the
+  frozen reference's exclusion of both says. A default binding adds no entry:
+  default digests equal those of the previous release (pinned in
+  `tests/test_run_fingerprint_coverage.py`).
+- **InferenceTarget runs.** Before, no core module called the resume gate, so
+  `ds.infer` on a target wrote no fingerprint and resumed any checkpoint. A
+  target run that writes or resumes a dynesty or TinyNS checkpoint is now
+  fingerprinted (parameter plan, core numerics, sampler settings, and the
+  target's new keyword-only `identity` and `provenance` hook), the fingerprint
+  is written beside each checkpoint the run writes, and a resume is refused on
+  a mismatch unless `resume_force=True`. A checkpoint written before this
+  release has no fingerprint and is refused once; `resume_force=True` resumes
+  it and stamps the current fingerprint, after which resumes are gated
+  normally. A target run without a checkpoint is unchanged. This is a
+  behaviour change for resuming existing target checkpoints, for example the
+  DESI P12.4 target of `desi_darksirens_selection`, which checkpoints dynesty
+  through `ds.infer`: after it adopts this release, its first resume of a
+  checkpoint written before must pass `resume_force=True` once. Its likelihood
+  options (`selection_neff_soft_guard=True`, `max_likelihood_variance=20`)
+  belong to its target and enter the fingerprint only if it puts them in its
+  `provenance`; `core_numerics_semantic()` and `parameter_plan_semantic` are
+  unchanged for it.
+- **Not covered.** `ds.infer` still writes no fingerprint for an ordinary
+  analysis: core does not hash the event, injection or catalog files, so a
+  caller that checkpoints an ordinary analysis composes its own fingerprint
+  (`parameter_plan_semantic`, `core_numerics_semantic(bound)`, its data
+  identity, e.g. `file_identity`).

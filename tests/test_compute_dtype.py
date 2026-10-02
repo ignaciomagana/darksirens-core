@@ -543,8 +543,8 @@ def test_compute_dtype_does_not_enter_the_core_fingerprint_helpers():
     b32 = bind_analysis(analysis, events=events, injections=injections, compute_dtype="float32")
     # Like sel_batch_size, pe_event_block and max_likelihood_variance, the
     # option belongs to the binding, not to the plan or to the global numerics,
-    # so every existing fingerprint is unchanged; a caller that fingerprints
-    # its run records BoundAnalysis.compute_dtype itself.
+    # so every existing fingerprint is unchanged; core_numerics_semantic(bound)
+    # records it (tests/test_run_fingerprint_coverage.py).
     assert parameter_plan_semantic(analysis.parameters) == plan_before
     assert core_numerics_semantic() == numerics_before
     assert "compute_dtype" not in repr(plan_before) + repr(numerics_before)

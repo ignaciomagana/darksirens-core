@@ -13,13 +13,22 @@ or partially fixed population, fixed survey parameters) and belongs inside the
 caller's semantic mapping, e.g. semantic["parameters"] =
 parameter_plan_semantic(analysis.parameters). The other two cover the
 settings core resolves at import:
-``core_numerics_semantic()`` returns the target-setting numerics (redshift
+``core_numerics_semantic(bound)`` returns the target-setting numerics (redshift
 grids, GP/angular redshift-normaliser ranges, GP-population bin edges, the
-GW-population normalisation grids) and belongs INSIDE the caller's
-``semantic`` mapping, e.g. ``semantic["core_numerics"] =
-core_numerics_semantic()``; ``core_environment_advisory()`` returns package
-versions and every ``DARKSIRENS_*`` variable present and belongs in
+GW-population normalisation grids and, for a binding passed in, its
+non-default value-changing likelihood options) and belongs INSIDE the
+caller's ``semantic`` mapping, e.g. ``semantic["core_numerics"] =
+core_numerics_semantic(bound)``; ``core_environment_advisory()`` returns
+package versions and every ``DARKSIRENS_*`` variable present and belongs in
 ``advisory``.
+
+``ds.infer`` builds one fingerprint itself: for an ``InferenceTarget`` run
+that writes or resumes a checkpoint (``inference_target_semantic``: the
+plan, core numerics, sampler settings and the target's ``identity`` and
+``provenance`` hook), and gates/stamps it with
+``gate_and_stamp_checkpoint_fingerprint``.  Every block records an optional
+setting only when it differs from its default, so a fingerprint built
+without the new options is unchanged.
 
 Semantic values are canonicalised before hashing (``canonical_semantic``):
 numbers are hashed at full precision, never at their printed precision, and
@@ -241,7 +250,100 @@ def parameter_plan_semantic(plan) -> dict:
     })
 
 
-def core_numerics_semantic() -> dict:
+# Likelihood options of bind_analysis / infer and whether each can change the
+# likelihood VALUE.  Only those that can are fingerprinted, and each only when
+# it differs from its default, so a default binding adds nothing:
+#   * compute_dtype="float32" evaluates the per-sample weights in float32 (the
+#     values move at the float32 rounding level);
+#   * max_likelihood_variance is the cap of the Monte-Carlo variance guard (a
+#     different cap moves where the hard guard returns -inf and the size of
+#     the soft penalty);
+#   * selection_neff_soft_guard=True replaces the hard -inf wall below the
+#     selection N_eff threshold by a smooth penalty.
+# sel_batch_size and pe_event_block are layout only.  A selection batch is a
+# log-sum-exp over a disjoint slice of the injections, combined by another
+# log-sum-exp (log-sum-exp is additive over disjoint index sets); the padding
+# rows carry -inf weight and Ndraw stays the unpadded campaign size.  A PE
+# event block reduces each event's own samples, in the same order, exactly as
+# the single pass does.  Both therefore compute the same sums and differ only
+# by floating-point reassociation: rtol 1e-12 is the pinned reference contract
+# (tests/test_pe_event_reduction.py), and on the production DESI P12.4 target
+# the single pass and its 131072/32 blocks differ by 4e-16 relative.
+# Recording them would make a requeue with a different memory budget refuse
+# its own checkpoint; the frozen reference's fingerprint excludes both for
+# that reason.
+_LIKELIHOOD_LAYOUT_OPTIONS = frozenset({"sel_batch_size", "pe_event_block"})
+_LIKELIHOOD_VALUE_OPTIONS = (
+    "compute_dtype",
+    "max_likelihood_variance",
+    "selection_neff_soft_guard",
+)
+
+
+def likelihood_options_semantic(source) -> dict:
+    """Non-default likelihood options that can change the likelihood value.
+
+    ``source`` is a :class:`~darksirens.runtime_binding.BoundAnalysis` (or
+    any object with the same attributes) or a mapping of
+    :func:`~darksirens.runtime_binding.bind_analysis` keyword names to their
+    values (e.g. the options a companion passed to a core likelihood seam).
+    Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
+    is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
+    the default cap, and ``selection_neff_soft_guard`` when it is ``True``.
+    ``sel_batch_size`` and ``pe_event_block`` never enter: they change the
+    memory layout of the same sums, not their value (see the note above
+    ``_LIKELIHOOD_LAYOUT_OPTIONS``).  A mapping key that is not a
+    ``bind_analysis`` likelihood option raises ``ValueError``.
+
+    The result belongs inside the fingerprint's numerics block: pass the
+    binding to :func:`core_numerics_semantic` (``core_numerics_semantic(
+    bound)``), which adds it under ``"likelihood_options"`` only when it is
+    not empty, so every default run's digest is unchanged.
+    """
+
+    from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+
+    if isinstance(source, Mapping):
+        unknown = sorted(
+            str(key)
+            for key in source
+            if key not in _LIKELIHOOD_VALUE_OPTIONS
+            and key not in _LIKELIHOOD_LAYOUT_OPTIONS
+        )
+        if unknown:
+            raise ValueError(
+                f"unknown likelihood option(s) {unknown}; accepted are "
+                f"{sorted(_LIKELIHOOD_VALUE_OPTIONS + tuple(_LIKELIHOOD_LAYOUT_OPTIONS))}"
+            )
+
+        def _get(name, default):
+            return source.get(name, default)
+    else:
+
+        def _get(name, default):
+            return getattr(source, name, default)
+
+    out = {}
+    dtype = _get("compute_dtype", None)
+    if dtype is not None:
+        name = np.dtype(dtype).name
+        if name != "float64":
+            out["compute_dtype"] = name
+    cap = _get("max_likelihood_variance", None)
+    if cap is not None and float(cap) != float(DEFAULT_MAX_LIKELIHOOD_VARIANCE):
+        out["max_likelihood_variance"] = float(cap)
+    soft = _get("selection_neff_soft_guard", False)
+    if not isinstance(soft, (bool, np.bool_)):
+        raise TypeError(
+            "selection_neff_soft_guard must be a bool (the resolved guard), got "
+            f"{type(soft).__name__} {soft!r}"
+        )
+    if bool(soft):
+        out["selection_neff_soft_guard"] = True
+    return canonical_semantic(out, "semantic.core_numerics.likelihood_options")
+
+
+def core_numerics_semantic(likelihood=None) -> dict:
     """Target-setting numerics core resolved in THIS process.
 
     Several of these are latched at import from ``DARKSIRENS_*`` variables
@@ -253,12 +355,29 @@ def core_numerics_semantic() -> dict:
     so they are what the likelihood actually uses.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
     ``semantic`` block, e.g. ``semantic["core_numerics"] =
-    core_numerics_semantic()``.  Calling this imports JAX and the population
-    modules.
+    core_numerics_semantic(bound)``.  Calling this imports JAX and the
+    population modules.
+
+    ``likelihood`` is optional: the
+    :class:`~darksirens.runtime_binding.BoundAnalysis` the run evaluates (or
+    a mapping of its likelihood options, see
+    :func:`likelihood_options_semantic`).  Its non-default value-changing
+    options (``compute_dtype``, ``max_likelihood_variance``,
+    ``selection_neff_soft_guard``) are added under ``"likelihood_options"``;
+    a default binding, or none, adds no key, so the block is then exactly
+    the one ``core_numerics_semantic()`` has always returned.
     """
 
     from darksirens.cosmology import _grid, distances
     from darksirens.population import angular_advanced, gp, utils
+
+    extra = {}
+    if likelihood is not None:
+        options = likelihood_options_semantic(likelihood)
+        # Only a non-default option enters, so every existing fingerprint is
+        # unchanged.
+        if options:
+            extra["likelihood_options"] = options
 
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
@@ -276,6 +395,7 @@ def core_numerics_semantic() -> dict:
             "nodes": angular_advanced._ZNORM_N,
         },
         "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        **extra,
     })
 
 
@@ -313,6 +433,223 @@ def core_environment_advisory() -> dict:
             if key.startswith("DARKSIRENS_")
         },
     }
+
+
+# Sampler options that do not change the statistical target, as in the frozen
+# reference's fingerprint: resume/checkpoint machinery (it differs between a
+# submission and its resume by construction), presentation, start-time checks,
+# and mirrors the adapters stamp back onto the options.  Every other sampler
+# option is semantic.
+_NON_SEMANTIC_SAMPLER_OPTIONS = frozenset({
+    "resume",
+    "resume_force",
+    "checkpoint_interval",
+    "checkpoint_interval_seconds",
+    "checkpoint_file_resolved",
+    "resume_from_resolved",
+    "run_dir",
+    "save_path",
+    "tinyns_checkpoint_path",
+    "tinyns_checkpoint_path_out",
+    "tinyns_resume_from",
+    "tinyns_checkpoint_interval",
+    "show_progress",
+    "tinyns_progress_interval",
+    "dynesty_diagnostics",
+    "preflight_only",
+    "sampler_preflight",
+    "tinyns_resolved_config",
+    "run_fingerprint_digest",
+    "resume_forced_mismatch",
+})
+
+
+def sampler_semantic(sampler, options) -> dict:
+    """Canonical semantic block of a sampler and its target-setting options.
+
+    ``options`` is the attribute namespace or mapping of sampler options the
+    run uses (``infer``'s ``**sampler_options`` with its defaults filled in).
+    Checkpoint/resume machinery, progress printing and the start-time
+    preflight are excluded, so a requeue that resumes its own checkpoint
+    matches it; every other option (``nlive``, ``dlogz``, ``max_samples``,
+    ``seed``, backend options such as ``tinyns_preset`` or
+    ``dynesty_walks``) is recorded at its value.  An option passed
+    explicitly at a backend default it would otherwise take implicitly
+    counts as a difference (the gate then fails closed).
+    """
+
+    items = options if isinstance(options, Mapping) else vars(options)
+    recorded = {
+        str(key): value
+        for key, value in sorted(items.items())
+        if not str(key).startswith("_")
+        and key != "sampler"
+        and key not in _NON_SEMANTIC_SAMPLER_OPTIONS
+    }
+    return canonical_semantic(
+        {"name": str(sampler), "options": recorded}, "semantic.sampler"
+    )
+
+
+# Full-file SHA-256 up to this size; sampled digest above it (frozen
+# reference rule, so a multi-GB table does not add minutes to every start).
+_FULL_HASH_MAX_BYTES = 1 << 30
+_SAMPLE_WINDOW_BYTES = 16 << 20
+
+
+def file_identity(path) -> dict:
+    """Content identity of one input file, for a semantic block.
+
+    ``{"bytes", "sha256"}`` (full SHA-256) for a file up to 1 GiB; above
+    that ``{"bytes", "sampled_sha256"}``, a digest of the size and three
+    16 MiB windows (head, middle, tail), as in the frozen reference.  A
+    companion's provenance hook can use it to fingerprint the artifacts its
+    likelihood reads; the path itself is not recorded.
+    """
+
+    path = os.fspath(path)
+    size = os.path.getsize(path)
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        if size <= _FULL_HASH_MAX_BYTES:
+            for chunk in iter(lambda: handle.read(1 << 22), b""):
+                digest.update(chunk)
+            return {"bytes": int(size), "sha256": digest.hexdigest()}
+        digest.update(str(size).encode())
+        for offset in (
+            0,
+            max(0, size // 2 - _SAMPLE_WINDOW_BYTES // 2),
+            max(0, size - _SAMPLE_WINDOW_BYTES),
+        ):
+            handle.seek(offset)
+            digest.update(handle.read(_SAMPLE_WINDOW_BYTES))
+    return {"bytes": int(size), "sampled_sha256": digest.hexdigest()}
+
+
+def _resolve_target_provenance(provenance):
+    """Call a target's provenance hook and canonicalise its block."""
+
+    value = provenance() if callable(provenance) else provenance
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            "an InferenceTarget's provenance must be a mapping or a zero-argument "
+            f"callable returning one, got {type(value).__name__}"
+        )
+    return canonical_semantic(value, "semantic.inference_target.provenance")
+
+
+def inference_target_semantic(target, *, sampler, options) -> dict:
+    """Semantic block of a run of an ``InferenceTarget``: what core can know.
+
+    * ``parameters``: :func:`parameter_plan_semantic` of the target's plan
+      (labels, bounds, prior kinds, joint constraints and whatever the plan
+      records, e.g. a field kernel pin);
+    * ``core_numerics``: :func:`core_numerics_semantic` (the target's
+      likelihood options are the companion's, so none are added here);
+    * ``sampler``: :func:`sampler_semantic`;
+    * ``inference_target``: the target's ``identity`` and the block its
+      ``provenance`` hook returns, each only when the target sets it.
+
+    The likelihood itself is opaque to core: two targets with the same plan,
+    no identity and no provenance have the same block.  The hook is how a
+    companion makes its own state (artifact content hashes, fixed values,
+    its likelihood options) part of the digest; core never interprets it.
+    """
+
+    block = {}
+    identity = getattr(target, "identity", None)
+    if identity is not None:
+        block["identity"] = canonical_semantic(
+            identity, "semantic.inference_target.identity"
+        )
+    provenance = getattr(target, "provenance", None)
+    if provenance is not None:
+        block["provenance"] = _resolve_target_provenance(provenance)
+    return {
+        "parameters": parameter_plan_semantic(target.parameters),
+        "core_numerics": core_numerics_semantic(),
+        "sampler": sampler_semantic(sampler, options),
+        "inference_target": block,
+    }
+
+
+def inference_target_fingerprint(target, *, sampler, options) -> dict:
+    """Run fingerprint of an ``InferenceTarget`` run (see
+    :func:`inference_target_semantic`), with :func:`core_environment_advisory`
+    as its advisory block."""
+
+    return fingerprint_from_semantic(
+        inference_target_semantic(target, sampler=sampler, options=options),
+        advisory=core_environment_advisory(),
+    )
+
+
+def gate_and_stamp_checkpoint_fingerprint(
+    opts,
+    fingerprint,
+    *,
+    write_dirs=(),
+    resume_dir=None,
+    run_timestamp,
+):
+    """Gate a resume and stamp a fingerprint beside every checkpoint written.
+
+    The multi-directory form of :func:`gate_and_stamp_resume_fingerprint` for
+    a run whose checkpoint may be written somewhere other than the
+    checkpoint it resumes.  ``resume_dir`` (the directory of the checkpoint
+    being resumed, or ``None``) is checked with
+    :func:`check_resume_fingerprint`, which raises
+    :class:`ResumeFingerprintError` on a mismatch unless
+    ``opts.resume_force`` is set.  Each of ``write_dirs`` (the directories of
+    the checkpoints this run writes) then receives the fingerprint that
+    describes its checkpoint:
+
+    * a fresh run, or a forced resume of a checkpoint with no (readable)
+      fingerprint: this run's fingerprint;
+    * a matching resume: this run's fingerprint, except in ``resume_dir``
+      itself, whose stored artifact is kept;
+    * a forced mismatching resume: the checkpoint creator's fingerprint as
+      ``run_fingerprint.json`` (except in ``resume_dir``, which has it) and
+      this run's beside it as ``run_fingerprint.forced-<timestamp>.json``.
+
+    Sets ``opts.run_fingerprint_digest`` and ``opts.resume_forced_mismatch``
+    and returns the stored fingerprint (``None`` for a fresh run).
+    """
+
+    opts.run_fingerprint_digest = fingerprint["digest"]
+    opts.resume_forced_mismatch = False
+    stored = None
+    resume_abs = None
+    if resume_dir:
+        resume_abs = os.path.abspath(resume_dir)
+        stored = check_resume_fingerprint(
+            resume_dir,
+            fingerprint,
+            force=bool(getattr(opts, "resume_force", False)),
+        )
+    mismatch = stored is not None and stored.get("digest") != fingerprint["digest"]
+    opts.resume_forced_mismatch = bool(mismatch)
+
+    seen = set()
+    for directory in write_dirs:
+        if not directory:
+            continue
+        absolute = os.path.abspath(directory)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        in_resume_dir = absolute == resume_abs
+        if mismatch:
+            if not in_resume_dir:
+                save_run_fingerprint(directory, stored)
+            save_run_fingerprint(
+                directory,
+                fingerprint,
+                basename=f"{FINGERPRINT_BASENAME_STEM}.forced-{run_timestamp}.json",
+            )
+        elif stored is None or not in_resume_dir:
+            save_run_fingerprint(directory, fingerprint)
+    return stored
 
 
 def save_run_fingerprint(run_dir: str, fingerprint: dict, *, basename=None) -> str:
@@ -549,9 +886,15 @@ __all__ = [
     "check_resume_fingerprint",
     "core_environment_advisory",
     "core_numerics_semantic",
+    "file_identity",
     "fingerprint_from_semantic",
+    "gate_and_stamp_checkpoint_fingerprint",
     "gate_and_stamp_resume_fingerprint",
+    "inference_target_fingerprint",
+    "inference_target_semantic",
+    "likelihood_options_semantic",
     "parameter_plan_semantic",
     "resume_provenance_attrs",
+    "sampler_semantic",
     "save_run_fingerprint",
 ]
