@@ -1,6 +1,8 @@
 """``pairing_norm="per_point"``: the pairing normaliser integrated once per likelihood point.
 
-The default (``"per_sample"``) integrates ``N(m1) = int p_unnorm(q | m1) dq``
+Since 2026-10-02 the default ``"auto"`` takes it wherever it applies (the two
+production pairings, without the opt-in m1 grid).  The historical rule
+(``"per_sample"``) integrates ``N(m1) = int p_unnorm(q | m1) dq``
 with Gauss-Legendre nodes for every PE sample and injection. For the two
 production pairings, ``p_unnorm(q | m1) = q**beta K(q m1)`` with ``K`` a
 secondary-mass taper, and ``m2 = q m1`` turns that into
@@ -9,8 +11,8 @@ taper shoulder the taper part is one scalar per likelihood point and the rest
 is closed form, and inside the taper window it is read from a small
 per-point table (``PairingModel._per_point_log_norm``).
 
-What is pinned here: the setting and its fingerprint entry; the density
-against the default (rounding above the shoulder, 1e-9 inside the window,
+What is pinned here: the setting, its ``"auto"`` resolution and its
+fingerprint entry; the density against the per-sample rule (rounding above the shoulder, 1e-9 inside the window,
 and never farther from a converged reference than the default in the narrow
 band just above the taper's floor, where the default's own Gauss-Legendre rule
 is ~1e-3 off); support, ``delta_m2 = 0``, jit against eager at the shoulder,
@@ -121,25 +123,44 @@ def _reference_norm(pairing, m1, m_min, dm_min, theta):
 
 def test_setting_default_validation_and_fingerprint_entry():
     s = normalization_grid_settings()
-    assert s.pairing_norm == "per_sample"
-    # The default is left out of the fingerprint dict, so every existing
-    # fingerprint keeps matching; "per_point" is recorded.
-    assert "pairing_norm" not in s.to_dict()
+    assert s.pairing_norm == "auto"
+    assert s.per_point_pairing_norm()
+    # The default since 2026-10-02 is recorded, so a checkpoint written under
+    # the historical rule is not resumed under it; the historical value
+    # "per_sample" is left out, so a pre-change fingerprint keeps matching
+    # when it is set explicitly.  "per_point" is recorded as set.
+    assert s.to_dict()["pairing_norm"] == "auto"
+    with _norm("per_sample"):
+        assert "pairing_norm" not in normalization_grid_settings().to_dict()
+        assert not normalization_grid_settings().per_point_pairing_norm()
     with _norm("per_point"):
         assert normalization_grid_settings().to_dict()["pairing_norm"] == "per_point"
     with pytest.raises(ValueError, match="pairing_norm must be one of"):
         configure_normalization_grids(pairing_norm="per_event")
-    assert normalization_grid_settings().pairing_norm == "per_sample"
+    assert normalization_grid_settings().pairing_norm == "auto"
 
 
-def test_the_m1_grid_and_per_point_are_mutually_exclusive():
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        configure_normalization_grids(pairing_norm="per_point", pairing_m1_grid=1056)
-    assert normalization_grid_settings().pairing_m1_grid is None
+def test_the_m1_grid_and_an_explicit_per_point_are_mutually_exclusive():
+    with _norm("per_sample"):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            configure_normalization_grids(pairing_norm="per_point", pairing_m1_grid=1056)
+        assert normalization_grid_settings().pairing_m1_grid is None
     with _norm("per_point"):
         with pytest.raises(ValueError, match="mutually exclusive"):
             configure_normalization_grids(pairing_m1_grid=1056)
-    assert normalization_grid_settings().pairing_norm == "per_sample"
+    assert normalization_grid_settings().pairing_norm == "auto"
+
+
+def test_auto_yields_to_the_m1_grid():
+    """The default takes the m1 grid where an explicit "per_point" refuses it."""
+    assert normalization_grid_settings().pairing_norm == "auto"
+    try:
+        s = configure_normalization_grids(pairing_m1_grid=1056)
+        assert s.pairing_norm == "auto" and s.pairing_m1_grid is not None
+        assert not s.per_point_pairing_norm()
+    finally:
+        configure_normalization_grids(pairing_m1_grid=None)
+    assert normalization_grid_settings().per_point_pairing_norm()
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.float32])
@@ -338,9 +359,32 @@ def test_float32_inputs_stay_float32_and_finite(name):
         assert np.max(np.abs(np.log(got[live]) - np.log(want[live]))) < 2e-2
 
 
-def test_a_model_without_the_structure_keeps_the_default():
+def test_a_model_without_the_structure_keeps_the_per_sample_rule():
     pairing = GaussianPairing(ParamSpec("mu_q", 0.0, 1.0), ParamSpec("sigma_q", 0.01, 1.0))
     theta = jnp.array([0.7, 0.2])
     assert pairing._kernel_power(theta) is None
     draw = (theta, 3.0, 1.0, jnp.asarray([30.0, 4.0, 3.5]), jnp.asarray([0.6, 0.9, 0.95]))
-    np.testing.assert_array_equal(_eval(pairing, draw, "per_point"), _eval(pairing, draw, "per_sample"))
+    want = _eval(pairing, draw, "per_sample")
+    np.testing.assert_array_equal(_eval(pairing, draw, "per_point"), want)
+    np.testing.assert_array_equal(_eval(pairing, draw, "auto"), want)
+
+
+@pytest.mark.parametrize("name", ["powerlaw", "gwtc5"])
+def test_auto_is_per_point_for_the_production_pairings(name):
+    pairing = _pairings()[name]
+    for draw in _draws(name, np.random.default_rng(34), 4):
+        np.testing.assert_array_equal(_eval(pairing, draw, "auto"), _eval(pairing, draw, "per_point"))
+
+
+@pytest.mark.parametrize("name", ["powerlaw", "gwtc5"])
+def test_auto_with_the_m1_grid_is_the_m1_grid_bit_for_bit(name):
+    """With the opt-in m1 grid set, "auto" evaluates exactly what "per_sample" does."""
+    pairing = _pairings()[name]
+    draws = _draws(name, np.random.default_rng(35), 3)
+    try:
+        configure_normalization_grids(pairing_m1_grid=1056)
+        for draw in draws:
+            want = _eval(pairing, draw, "per_sample")
+            np.testing.assert_array_equal(_eval(pairing, draw, "auto"), want)
+    finally:
+        configure_normalization_grids(pairing_m1_grid=None)

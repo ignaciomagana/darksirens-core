@@ -9,6 +9,12 @@
   identity and provenance block (the companion hook).
 * Every fingerprint built without the new options is unchanged: the goldens
   below were computed on main at 611eaff, before this change.
+* The evaluation defaults of 2026-10-02 (``pairing_norm="auto"``,
+  ``kernel_layout="galaxy_list"``, ``missing_density="auto"``,
+  ``kernel_window="auto"``) are recorded, so the goldens hold under the
+  historical values set explicitly (what reproduces, and resumes, a run made
+  before the change), and a checkpoint fingerprinted before the change is
+  refused under the new defaults with the fix named in the message.
 """
 
 from __future__ import annotations
@@ -40,6 +46,8 @@ from darksirens.inference.run_fingerprint import (
 )
 from darksirens.inference.target import InferenceTarget
 from darksirens.runtime_binding import bind_analysis
+
+from _historical_settings import historical_evaluation
 
 FIT = ("m1det", "q", "dL", "chieff")
 
@@ -107,6 +115,55 @@ def _stores(n_events=3, nsamp=4, n_sel=128):
 
 @pytest.mark.skipif(not _golden_environment(), reason="goldens assume default DARKSIRENS_* settings")
 def test_default_digests_equal_the_pre_change_goldens():
+    # The goldens predate the 2026-10-02 evaluation defaults, which are
+    # recorded: they hold under the historical values, set explicitly.
+    with historical_evaluation():
+        _check_pre_change_goldens()
+
+
+@pytest.mark.skipif(not _golden_environment(), reason="goldens assume default DARKSIRENS_* settings")
+def test_the_2026_10_02_defaults_are_recorded_and_differ_from_the_goldens():
+    numerics = core_numerics_semantic()
+    assert numerics["normalization_grids"]["pairing_norm"] == "auto"
+    assert numerics["catalog_evaluation"] == {
+        "kernel_layout": "galaxy_list", "missing_density": "auto", "kernel_window": "auto",
+    }
+    assert _digest(numerics) != GOLDEN_NUMERICS
+    with historical_evaluation():
+        historical = core_numerics_semantic()
+    # Exactly those four entries differ.
+    assert "catalog_evaluation" not in historical
+    assert "pairing_norm" not in historical["normalization_grids"]
+    trimmed = dict(numerics)
+    del trimmed["catalog_evaluation"]
+    trimmed["normalization_grids"] = {
+        k: v for k, v in numerics["normalization_grids"].items() if k != "pairing_norm"
+    }
+    assert trimmed == historical
+
+
+def test_resuming_a_pre_change_checkpoint_under_the_new_defaults_names_the_fix(tmp_path):
+    # A checkpoint fingerprinted under the historical values (what every run
+    # before 2026-10-02 used) is refused under the new defaults as a settings
+    # change, and the message names the setting that resumes it.
+    with historical_evaluation():
+        old = fingerprint_from_semantic({"core_numerics": core_numerics_semantic()})
+    save_run_fingerprint(str(tmp_path), old)
+    new = fingerprint_from_semantic({"core_numerics": core_numerics_semantic()})
+    with pytest.raises(ResumeFingerprintError) as info:
+        check_resume_fingerprint(str(tmp_path), new)
+    message = str(info.value)
+    for fix in ('pairing_norm="per_sample"', 'kernel_layout="padded"',
+                'missing_density="grid"', 'kernel_window="off"'):
+        assert fix in message, message
+    assert "A default changed since the checkpoint was written" in message
+    # Under the historical values, set explicitly, it resumes.
+    with historical_evaluation():
+        again = fingerprint_from_semantic({"core_numerics": core_numerics_semantic()})
+    assert check_resume_fingerprint(str(tmp_path), again)["digest"] == old["digest"]
+
+
+def _check_pre_change_goldens():
     analysis = _analysis()
     plan = parameter_plan_semantic(analysis.parameters)
     assert _digest(plan) == GOLDEN_PLAN

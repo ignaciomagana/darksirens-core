@@ -219,8 +219,8 @@ below).
   `Om0`, `w0`, `wa` and its own `delta`, `sigma_kde` are fixed; each pin's
   catalog digest is checked against its view when the binding is made. A
   conditional analysis given `K >= 2` catalogs is refused. `compute_dtype="float32"`,
-  `missing_density="gather"`, `kernel_layout="galaxy_list"`, `kernel_window`
-  (on each compact view), `n0_units`, the
+  the `missing_density`, `kernel_layout` and `kernel_window` settings (the
+  window on each compact view), `n0_units`, the
   soft and hard guards and the layout options apply as for the ordinary
   incomplete catalog. `decode_parameters` returns
   `CatalogMixtureParameters(components, log_weights)` as `catalog` (one
@@ -291,6 +291,20 @@ below).
   (padding rows carry `-inf` weight and `Ndraw` is unchanged) and move the
   value by floating-point reassociation only (within the pinned 1e-12
   relative contract; 4e-16 on the DESI P12.4 target).
+- Evaluation settings (`darksirens.catalog.settings` and the pairing
+  settings of `darksirens.population.utils`) enter
+  `core_numerics_semantic()` when they are not at their historical value.
+  Since 2026-10-02 the defaults are `pairing_norm="auto"`,
+  `kernel_layout="galaxy_list"`, `missing_density="auto"` and
+  `kernel_window="auto"` (each the faster evaluation where it applies, and
+  the historical one otherwise, without raising); they are recorded, with a
+  binding's kernel window recorded as the tolerance it was bound with (none
+  when `"auto"` attached no window). The historical values
+  (`"per_sample"`, `"padded"`, `"grid"`, `"off"`) are left out, so a
+  fingerprint made before the change matches when they are set explicitly,
+  and they reproduce the pre-change program bit for bit. Resuming a
+  pre-change checkpoint under the new defaults is refused as a settings
+  change, and the message names those settings.
 - `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
   `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
   raises when none has a finite likelihood (and warns when very few do);
@@ -478,8 +492,8 @@ The `MissingHostContext` gives the catalog index, the view and its global
 rows, the member, the extension's parameters and `data` (a jit operand, never
 a constant), the proposal's cosmology and catalog parameters, `dN_exp`, the
 depth mask, the selection curve `Cbar(z)`, the view's row fraction and the
-full-sky observed total. `missing_density="gather"` is refused with an
-extension. The target's fingerprint provenance records the analysis plan's
+full-sky observed total. An explicit `missing_density="gather"` is refused
+with an extension; the `"auto"` default keeps the grid there. The target's fingerprint provenance records the analysis plan's
 semantic, the non-default likelihood options and the extension's
 `provenance()`.
 

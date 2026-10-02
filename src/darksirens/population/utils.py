@@ -128,14 +128,21 @@ PAIRING_PANEL_NQ: int = 32
 PAIRING_SCALES = ("node_max", "analytic")
 
 #: Where the pairing normaliser is integrated (see ``PairingModel.__call__``):
-#: ``"per_sample"`` (default) runs the q-quadrature for every PE sample and
-#: injection; ``"per_point"`` (opt-in) integrates the low-mass taper once per
-#: likelihood point and evaluates each sample in closed form or from a small
-#: per-point table (``PairingModel._per_point_log_norm``).  Only pairings that
-#: declare the ``q**beta`` times secondary-mass-taper structure
-#: (``PairingModel._kernel_power``) take ``"per_point"``; every other pairing
-#: keeps the per-sample quadrature.
-PAIRING_NORMS = ("per_sample", "per_point")
+#: ``"per_sample"`` runs the q-quadrature for every PE sample and injection
+#: (the historical rule, and the default before 2026-10-02); ``"per_point"``
+#: integrates the low-mass taper once per likelihood point and evaluates each
+#: sample in closed form or from a small per-point table
+#: (``PairingModel._per_point_density``).  Only pairings that declare the
+#: ``q**beta`` times secondary-mass-taper structure
+#: (``PairingModel._kernel_power``, i.e. ``PowerLawPairing`` and
+#: ``GWTC5FiducialBPL2PeaksPairing``) take ``"per_point"``; every other
+#: pairing keeps the per-sample quadrature.  ``"auto"`` (default since
+#: 2026-10-02) is ``"per_point"`` wherever it applies and ``"per_sample"``
+#: otherwise: with the opt-in ``pairing_m1_grid`` set (which an explicit
+#: ``"per_point"`` refuses) it is the m1 grid, exactly as under
+#: ``"per_sample"``.  Set ``"per_sample"`` to reproduce a run made before the
+#: change bit for bit, or to resume its checkpoint.
+PAIRING_NORMS = ("per_sample", "per_point", "auto")
 
 # Grid of the per-point taper table (``pairing_norm="per_point"``), in
 # lambda = log s, s = (m1 - m_edge)/(m_shoulder - m_edge) the primary mass's
@@ -238,11 +245,17 @@ class NormalizationGridSettings:
     support; :func:`size_pairing_grid_to_support` /
     :func:`assert_pairing_grid_covers_support` keep it truthful.
 
-    ``pairing_norm`` (env ``DARKSIRENS_GW_PAIRING_NORM``) is ``"per_sample"``
-    (default) or the opt-in ``"per_point"``, which integrates the pairing's
-    secondary-mass taper once per likelihood point instead of once per sample
-    (``PairingModel._per_point_density``).  It is a different answer to the
-    question ``pairing_m1_grid`` answers, and the two are mutually exclusive.
+    ``pairing_norm`` (env ``DARKSIRENS_GW_PAIRING_NORM``) is ``"auto"``
+    (default since 2026-10-02), ``"per_point"`` or ``"per_sample"``.
+    ``"per_point"`` integrates the pairing's secondary-mass taper once per
+    likelihood point instead of once per sample
+    (``PairingModel._per_point_density``); ``"per_sample"`` is the
+    historical per-sample quadrature; ``"auto"`` is ``"per_point"`` wherever
+    it applies (a pairing that declares ``_kernel_power``, with no
+    ``pairing_m1_grid``) and ``"per_sample"`` otherwise (see
+    :data:`PAIRING_NORMS`).  ``"per_point"`` is a different answer to the
+    question ``pairing_m1_grid`` answers, and an explicit ``"per_point"``
+    refuses the m1 grid; under ``"auto"`` the m1 grid, when set, wins.
     The m1 grid interpolates ``log N`` on a STATIC log-m1 grid spanning
     ``[m_lo, pairing_m_hi]``, so a sampled support edge cuts through its cells
     and every sample still pays a per-sample Gauss-Legendre edge rule (it is a
@@ -260,7 +273,7 @@ class NormalizationGridSettings:
     pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 48)
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
-    pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "per_sample")
+    pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "auto")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -304,10 +317,12 @@ class NormalizationGridSettings:
                 f"pairing_norm must be one of {PAIRING_NORMS}, got "
                 f"{self.pairing_norm!r} (env DARKSIRENS_GW_PAIRING_NORM)"
             )
-        # The two opt-ins answer the same question differently: the m1 grid
+        # The two options answer the same question differently: the m1 grid
         # interpolates the per-sample normaliser from static nodes, "per_point"
-        # replaces the per-sample quadrature it approximates.  Refuse the pair
-        # rather than let one silently override the other.
+        # replaces the per-sample quadrature it approximates.  Refuse an
+        # explicit pair rather than let one silently override the other; the
+        # "auto" default yields to the m1 grid, which is always explicit
+        # (see per_point_pairing_norm).
         if self.pairing_norm == "per_point" and self.pairing_m1_grid is not None:
             raise ValueError(
                 "pairing_norm='per_point' and pairing_m1_grid are mutually "
@@ -347,13 +362,28 @@ class NormalizationGridSettings:
         # refused as a settings change (set "node_max" to resume it).
         if out["pairing_scale"] == "node_max":
             del out["pairing_scale"]
-        # "per_sample" is the default and every run before the per-point
-        # option existed used it: leave it out so their fingerprints keep
-        # matching.  A "per_point" run records it, so its checkpoint is not
-        # resumed under the per-sample normaliser, or the reverse.
+        # "per_sample" is the rule every run before 2026-10-02 used by
+        # default, whose fingerprints carry no pairing_norm entry: leaving it
+        # out for that value keeps them matching.  "per_point" and the "auto"
+        # default are recorded as set, so resuming an old checkpoint under the
+        # new default is refused as a settings change (set "per_sample" to
+        # resume it), and a "per_point" checkpoint is not resumed under the
+        # per-sample normaliser, or the reverse.
         if out["pairing_norm"] == "per_sample":
             del out["pairing_norm"]
         return out
+
+    def per_point_pairing_norm(self) -> bool:
+        """Whether a pairing that declares ``_kernel_power`` takes ``"per_point"``.
+
+        True for ``pairing_norm="per_point"``, and for ``"auto"`` unless the
+        opt-in ``pairing_m1_grid`` is set (an explicit ``"per_point"`` with
+        the m1 grid is refused at construction).
+        """
+
+        if self.pairing_norm == "per_point":
+            return True
+        return self.pairing_norm == "auto" and self.pairing_m1_grid is None
 
 
 _NORMALIZATION_GRID_SETTINGS = NormalizationGridSettings()
@@ -390,8 +420,8 @@ def configure_normalization_grids(
     grid's upper bound (see :func:`size_pairing_grid_to_support`); callers
     should normally use that helper rather than setting the bound directly.
     ``pairing_scale`` is ``"analytic"`` (default) or ``"node_max"``; see
-    :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"per_sample"`` (default) or
-    ``"per_point"``; see :data:`PAIRING_NORMS`. Like every setting here they
+    :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"auto"`` (default),
+    ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`. Like every setting here they
     are read when a likelihood is traced, so configure them before binding the
     analysis.
     """

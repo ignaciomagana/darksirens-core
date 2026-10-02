@@ -198,7 +198,7 @@ def selection_missing_host_curves(
     if gather is None:
         from darksirens.catalog.settings import catalog_evaluation_settings
 
-        gather = catalog_evaluation_settings().missing_density == "gather"
+        gather = catalog_evaluation_settings().gathers_missing_density()
     if gather:
         if row_fraction is None:
             row_fraction = jnp.ones(

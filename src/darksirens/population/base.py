@@ -590,8 +590,9 @@ class PairingModel(ABC):
     def _kernel_power(self, theta):
         r"""``beta`` of a secondary-mass-tapered ``q**beta`` kernel, or ``None``.
 
-        Declares the structure the opt-in ``pairing_norm="per_point"``
-        normaliser (:meth:`_per_point_density`) is exact for:
+        Declares the structure the ``pairing_norm="per_point"`` normaliser
+        (:meth:`_per_point_density`; also taken under the ``"auto"`` default)
+        is exact for:
 
         * ``p_unnorm(q | m1) = q**beta * K(q m1)``, where ``K`` is zero below
           ``m_edge``, ``utils.sfilter_low(m2, m_edge, m_shoulder - m_edge)`` on
@@ -603,7 +604,7 @@ class PairingModel(ABC):
 
         Both production pairings (``PowerLawPairing`` and
         ``GWTC5FiducialBPL2PeaksPairing``) declare it.  ``None`` (the default)
-        keeps the per-sample q-quadrature for that model under either
+        keeps the per-sample q-quadrature for that model under every
         ``pairing_norm`` value.
         """
         del theta
@@ -832,12 +833,14 @@ class PairingModel(ABC):
         # interpolates it per sample.
         settings = normalization_grid_settings()
         n_grid = settings.pairing_m1_grid
-        # OPT-IN per-point normaliser (static branch, like the two above): the
-        # taper is integrated once per likelihood point and every sample is
-        # closed form or a table lookup (_per_point_density).  A model that
-        # does not declare the structure it needs keeps the per-sample rule.
+        # Per-point normaliser (static branch, like the two above; on by
+        # default through pairing_norm="auto" since 2026-10-02): the taper is
+        # integrated once per likelihood point and every sample is closed form
+        # or a table lookup (_per_point_density).  A model that does not
+        # declare the structure it needs keeps the per-sample rule, and so does
+        # every model under "auto" when the opt-in m1 grid is set.
         beta_pp = (self._kernel_power(theta)
-                   if settings.pairing_norm == "per_point" else None)
+                   if settings.per_point_pairing_norm() else None)
         if beta_pp is not None:
             dens = self._per_point_density(p, m1, m_min, dm_min, theta, beta_pp)
             return jnp.where(in_support, dens, 0.0)

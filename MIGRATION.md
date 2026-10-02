@@ -496,3 +496,77 @@ from 2b86a2d, and the reference's powerlaw+peak density changed after that
 commit (pairing normaliser and support fixes), which core inherits from
 c042527.
 
+
+### Speed defaults (numerics change by default; historical values reproduce)
+
+The owner decided on 2026-10-02 to make four evaluation settings default to
+their faster form. The old behaviour stays available by setting each
+historical value explicitly, which reproduces the program of `main` before
+the change (b47e41c) bit for bit: optimized HLO and log-likelihood bits,
+checked on 24 mock and real cases.
+
+| setting (env) | new default | historical value |
+|---|---|---|
+| `configure_normalization_grids(pairing_norm=...)` (`DARKSIRENS_GW_PAIRING_NORM`) | `"auto"` | `"per_sample"` |
+| `configure_catalog_evaluation(kernel_layout=...)` (`DARKSIRENS_CATALOG_KERNEL_LAYOUT`) | `"galaxy_list"` | `"padded"` |
+| `configure_catalog_evaluation(missing_density=...)` (`DARKSIRENS_CATALOG_MISSING_DENSITY`) | `"auto"` | `"grid"` |
+| `configure_catalog_evaluation(kernel_window=...)` (`DARKSIRENS_CATALOG_KERNEL_WINDOW`) | `"auto"` | `"off"` |
+
+`"auto"` is the faster evaluation wherever it applies and the historical one
+where the explicit faster value refuses, without raising. An explicit
+`"per_point"`, `"gather"` or tolerance keeps refusing as before.
+
+- `pairing_norm="auto"`: the per-point normaliser for the pairings that
+  declare its structure (`PowerLawPairing`, `GWTC5FiducialBPL2PeaksPairing`);
+  the per-sample rule for any other pairing, and for every pairing when the
+  opt-in `pairing_m1_grid` is set (then it is the m1 grid, exactly as under
+  `"per_sample"`).
+- `kernel_layout="galaxy_list"`: refuses no case, so it is the default value
+  itself; its values equal the padded layout's bit for bit.
+- `missing_density="auto"`: gathered, except with a missing-host extension
+  (`make_catalog_mixture_target`), where the grid is kept.
+- `kernel_window="auto"`: a window of tolerance `1e-10` on every catalog view
+  whose rows are sorted by redshift, with finite redshifts and a finite
+  `sigma_kde` bound (`darksirens.catalog.redshift.kernel_window_applies`);
+  no window (the full-row sum) on a view that is not. Such a window is marked
+  `strict=False`, and the marked host kernel drops it and sums every galaxy,
+  where it refuses an explicit one.
+
+**Fingerprints and resume (behaviour change).** As for `pairing_scale` on
+2026-10-01, the historical values are left out of
+`core_numerics_semantic()`, so a fingerprint made before the change matches
+when they are set explicitly. The new defaults are recorded
+(`normalization_grids.pairing_norm = "auto"`, `catalog_evaluation =
+{kernel_layout: "galaxy_list", missing_density: "auto", kernel_window:
+"auto"}`; with a catalog binding, `kernel_window` is the tolerance it was
+bound with, `1e-10`, or absent when `"auto"` attached no window). Resuming a
+checkpoint written before the change under the new defaults is therefore
+refused as a settings change, and the refusal now names the fix: set
+`pairing_norm="per_sample"`, `kernel_layout="padded"`,
+`missing_density="grid"` and `kernel_window="off"` (or the environment
+variables `DARKSIRENS_GW_PAIRING_NORM=per_sample`,
+`DARKSIRENS_CATALOG_KERNEL_LAYOUT=padded`,
+`DARKSIRENS_CATALOG_MISSING_DENSITY=grid`,
+`DARKSIRENS_CATALOG_KERNEL_WINDOW=off`) to resume it. The catalog entries are
+recorded for spectral runs too, as explicit values always were.
+
+**Values.** Against the historical values (CPU, float64, 16 prior draws plus
+the stage-2 MAP and 8 Laplace draws per case): |dlogL| at most 1.4e-7
+(relative 2.3e-13) on the real 259-event spectral likelihood with
+powerlaw+peak, 2.7e-12 with GWTC-5, 4.0e-8 on the K = 2 field mixture (T and
+R1), 2.3e-8 on the mock T complete catalog and at most 3.6e-9 on the other
+mock T and R1 dark, field, selection-completeness and z_depth cases. All of
+it comes from the per-point pairing normaliser: run alone, the galaxy list is
+bitwise, the gathered density is within 2.8e-14 and the window within
+4.6e-11. In float32 the per-point normaliser shifts the likelihood by up to
+0.09 (mock T) and 0.21 (real) far from the maximum, where float32 is already
+0.03 to 50 nats off float64; within 30 nats of the maximum float32 is as
+close to float64 under the new defaults as under the historical ones (1.3e-3
+on T, 1.7e-5 on R1, 5.5e-6 against 5.0e-6 on real).
+
+**Parity with the frozen reference.** The legacy probes in CI
+(`tools/probe_*.py` against c042527 at rtol 1e-12) pass unchanged under the
+new defaults, so they keep running at the defaults; the population and
+spectral probes evaluate the per-point normaliser, and the mixture and
+selection-completeness probes bind through `bind_analysis` with the galaxy
+list, the gathered density and the window.

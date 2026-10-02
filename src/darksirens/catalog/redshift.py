@@ -1025,15 +1025,20 @@ class CatalogKernelWindow(NamedTuple):
     sample sums), ``tolerance`` the tolerance ``eps`` it was sized for, and
     ``sigma_kde`` the largest ``|sigma_kde|`` it covers.  Built on the host
     by :func:`kernel_window`, where the bound is stated and proved.
-    ``half_width`` is the only pytree leaf; ``size``, ``tolerance`` and
-    ``sigma_kde`` are static (``size`` sets the shape of the traced program)
-    and compare by value, so a window of another size retraces.
+    ``strict`` is ``False`` for a window attached under the
+    ``kernel_window="auto"`` default, which a consumer that cannot take a
+    window (the marked host kernel) drops instead of refusing.
+    ``half_width`` is the only pytree leaf; ``size``, ``tolerance``,
+    ``sigma_kde`` and ``strict`` are static (``size`` sets the shape of the
+    traced program) and compare by value, so a window of another size
+    retraces.
     """
 
     half_width: Any
     size: int
     tolerance: float
     sigma_kde: float
+    strict: bool = True
 
 
 def _flatten_window_with_keys(window):
@@ -1041,11 +1046,14 @@ def _flatten_window_with_keys(window):
         window.size,
         window.tolerance,
         window.sigma_kde,
+        window.strict,
     )
 
 
 def _flatten_window(window):
-    return (window.half_width,), (window.size, window.tolerance, window.sigma_kde)
+    return (window.half_width,), (
+        window.size, window.tolerance, window.sigma_kde, window.strict
+    )
 
 
 def _unflatten_window(aux, children):
@@ -1074,10 +1082,35 @@ def _rows_sorted(z, ngals, xp=np):
     return xp.all((z[:, 1:] >= z[:, :-1]) | ~later_real)
 
 
+def kernel_window_applies(catalog: GalaxyCatalog, sigma_kde: float) -> bool:
+    """Whether :func:`kernel_window` can size a window for ``catalog`` (host side).
+
+    True when ``sigma_kde`` is finite and every row's real prefix holds
+    finite redshifts sorted in non-decreasing order: the premises
+    :func:`kernel_window` refuses without.  The ``kernel_window="auto"``
+    default (:mod:`darksirens.catalog.settings`) attaches a window only where
+    this holds and leaves the view unwindowed (the historical full-row sum)
+    otherwise.  Needs concrete arrays.
+    """
+
+    if not np.isfinite(abs(float(sigma_kde))):
+        return False
+    z = np.asarray(catalog.zgals, dtype=np.float64)
+    ngals = np.asarray(catalog.ngals).astype(np.int64)
+    if z.ndim != 2:
+        return False
+    real = np.arange(z.shape[1])[None, :] < ngals[:, None]
+    if not bool(np.all(np.isfinite(z[real]))):
+        return False
+    return bool(_rows_sorted(z, ngals))
+
+
 def kernel_window(
     catalog: GalaxyCatalog,
     tolerance: float,
     sigma_kde: float,
+    *,
+    strict: bool = True,
 ) -> CatalogKernelWindow:
     """Size the redshift window of the per-sample kernel sum (host side, NumPy).
 
@@ -1120,9 +1153,11 @@ def kernel_window(
 
     Requires concrete arrays and rows sorted by redshift over the real
     prefix (the default of :func:`darksirens.catalog.io.load_catalog`);
-    raises ``ValueError`` otherwise.  ``size`` is at least 1 and at most
-    ``N_max``; a window as long as the rows sums every slot (the default
-    evaluator).
+    raises ``ValueError`` otherwise (:func:`kernel_window_applies` checks
+    those premises without raising).  ``size`` is at least 1 and at most
+    ``N_max``; a window as long as the rows sums every slot (the full-row
+    evaluator).  ``strict`` is recorded on the window
+    (:class:`CatalogKernelWindow`).
     """
 
     if any(
@@ -1172,7 +1207,11 @@ def kernel_window(
     if isinstance(catalog.zgals, jax.Array):
         half_width = jnp.asarray(half_width)
     return CatalogKernelWindow(
-        half_width=half_width, size=int(size), tolerance=eps, sigma_kde=sigma
+        half_width=half_width,
+        size=int(size),
+        tolerance=eps,
+        sigma_kde=sigma,
+        strict=bool(strict),
     )
 
 
@@ -1180,6 +1219,8 @@ def with_kernel_window(
     catalog: GalaxyCatalog,
     tolerance: float,
     sigma_kde: float,
+    *,
+    strict: bool = True,
 ) -> GalaxyCatalog:
     """``catalog`` carrying its :class:`CatalogKernelWindow` (the window opt-in).
 
@@ -1192,9 +1233,13 @@ def with_kernel_window(
     ``|sigma_kde|`` the likelihood will be evaluated at; a window that does
     not fit the catalog it is served with, or a larger ``sigma_kde``, makes
     the catalog likelihood ``-inf``, never a finite wrong value.
+    ``strict=False`` marks a window attached under the ``kernel_window="auto"``
+    default, which the marked host kernel drops rather than refuses.
     """
 
-    return catalog._replace(kernel_window=kernel_window(catalog, tolerance, sigma_kde))
+    return catalog._replace(
+        kernel_window=kernel_window(catalog, tolerance, sigma_kde, strict=strict)
+    )
 
 
 def _window_active(catalog) -> bool:
@@ -1454,6 +1499,7 @@ __all__ = [
     "eval_log_catalog_prior_state_vmap",
     "galaxy_index",
     "kernel_window",
+    "kernel_window_applies",
     "kernel_window_ok",
     "log_catalog_prior",
     "log_catalog_prior_vmap",
