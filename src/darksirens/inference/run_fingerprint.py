@@ -185,7 +185,8 @@ def parameter_plan_semantic(plan) -> dict:
     ``allow_out_of_prior``, in the catalog kernel pin (``kernel_pin``
     setting, and whether it applies), in ``n0_units`` or in the catalog model
     (``ParameterPlan.catalog_model``: a selection completeness, its selection
-    model and row-fraction digest), have different blocks, so a run
+    model and row-fraction digest) or in their per-catalog population blocks
+    (``ParameterPlan.catalog_population``), have different blocks, so a run
     fingerprint built from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
@@ -255,6 +256,19 @@ def parameter_plan_semantic(plan) -> dict:
         **(
             {"catalog_model": json.loads(plan.catalog_model)}
             if getattr(plan, "catalog_model", "")
+            else {}
+        ),
+        # And the per-catalog population blocks (model(...,
+        # per_catalog_population=...)): absent when every catalog shares one.
+        **(
+            {
+                "catalog_population": {
+                    str(int(k)): [str(label) for label in labels]
+                    for k, labels in plan.catalog_population
+                },
+                "n_catalog_population": int(plan.n_catalog_population),
+            }
+            if getattr(plan, "catalog_population", ())
             else {}
         ),
     })

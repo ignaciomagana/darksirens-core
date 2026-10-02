@@ -234,6 +234,64 @@ def log_target_density_base_and_z(
     return base, z
 
 
+def log_sample_weight_branches(
+    m1det: jnp.ndarray,
+    q: jnp.ndarray,
+    dL: jnp.ndarray,
+    chieff: jnp.ndarray,
+    pix: jnp.ndarray,
+    prior_wt: jnp.ndarray,
+    cosmo: CosmoParams,
+    branch_pop_params,
+    log_p_pop_fn,
+    log_prior_branches_fn,
+    spin: jnp.ndarray | None = None,
+    dL_grid: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Per-sample log weight of a mixture whose branches carry their own population.
+
+    ``branch_pop_params`` holds one population vector per mixture branch and
+    ``log_prior_branches_fn(z, pix)`` returns the matching list of branch
+    redshift-sky terms ``log w_k + log p_k(z | pix)``. The weight is
+
+        log w = logsumexp_k [ log w_k + log p_pop(m1src, q, z, chi_eff | L_k)
+                              + log p_k(z | pix) ]
+              - log[d(dL)/dz] - log(1+z) - log p_proposal,
+
+    the population multiplied into each branch before the branch sum. The
+    Jacobian and the proposal do not depend on the branch and are subtracted
+    once, with :func:`log_target_density_m1det_q_dL`'s arithmetic, so with
+    every ``branch_pop_params[k]`` equal it is :func:`log_sample_weight` of
+    the collapsed mixture up to the re-association ``logsumexp_k[a_k] + c ->
+    logsumexp_k[a_k + c]`` (rounding).
+    """
+    from darksirens.catalog.mixture import mixture_logsumexp
+
+    H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
+    if dL_grid is not None:
+        z = z_of_dL_precomputed(dL, dL_grid)
+    else:
+        z = z_of_dL(dL, H0, Om0, w0, wa)
+    m1src = m1det / (1.0 + z)
+    branches = log_prior_branches_fn(z, pix)
+    if len(branches) != len(branch_pop_params):
+        raise ValueError(
+            f"{len(branches)} redshift branches for {len(branch_pop_params)} populations"
+        )
+    terms = []
+    for log_prior_k, pop_k in zip(branches, branch_pop_params):
+        if spin is None:
+            log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_k)
+        else:
+            log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_k, spin=spin)
+        terms.append(log_prior_k + log_p_pop)
+    return (
+        mixture_logsumexp(terms)
+        - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa)
+        - jnp.log(prior_wt)
+    )
+
+
 def log_sample_weight(
     m1det: jnp.ndarray,
     q: jnp.ndarray,

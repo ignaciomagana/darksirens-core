@@ -23,7 +23,7 @@ from darksirens.selection.gw import (
 )
 
 from .event import reduce_pe_events
-from .weights import log_sample_weight
+from .weights import log_sample_weight, log_sample_weight_branches
 
 
 class SpectralLikelihoodDiagnostics(NamedTuple):
@@ -289,6 +289,7 @@ def _ordinary_hierarchical_likelihood(
     compute_dtype: str | None = None,
     log_prior_pe_lowp=None,
     log_prior_sel_lowp=None,
+    branch_populations=None,
 ):
     """Shared PE/selection reduction for explicit ordinary redshift models.
 
@@ -296,6 +297,15 @@ def _ordinary_hierarchical_likelihood(
     selection weights are evaluated in that dtype with the redshift priors
     ``log_prior_pe_lowp(z, pix)`` / ``log_prior_sel_lowp(z, pix)``, which must
     evaluate in it; ``None`` is the default float64 program.
+
+    ``branch_populations`` (default ``None``: one population, ``pop_params``)
+    is a tuple of population vectors, one per branch of a mixture redshift
+    prior. ``log_prior_pe`` / ``log_prior_sel`` (and their low-precision
+    twins) then return the list of branch terms ``log w_k + log p_k(z | pix)``
+    instead of their sum, and every PE and selection weight is
+    :func:`~darksirens.likelihood.weights.log_sample_weight_branches`: each
+    branch's population multiplies its own redshift-sky term inside the
+    branch sum, for the PE samples and the injections alike.
     """
 
     pop_params = _validate_hierarchy_inputs(
@@ -342,20 +352,53 @@ def _ordinary_hierarchical_likelihood(
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
         return fn
 
-    pe_weight = _weight(log_prior_pe, catalog_pe)
-    sel_weight_core = _weight(log_prior_sel, catalog_sel)
+    if branch_populations is None:
+        pe_weight = _weight(log_prior_pe, catalog_pe)
+        sel_weight_core = _weight(log_prior_sel, catalog_sel)
+    else:
+        branch_pops = tuple(jnp.asarray(p) for p in branch_populations)
+
+        def _branch_weight(prior_fn, catalog):
+            def branches(z, pix):
+                return prior_fn(z, pix, catalog)
+
+            def fn(m1det, q, dL, chieff, pix, prior_wt, spin=None):
+                supported = (dL >= dL_lo) & (dL <= dL_hi)
+                dL_c = jnp.clip(dL, dL_lo, dL_hi)
+                ldw = log_sample_weight_branches(
+                    m1det, q, dL_c, chieff, pix, prior_wt, cosmology,
+                    branch_pops, log_p_pop, branches, spin=spin, dL_grid=dL_grid,
+                )
+                return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+            return fn
+
+        pe_weight = _branch_weight(log_prior_pe, catalog_pe)
+        sel_weight_core = _branch_weight(log_prior_sel, catalog_sel)
     if compute_dtype is not None:
-        from .mixed_precision import make_log_weight
+        from .mixed_precision import make_branch_log_weight, make_log_weight
 
         lowp = dict(
             dtype=compute_dtype,
             cosmology=cosmology,
-            pop_params=pop_params,
             dL_grid=dL_grid,
             log_p_pop=log_p_pop,
         )
-        pe_weight = make_log_weight(log_prior_z=log_prior_pe_lowp, **lowp)
-        sel_weight_core = make_log_weight(log_prior_z=log_prior_sel_lowp, **lowp)
+        if branch_populations is None:
+            pe_weight = make_log_weight(
+                log_prior_z=log_prior_pe_lowp, pop_params=pop_params, **lowp
+            )
+            sel_weight_core = make_log_weight(
+                log_prior_z=log_prior_sel_lowp, pop_params=pop_params, **lowp
+            )
+        else:
+            pe_weight = make_branch_log_weight(
+                log_prior_branches=log_prior_pe_lowp,
+                branch_pop_params=branch_populations, **lowp
+            )
+            sel_weight_core = make_branch_log_weight(
+                log_prior_branches=log_prior_sel_lowp,
+                branch_pop_params=branch_populations, **lowp
+            )
 
     def selection_weight(m1det, q, dL, chieff, pix, prior_wt, _catalog, spin=None):
         return sel_weight_core(m1det, q, dL, chieff, pix, prior_wt, spin=spin)
