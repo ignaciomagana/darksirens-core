@@ -632,6 +632,10 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
         """``max(q_cut**beta, 1) * p_unnorm(1 | m1)``; see :func:`_powerlaw_taper_scale_bound`."""
         return _powerlaw_taper_scale_bound(self, m1, q_cut, m_min, dm_min, theta)
 
+    def _kernel_power(self, theta):
+        """``q**beta_q`` times the secondary-mass taper on ``(m2_low, delta_m2)``."""
+        return theta[0]
+
     def _eval_unnorm(self, m1, q, m_min, dm_min, theta):
         del m_min, dm_min
         beta_q, m2_low, delta_m2 = theta
@@ -1335,6 +1339,10 @@ class PowerLawPairing(PairingModel):
     def _scale_bound(self, m1, q_cut, m_min, dm_min, theta):
         """``max(q_cut**beta, 1) * p_unnorm(1 | m1)``; see :func:`_powerlaw_taper_scale_bound`."""
         return _powerlaw_taper_scale_bound(self, m1, q_cut, m_min, dm_min, theta)
+
+    def _kernel_power(self, theta):
+        """``q**beta`` times the secondary-mass taper on ``(m_min, dm_min)``."""
+        return theta[0]
 
     def _eval_unnorm(self, m1, q, m_min, dm_min, t):
         """Evaluate the unnormalised conditional density ``p(q | m1)``."""

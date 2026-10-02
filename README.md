@@ -185,6 +185,17 @@ user typed them rather than as a silent `-inf`:
   standard `(0, 1)` defaults).
 - The opt-in `DARKSIRENS_GW_PAIRING_M1_GRID` normaliser grid is sized to the
   bound model's mass support at bind time and refused if it cannot cover it.
+- `configure_normalization_grids(pairing_norm="per_point")` (env
+  `DARKSIRENS_GW_PAIRING_NORM=per_point`) is an opt-in speed option for the
+  pairing normaliser of `PowerLawPairing` and `GWTC5FiducialBPL2PeaksPairing`:
+  the secondary-mass taper is integrated once per likelihood point instead of
+  once per PE sample and injection. Above the taper shoulder it is the
+  default's own quadrature rule evaluated once (equal to rounding); inside the
+  taper window it reads a small per-point table that is closer to a converged
+  reference than the default's per-sample rule. Other pairings keep the
+  default. It is recorded in the run fingerprint, composes with
+  `compute_dtype="float32"`, and cannot be combined with the m1 grid. The
+  default (`"per_sample"`) is unchanged.
 
 ## Ownership boundary
 
