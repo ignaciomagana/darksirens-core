@@ -31,7 +31,7 @@ from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.parameters import CosmologyParameters
 
-from .catalog import selection_curve
+from .catalog import selection_completion_curves, selection_curve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -171,8 +171,52 @@ def gathered_selection_completion_curves_with_row_fraction(
     )
 
 
+def selection_missing_host_curves(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    model,
+    row_fraction=None,
+    *,
+    gather: bool | None = None,
+):
+    """The completion curves of ``completeness="selection"`` on one catalog view.
+
+    The radial selection curve alone
+    (:func:`~darksirens.selection.catalog.selection_completion_curves`) when
+    ``row_fraction`` is ``None``, and the row-fraction composition
+    (:func:`selection_completion_curves_with_row_fraction`) otherwise.
+    ``gather`` (default: the active ``missing_density`` setting,
+    :mod:`darksirens.catalog.settings`) returns the factored
+    :class:`~darksirens.catalog.completeness.GatheredCompletionCurves` instead
+    (:func:`gathered_selection_completion_curves_with_row_fraction`, with
+    every fraction 1 when ``row_fraction`` is ``None``: ``1 * C`` is ``C``
+    exactly). Either form is accepted by the incomplete-catalog and field
+    prior-state constructors.
+    """
+
+    if gather is None:
+        from darksirens.catalog.settings import catalog_evaluation_settings
+
+        gather = catalog_evaluation_settings().missing_density == "gather"
+    if gather:
+        if row_fraction is None:
+            row_fraction = jnp.ones(
+                (int(catalog.zgals.shape[0]),), dtype=jnp.asarray(zgrid).dtype
+            )
+        return gathered_selection_completion_curves_with_row_fraction(
+            cosmo, params, catalog, model, row_fraction
+        )
+    if row_fraction is None:
+        return selection_completion_curves(cosmo, params, catalog, model)
+    return selection_completion_curves_with_row_fraction(
+        cosmo, params, catalog, model, row_fraction
+    )
+
+
 __all__ = [
     "gathered_selection_completion_curves_with_row_fraction",
+    "selection_missing_host_curves",
     "selection_completion_curves_with_row_fraction",
     "validate_selection_row_fraction",
 ]

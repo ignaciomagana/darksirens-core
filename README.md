@@ -86,6 +86,26 @@ time, instead of on every likelihood call (`kernel_pin="auto"`, the default).
 The values agree with the per-call quadrature to rounding;
 `ds.model(..., kernel_pin="off")` keeps the per-call quadrature.
 
+An incomplete catalog can instead be completed with an explicit
+magnitude-selection model (for example the runtime payload
+`darksirens-surveys` writes for a fitted survey). Its nuisances are fixed at
+the model's values unless `survey_priors` samples them:
+
+```python
+from darksirens.selection.catalog import SchechterMagnitudeSelection
+
+analysis = ds.model(
+    cosmology=cosmology,
+    population=population,
+    catalog=catalog,
+    completeness="selection",
+    selection=SchechterMagnitudeSelection(
+        m_lim=20.0, Mstar_hat=-19.63, alpha=-1.07, M_faint_offset=-0.09
+    ),
+    survey_priors={"log10n0": (-5.0, -1.0), "Mstar_hat": ("normal", -19.63, 0.01)},
+)
+```
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog
@@ -129,7 +149,7 @@ likelihood itself uses:
 decoded = ds.decode_parameters(analysis, theta)  # or a BoundAnalysis
 decoded.cosmology       # CosmologyParameters(H0, Om0, w0, wa)
 decoded.population      # every population parameter, fixed ones included
-decoded.catalog         # CatalogParameters(n0, delta, sigma_kde, z_depth), or None
+decoded.catalog         # CatalogParameters(n0, delta, sigma_kde, z_depth, selection), or None
 decoded.angular         # the angular-model coordinates
 ```
 

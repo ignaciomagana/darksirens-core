@@ -7,7 +7,9 @@ load GW data, build runtime likelihood state, or run a sampler.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import json
 import operator
 from typing import Any
 import warnings
@@ -26,6 +28,23 @@ _COMPLETE_CATALOG_PRIORS = (
     ("sigma_kde", 0.0, 0.05),
 )
 _UNIFORM = ("uniform", None, None)
+
+#: Settings of ``model(..., completeness=...)`` for a catalog analysis.
+#: ``"incomplete"`` (the default) is the frozen per-row count-ratio
+#: completeness; ``"complete"`` treats the catalog as containing every host;
+#: ``"selection"`` builds the completeness from an explicit magnitude-selection
+#: model (``model(..., selection=...)``).
+COMPLETENESS_SETTINGS = ("incomplete", "complete", "selection")
+#: Selection-function nuisances of ``completeness="selection"``, per family,
+#: with their default prior bounds (the frozen reference's survey block,
+#: ``inference/prior.py`` ``_SURVEY_BLOCK``). They are fixed at the selection
+#: model's values unless named in ``model(..., survey_priors=...)``, which
+#: makes them sampled. ``m_lim``, ``M_faint_offset`` and the K-correction are
+#: never sampled: they are data and protocol constants of the selection fit.
+SELECTION_NUISANCES = {
+    "gaussian": (("M0hat", -23.0, -18.0), ("sigma_M", 0.05, 3.0)),
+    "schechter": (("Mstar_hat", -23.0, -18.0), ("alpha", -1.9, 0.0)),
+}
 
 #: Settings of ``model(..., kernel_pin=...)``.
 KERNEL_PIN_SETTINGS = ("auto", "off")
@@ -53,10 +72,24 @@ class IncompleteCatalogRedshift:
     """Ordinary catalog plus the core missing-host completeness branch.
 
     ``n0_units`` is the unit of ``log10n0`` (see :data:`N0_UNITS_SETTINGS`).
+
+    ``selection`` is ``None`` for the frozen per-row count-ratio completeness
+    (``completeness="incomplete"``), or the validated runtime
+    magnitude-selection model (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`
+    or :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`) of
+    ``completeness="selection"``: every row's completeness is then the radial
+    selection curve ``C_sel(z)``, times the row's coverage fraction when
+    ``row_fraction`` is set (one value in [0, 1] per row of the catalog store,
+    :func:`darksirens.selection.footprint.selection_completion_curves_with_row_fraction`).
+    ``row_fraction_sha256`` is the digest of that array, the field the
+    dataclass compares and the run fingerprint records.
     """
 
     catalog: Any
     n0_units: str = "physical"
+    selection: Any = None
+    row_fraction: Any = field(default=None, compare=False, repr=False)
+    row_fraction_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +146,11 @@ class ParameterPlan:
     incomplete-catalog analysis under ``"auto"`` that samples none of
     ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``. The bound likelihood of
     such a plan evaluates the catalog kernel quadrature once, at bind time.
+    ``catalog_model`` is the canonical JSON text of the catalog model's
+    non-default settings (for example ``completeness="selection"`` and its
+    selection model), ``""`` for every analysis that has none, so
+    :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
+    records it only when it is set; :attr:`catalog_model_settings` decodes it.
     """
 
     labels: tuple[str, ...]
@@ -134,6 +172,17 @@ class ParameterPlan:
     kernel_pin: str = "auto"
     kernel_pin_active: bool = False
     n0_units: str = "physical"
+    catalog_model: str = ""
+
+    @property
+    def catalog_model_settings(self) -> dict:
+        """The decoded :attr:`catalog_model` (``{}`` when it is not set)."""
+        return json.loads(self.catalog_model) if self.catalog_model else {}
+
+
+def _canonical_json(value) -> str:
+    """Sorted-key, compact JSON text of a JSON-like value (the plan's record)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 @dataclass(frozen=True)
@@ -172,6 +221,56 @@ def _counterpart_nside(value) -> int:
     return int(nside)
 
 
+def resolve_selection_model(selection):
+    """The validated runtime selection model of ``model(..., selection=...)``.
+
+    ``selection`` is a :class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
+    a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, or
+    the runtime payload mapping
+    (:func:`~darksirens.selection.catalog.selection_from_mapping`, format
+    ``darksirens-catalog-selection-1.0``). The result is the model rebuilt
+    from its validated payload, so every field is a Python float (a constant
+    of the bound likelihood) and two equal declarations compare equal.
+    """
+    from darksirens.selection.catalog import (
+        GaussianMagnitudeSelection,
+        SchechterMagnitudeSelection,
+        selection_from_mapping,
+        selection_to_mapping,
+    )
+
+    if isinstance(selection, Mapping):
+        return selection_from_mapping(selection)
+    if isinstance(selection, (GaussianMagnitudeSelection, SchechterMagnitudeSelection)):
+        return selection_from_mapping(selection_to_mapping(selection))
+    raise TypeError(
+        "selection must be a GaussianMagnitudeSelection, a "
+        "SchechterMagnitudeSelection or its runtime payload mapping "
+        f"(darksirens.selection.catalog.selection_to_mapping), got {type(selection).__name__}"
+    )
+
+
+def selection_family(model) -> str:
+    """``"gaussian"`` or ``"schechter"``: the family of a runtime selection model."""
+    from darksirens.selection.catalog import GaussianMagnitudeSelection
+
+    return "gaussian" if isinstance(model, GaussianMagnitudeSelection) else "schechter"
+
+
+def _resolve_row_fraction(row_fraction, store):
+    """Host-validate a per-row coverage fraction; return (read-only array, sha256)."""
+    import numpy as np
+
+    from darksirens.selection.footprint import validate_selection_row_fraction
+
+    n_rows = int(np.shape(store.catalog.zgals)[0])
+    array = np.array(
+        validate_selection_row_fraction(row_fraction, n_rows), dtype=np.float64
+    )
+    array.setflags(write=False)
+    return array, hashlib.sha256(array.tobytes()).hexdigest()
+
+
 def _resolve_redshift(
     catalog,
     completeness,
@@ -180,13 +279,20 @@ def _resolve_redshift(
     n0_units=None,
     counterparts=None,
     counterpart_nside=None,
+    selection=None,
+    row_fraction=None,
 ):
+    if (selection is not None or row_fraction is not None) and completeness != "selection":
+        raise ValueError(
+            "selection and row_fraction apply only to completeness='selection', got "
+            f"completeness={completeness!r}"
+        )
     if n0_units is not None:
         if n0_units not in N0_UNITS_SETTINGS:
             raise ValueError(
                 f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}"
             )
-        if catalog is None or completeness not in (None, "incomplete"):
+        if catalog is None or completeness not in (None, "incomplete", "selection"):
             raise ValueError(
                 "n0_units applies only to an incomplete-catalog analysis, got "
                 f"catalog={'None' if catalog is None else 'set'} and "
@@ -251,7 +357,30 @@ def _resolve_redshift(
             CompleteCatalogRedshift(catalog, empty_policy or "zero"),
             _COMPLETE_CATALOG_PRIORS,
         )
-    raise ValueError("completeness must be None, 'incomplete', or 'complete'")
+    if completeness == "selection":
+        if selection is None:
+            raise ValueError(
+                "completeness='selection' requires selection=<GaussianMagnitudeSelection, "
+                "SchechterMagnitudeSelection or its runtime payload mapping>"
+            )
+        fraction, digest = (
+            (None, None)
+            if row_fraction is None
+            else _resolve_row_fraction(row_fraction, catalog)
+        )
+        return (
+            IncompleteCatalogRedshift(
+                catalog,
+                n0_units or "physical",
+                selection=resolve_selection_model(selection),
+                row_fraction=fraction,
+                row_fraction_sha256=digest,
+            ),
+            _INCOMPLETE_CATALOG_PRIORS,
+        )
+    raise ValueError(
+        "completeness must be None, 'incomplete', 'complete' or 'selection'"
+    )
 
 
 def _check_fixed_in_prior(what, value, lo, hi, allow_out_of_prior) -> None:
@@ -280,7 +409,7 @@ def _check_fixed_in_prior(what, value, lo, hi, allow_out_of_prior) -> None:
 
 
 def _resolve_fixed_survey(
-    fixed_survey, catalog_priors, allow_out_of_prior=False
+    fixed_survey, catalog_priors, allow_out_of_prior=False, selection_priors=()
 ) -> dict[str, float]:
     """Check ``model(fixed_survey={name: value})`` against the survey block."""
     if fixed_survey is None:
@@ -293,6 +422,14 @@ def _resolve_fixed_survey(
         raise ValueError(
             "fixed_survey applies only to a catalog analysis; spectral and "
             "bright-siren analyses have no survey parameters"
+        )
+    selection_names = [name for name, _, _ in selection_priors]
+    named = [key for key in fixed_survey if key in selection_names]
+    if named:
+        raise ValueError(
+            f"selection nuisance(s) {named} are already fixed, at the selection "
+            "model's values; pass a selection model with the values you want, or "
+            "name them in survey_priors to sample them"
         )
     bounds = {name: (lo, hi) for name, lo, hi in catalog_priors}
     unknown = [key for key in fixed_survey if key not in bounds]
@@ -311,6 +448,109 @@ def _resolve_fixed_survey(
         )
         out[name] = value
     return out
+
+
+#: Lower edges a survey prior may not reach, by base parameter name:
+#: ``sigma_kde`` and ``sigma_M`` are widths, and the Schechter curve is
+#: undefined at ``alpha <= -2`` (:data:`darksirens.selection.catalog.ALPHA_MIN`,
+#: the frozen reference's wall). ``(edge, edge allowed)``.
+_SURVEY_PRIOR_FLOORS = {
+    "sigma_kde": (0.0, True),
+    "sigma_M": (0.0, False),
+    "alpha": (-2.0, False),
+}
+
+
+def _survey_prior_entry(label, spec, default_lo, default_hi, base=None):
+    """``(lower, upper, prior_kind)`` of one ``model(survey_priors=...)`` entry.
+
+    Accepted: ``(lower, upper)`` or ``("uniform", lower, upper)`` (uniform), and
+    ``("normal", loc, scale)`` or ``("normal", loc, scale, lower, upper)``
+    (normal truncated to the bounds; the parameter's default bounds when
+    they are not given). ``base`` is the parameter's name without a catalog
+    suffix (the label itself by default).
+    """
+    what = f"survey_priors[{label!r}]"
+    if not isinstance(spec, (tuple, list)) or not spec:
+        raise TypeError(
+            f"{what} must be (lower, upper), ('uniform', lower, upper), "
+            f"('normal', loc, scale) or ('normal', loc, scale, lower, upper), got {spec!r}"
+        )
+    head = spec[0]
+    if isinstance(head, str):
+        if head == "uniform" and len(spec) == 3:
+            lo, hi, kind = spec[1], spec[2], _UNIFORM
+        elif head == "normal" and len(spec) in (3, 5):
+            loc = fixed_scalar(f"{what} loc", spec[1])
+            scale = fixed_scalar(f"{what} scale", spec[2])
+            if not scale > 0.0:
+                raise ValueError(f"{what} scale must be > 0, got {scale!r}")
+            lo, hi = (default_lo, default_hi) if len(spec) == 3 else (spec[3], spec[4])
+            kind = ("normal", loc, scale)
+        else:
+            raise ValueError(
+                f"{what}: unknown prior {spec!r}; use (lower, upper), ('uniform', "
+                "lower, upper), ('normal', loc, scale) or ('normal', loc, scale, "
+                "lower, upper)"
+            )
+    elif len(spec) == 2:
+        lo, hi, kind = spec[0], spec[1], _UNIFORM
+    else:
+        raise ValueError(f"{what} bounds must contain exactly two values, got {spec!r}")
+    lo = fixed_scalar(f"{what} lower bound", lo)
+    hi = fixed_scalar(f"{what} upper bound", hi)
+    if not lo < hi:
+        raise ValueError(f"{what} bounds must satisfy lower < upper, got {(lo, hi)!r}")
+    floor = _SURVEY_PRIOR_FLOORS.get(label if base is None else base)
+    if floor is not None:
+        edge, inclusive = floor
+        if lo < edge or (lo == edge and not inclusive):
+            raise ValueError(
+                f"{what} lower bound {lo!r} must be "
+                f"{'>=' if inclusive else '>'} {edge!r}"
+            )
+    return lo, hi, kind
+
+
+def _resolve_survey_priors(survey_priors, catalog_priors, selection_priors, survey_fixed):
+    """Check ``model(survey_priors={label: prior})`` and resolve each entry.
+
+    Returns ``{label: (lower, upper, prior_kind)}``. A survey parameter
+    (``log10n0``, ``delta``, ``sigma_kde``) stays sampled, with the given
+    prior; a selection nuisance named here becomes sampled (otherwise it is
+    fixed at the selection model's value).
+    """
+    if survey_priors is None:
+        return {}
+    if not isinstance(survey_priors, Mapping):
+        raise TypeError("survey_priors must be a mapping {parameter: prior}")
+    if not survey_priors:
+        return {}
+    known = {
+        name: (lo, hi)
+        for name, lo, hi in tuple(catalog_priors) + tuple(selection_priors)
+    }
+    if not known:
+        raise ValueError(
+            "survey_priors applies only to a catalog analysis; spectral and "
+            "bright-siren analyses have no survey parameters"
+        )
+    unknown = [key for key in survey_priors if key not in known]
+    if unknown:
+        raise ValueError(
+            f"unknown survey parameter(s) {unknown} in survey_priors; this analysis "
+            f"has {list(known)}"
+        )
+    both = [key for key in survey_priors if key in survey_fixed]
+    if both:
+        raise ValueError(
+            f"survey parameter(s) {both} are both fixed (fixed_survey) and given a "
+            "prior (survey_priors); choose one"
+        )
+    return {
+        key: _survey_prior_entry(key, survey_priors[key], *known[key])
+        for key in survey_priors
+    }
 
 
 def _resolve_fixed_population(
@@ -454,6 +694,28 @@ def _kernel_pin_setting(value) -> str:
     return value
 
 
+def _catalog_model_record(redshift) -> str:
+    """``ParameterPlan.catalog_model``: the non-default catalog-model settings.
+
+    ``""`` for every analysis without one (so existing plans and their
+    fingerprints are unchanged); for ``completeness="selection"`` the selection
+    model's runtime payload and, when set, the row fraction's sha256.
+    """
+    selection = getattr(redshift, "selection", None)
+    if selection is None:
+        return ""
+    from darksirens.selection.catalog import selection_to_mapping
+
+    record = {
+        "completeness": "selection",
+        "selection": selection_to_mapping(selection),
+    }
+    digest = getattr(redshift, "row_fraction_sha256", None)
+    if digest is not None:
+        record["row_fraction_sha256"] = digest
+    return _canonical_json(record)
+
+
 def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     """Whether the bound likelihood pins the catalog kernel at bind time.
 
@@ -487,6 +749,9 @@ def model(
     allow_out_of_prior=False,
     kernel_pin="auto",
     n0_units=None,
+    selection=None,
+    row_fraction=None,
+    survey_priors=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -547,6 +812,37 @@ def model(
     pin applies (``ParameterPlan.kernel_pin``,
     ``ParameterPlan.kernel_pin_active``). It has no effect on spectral,
     bright-siren or complete-catalog analyses.
+
+    ``completeness="selection"`` (opt-in) completes an incomplete catalog with
+    an explicit magnitude-selection model instead of the per-row count ratio:
+    ``selection`` is a :class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
+    a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, or
+    its runtime payload mapping (``darksirens-catalog-selection-1.0``, as
+    ``darksirens-surveys`` writes it). Every row's completeness is the radial
+    curve ``C_sel(z)`` (:func:`~darksirens.selection.catalog.selection_completion_curves`),
+    and with ``row_fraction`` (one coverage fraction in [0, 1] per row of the
+    catalog store) it is ``f_p C_sel(z)``
+    (:func:`~darksirens.selection.footprint.selection_completion_curves_with_row_fraction`).
+    The survey block is the incomplete catalog's (``log10n0``, ``delta``,
+    ``sigma_kde``, with ``n0_units`` and ``fixed_survey`` as there). The
+    selection nuisances (``M0hat``, ``sigma_M`` for the Gaussian family;
+    ``Mstar_hat``, ``alpha`` for the Schechter family) are fixed at the
+    selection model's values unless ``survey_priors`` names them, which
+    samples them; ``m_lim``, ``M_faint_offset`` and the K-correction are never
+    sampled. The plan records the selection model and the row fraction's
+    digest (``ParameterPlan.catalog_model``) and a run fingerprint changes with
+    them. ``selection`` and ``row_fraction`` are refused with any other
+    completeness.
+
+    ``survey_priors={label: prior}`` (opt-in) sets the prior of the named
+    survey parameters of a catalog analysis: ``(lower, upper)`` or
+    ``("uniform", lower, upper)``, or a normal ``("normal", loc, scale)``
+    truncated to the parameter's default bounds, or ``("normal", loc, scale,
+    lower, upper)``. Without it every survey parameter keeps its default
+    uniform prior (``log10n0`` [-4, -1], ``delta`` [-3, 3], ``sigma_kde``
+    [0, 0.05]; the selection nuisances ``M0hat`` [-23, -18], ``sigma_M``
+    [0.05, 3], ``Mstar_hat`` [-23, -18], ``alpha`` [-1.9, 0]). A parameter
+    cannot be both fixed and given a prior.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -569,9 +865,19 @@ def model(
         n0_units=n0_units,
         counterparts=counterparts,
         counterpart_nside=counterpart_nside,
+        selection=selection,
+        row_fraction=row_fraction,
+    )
+    selection_model = getattr(redshift, "selection", None)
+    selection_priors = (
+        () if selection_model is None
+        else SELECTION_NUISANCES[selection_family(selection_model)]
     )
     survey_fixed = _resolve_fixed_survey(
-        fixed_survey, catalog_priors, allow_out_of_prior
+        fixed_survey, catalog_priors, allow_out_of_prior, selection_priors
+    )
+    survey_prior_overrides = _resolve_survey_priors(
+        survey_priors, catalog_priors, selection_priors, survey_fixed
     )
     if isinstance(redshift, BrightRedshift) and angular != "isotropic":
         raise ValueError(
@@ -674,14 +980,26 @@ def model(
         prior_kinds.extend(tuple(kind) for kind in pop_kinds)
         n_population = len(pop_labels)
 
+    n_catalog = 0
     for name, lo, hi in catalog_priors:
         if name in survey_fixed:
             continue
+        lo, hi, kind = survey_prior_overrides.get(name, (lo, hi, _UNIFORM))
         labels.append(name)
         lower.append(float(lo))
         upper.append(float(hi))
-        prior_kinds.append(_UNIFORM)
-    n_catalog = len(catalog_priors) - len(survey_fixed)
+        prior_kinds.append(kind)
+        n_catalog += 1
+    # Selection nuisances are sampled only when survey_priors names them.
+    for name, _lo, _hi in selection_priors:
+        if name not in survey_prior_overrides:
+            continue
+        lo, hi, kind = survey_prior_overrides[name]
+        labels.append(name)
+        lower.append(float(lo))
+        upper.append(float(hi))
+        prior_kinds.append(kind)
+        n_catalog += 1
 
     labels.extend(angular_labels)
     lower.extend(float(value) for value in angular_lower)
@@ -727,6 +1045,7 @@ def model(
         kernel_pin=kernel_pin,
         kernel_pin_active=kernel_pin_applies(redshift, labels, kernel_pin),
         n0_units=getattr(redshift, "n0_units", "physical"),
+        catalog_model=_catalog_model_record(redshift),
     )
     return Analysis(
         cosmology=cosmology,
@@ -741,7 +1060,9 @@ def model(
 
 __all__ = [
     "Analysis",
+    "COMPLETENESS_SETTINGS",
     "ParameterPlan",
+    "SELECTION_NUISANCES",
     "SpectralRedshift",
     "IncompleteCatalogRedshift",
     "CompleteCatalogRedshift",

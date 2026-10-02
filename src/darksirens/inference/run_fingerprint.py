@@ -183,7 +183,9 @@ def parameter_plan_semantic(plan) -> dict:
     Two plans that sample the same labels but fix different parameters, or
     the same parameters at different values, or differ in
     ``allow_out_of_prior``, in the catalog kernel pin (``kernel_pin``
-    setting, and whether it applies) or in ``n0_units``, have different blocks, so a run
+    setting, and whether it applies), in ``n0_units`` or in the catalog model
+    (``ParameterPlan.catalog_model``: a selection completeness, its selection
+    model and row-fraction digest), have different blocks, so a run
     fingerprint built from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
@@ -246,6 +248,14 @@ def parameter_plan_semantic(plan) -> dict:
             {}
             if getattr(plan, "n0_units", "physical") == "physical"
             else {"n0_units": str(plan.n0_units)}
+        ),
+        # Likewise the catalog model's non-default settings (for example
+        # completeness="selection" and its selection model): absent for every
+        # plan that has none.
+        **(
+            {"catalog_model": json.loads(plan.catalog_model)}
+            if getattr(plan, "catalog_model", "")
+            else {}
         ),
     })
 

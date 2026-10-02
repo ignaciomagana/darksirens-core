@@ -39,12 +39,21 @@ class CatalogParameters(NamedTuple):
     because the Phase-5 completeness model uses the same parameter block.
     ``z_depth`` is structural runtime metadata: ``None`` means the catalog has
     no explicit redshift-depth truncation.
+    ``selection`` is ``None`` (the default: the per-row count-ratio
+    completeness) or the runtime magnitude-selection model of
+    ``completeness="selection"``
+    (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection` or
+    :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`), with
+    any sampled nuisance in place. Only the likelihoods' completeness step
+    reads it; the kernel, the depth convention and the missing-host budget
+    never do.
     """
 
     n0: Any = 1.0
     delta: Any = 0.0
     sigma_kde: Any = 0.0
     z_depth: Any = None
+    selection: Any = None
 
 
 class GalaxyIndex(NamedTuple):
