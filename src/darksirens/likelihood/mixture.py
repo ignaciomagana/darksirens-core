@@ -159,6 +159,10 @@ def _complete_view(kernels, pin_ok, catalog, log_Z_total):
     log_Z = jnp.asarray(log_Z_total, dtype=zgrid.dtype)
     if pin_ok is not None:
         log_Z = log_Z + jnp.where(pin_ok, 0.0, jnp.nan)
+    if getattr(kernels, "window_ok", None) is not None:
+        # A kernel window that does not hold at this sigma_kde (opt-in
+        # kernel_window): the same poison.
+        log_Z = log_Z + jnp.where(kernels.window_ok, 0.0, jnp.nan)
     return _CompleteFieldView(kernels=kernels, log_Nobs=log_Nobs, log_Z=log_Z)
 
 

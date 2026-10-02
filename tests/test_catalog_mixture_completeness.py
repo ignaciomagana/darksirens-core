@@ -607,3 +607,28 @@ def test_the_extension_modulates_the_incomplete_catalogs_only():
         _close(target.log_likelihood(theta), ref(jnp.asarray(theta)), 1e-12)
         assert abs(float(target.log_likelihood(theta)) - float(plain(theta))) > 1e-6
     assert ext.seen == {0, 1}
+
+
+@pytest.mark.slow
+def test_kernel_window_composes_and_poisons_a_complete_catalog():
+    """The opt-in kernel window on every compact view (count, selection and
+    complete) matches the default; a width beyond the one the window was
+    sized for poisons the complete catalog's branch as it does the others."""
+    analysis = _model([A_DEPTH, B, C], completeness=["incomplete", "selection", "complete"],
+                      selection=[None, SEL_B, None],
+                      survey_priors={"sigma_kde": (0.0, 0.004), "sigma_kde_c2": (0.0, 0.004),
+                                     "sigma_kde_c3": (0.0, 0.004)})
+    thetas = _points(analysis)
+    ref = _bind(analysis)
+    configure_catalog_evaluation(kernel_window=1e-10)
+    try:
+        windowed = _bind(analysis)
+    finally:
+        configure_catalog_evaluation(kernel_window="off")
+    assert all(c.compact.kernel_window is not None for c in windowed.model_operands.components)
+    for theta in thetas:
+        np.testing.assert_allclose(float(windowed(theta)), float(ref(theta)), rtol=0.0, atol=1e-8)
+    wide = thetas[0].copy()
+    wide[list(analysis.parameters.labels).index("sigma_kde_c3")] = 0.05
+    assert np.isfinite(float(ref(wide)))
+    assert float(windowed(wide)) == -np.inf
