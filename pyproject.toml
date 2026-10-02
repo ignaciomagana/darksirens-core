@@ -51,4 +51,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# Slow tests (the multi-catalog mixture's end-to-end checks) run in their own
+# CI job, slow-tests, with "pytest -m slow"; every other run deselects them.
+addopts = "-ra -m 'not slow'"
+markers = [
+    "slow: long end-to-end checks, run by the slow-tests CI job (pytest -m slow)",
+]

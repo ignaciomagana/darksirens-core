@@ -122,6 +122,7 @@ def test_two_catalog_plan_labels_priors_and_record():
     assert record["kernel_pin_active"] == [False, False]
 
 
+@pytest.mark.slow
 def test_three_catalogs():
     """Three catalogs: the stick priors, and the likelihood against the definition."""
     analysis = _model([A, B, C])
@@ -338,6 +339,7 @@ CASES = {
 }
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_bound_likelihood_is_the_definition(case):
     kwargs, values = CASES[case]
@@ -348,6 +350,7 @@ def test_bound_likelihood_is_the_definition(case):
         _close(bound(theta), target(jnp.asarray(theta)), 1e-12, case)
 
 
+@pytest.mark.slow
 def test_the_normaliser_is_load_bearing():
     """Without Z_k the two-catalog value moves far beyond the tolerances above;
     with one catalog the field and conditional weightings differ."""
@@ -362,6 +365,7 @@ def test_the_normaliser_is_load_bearing():
     assert abs(float(_bind(one)(t1)) - float(_bind(conditional)(t1))) > 1e-10
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("store_pair", [(A, B), (A_DEPTH, B_DEPTH)], ids=("plain", "depth"))
 def test_weight_limits_give_each_catalog_alone(store_pair):
     a_store, b_store = store_pair
@@ -381,6 +385,7 @@ def test_weight_limits_give_each_catalog_alone(store_pair):
         _close(pair(t), only_a(ta), 1e-7, "fcat_2 -> 0")
 
 
+@pytest.mark.slow
 def test_two_identical_catalogs_are_one():
     pair = _bind(_model([A, A]))
     one = _bind(_model(A))
@@ -392,6 +397,7 @@ def test_two_identical_catalogs_are_one():
                                                        "H0": theta[0]})), 1e-12, f)
 
 
+@pytest.mark.slow
 def test_moments_and_direct_normalisers_agree():
     kwargs = dict(catalog=[A_DEPTH, B_DEPTH], completeness="selection", selection=[SEL_A, SEL_B],
                   row_fraction=[FRACTION_A, None])
@@ -403,6 +409,7 @@ def test_moments_and_direct_normalisers_agree():
         _close(moments(theta), direct(theta), 1e-12)
 
 
+@pytest.mark.slow
 def test_kernel_pin_agrees_with_the_per_call_quadrature():
     analysis = _model([A_DEPTH, B_DEPTH], fixed_survey={"delta": 0.2, "sigma_kde": 0.003,
                                                         "delta_c2": -0.4, "sigma_kde_c2": 0.001})
@@ -429,6 +436,7 @@ def test_a_pin_from_another_catalog_is_refused():
         dataclasses.replace(bound, model_operands=swapped)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("layout", ("missing_density", "kernel_layout"))
 def test_memory_layouts_give_the_default_likelihood(layout):
     for kwargs in (dict(catalog=[A_DEPTH, B_DEPTH]),
@@ -450,6 +458,7 @@ def test_memory_layouts_give_the_default_likelihood(layout):
             _close(g, ref(t), 1e-12, layout)
 
 
+@pytest.mark.slow
 def test_float32_weights_stay_close():
     analysis = _model([A_DEPTH, B], completeness="selection", selection=[SEL_A, SEL_B])
     ref = _bind(analysis)
@@ -458,6 +467,7 @@ def test_float32_weights_stay_close():
         _close(low(theta), ref(theta), 1e-5)
 
 
+@pytest.mark.slow
 def test_soft_guard_and_vmap_grad():
     analysis = _model([A, B])
     soft = _bind(analysis, selection_neff_soft_guard=True, max_likelihood_variance=1.0)
@@ -559,6 +569,7 @@ def _target(analysis, extension):
                                        extension=extension, max_likelihood_variance=CAP)
 
 
+@pytest.mark.slow
 def test_no_and_identity_extensions_are_the_bound_likelihood():
     analysis = _model([A_DEPTH, B])
     bound = _bind(analysis)
@@ -570,6 +581,7 @@ def test_no_and_identity_extensions_are_the_bound_likelihood():
             _close(target.log_likelihood(theta), bound(theta), 1e-12)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("completeness", ("incomplete", "selection"))
 def test_a_modulation_table_is_the_definition_with_it(completeness):
     kwargs = dict(catalog=[A_DEPTH, B_DEPTH])
@@ -590,6 +602,7 @@ def test_a_modulation_table_is_the_definition_with_it(completeness):
             _close(supplied.log_likelihood(theta), target.log_likelihood(theta), 1e-12)
 
 
+@pytest.mark.slow
 def test_a_member_ensemble_is_the_mean_of_member_likelihoods():
     analysis = _model([A, B])
     M = 3
