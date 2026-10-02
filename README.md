@@ -161,6 +161,13 @@ on every call as a jit argument (`pinned_kernel=`), as `ds.model` does with
 Core refuses inputs that the frozen reference also refused, at the place the
 user typed them rather than as a silent `-inf`:
 
+- A fixed population preset (`Population(name, fixed=True)`, `'in_prior_v2'`,
+  `'gwtc5'`) pins a curated fiducial vector; `Population(...).fiducial_values`
+  shows it by parameter label. The legacy powerlaw+peak vector has the
+  merger-rate slope `gamma = 2.5` (the measured kappa_z; legacy used 0 before
+  commit 0befab7), so data simulated with another slope need it pinned:
+  `fixed={r"$\gamma$": 0.0, ...}`. Check `fiducial_values` against how a mock
+  was generated before comparing results.
 - `ds.Cosmology` rejects `Om0`, `w0` or `wa` values or bounds outside the
   tabulated distance-grid support (`Om0` in [0.1575, 0.4575], `w0` in
   [-2.25, 0.25], `wa` in [-2.5, 2.5]); `H0` is unrestricted.

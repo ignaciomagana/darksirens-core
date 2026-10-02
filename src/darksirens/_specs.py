@@ -263,6 +263,28 @@ class Population:
         return self.name
 
     @property
+    def fiducial_values(self) -> dict[str, float]:
+        """The values a fixed population evaluates at, by parameter label.
+
+        For a preset (``fixed=True``/``'legacy'``, ``'in_prior_v2'``,
+        ``'gwtc5'``) this is the whole fiducial vector the preset pins, read
+        from the registry, so its choices are visible before a run. The legacy
+        powerlaw+peak vector, for example, has the merger-rate slope
+        ``gamma = 2.5`` (the measured kappa_z; legacy used 0 before commit
+        0befab7); pin a different value with ``fixed={label: value}``. For a
+        mapping it is that mapping, and for a sampled population it is empty.
+        """
+        if not self.is_fixed:
+            return self.fixed_values
+        from darksirens.population import get_fixed_population_params, pop_model_prior_parser
+
+        flags = dict(shared_beta=self.shared_beta, shared_spin=self.shared_spin,
+                     shared_gamma=self.shared_gamma)
+        _, _, labels, *_ = pop_model_prior_parser(self.model_name, **flags)
+        values = get_fixed_population_params(self.model_name, fiducials=self.fiducial_set, **flags)
+        return {str(label): float(value) for label, value in zip(labels, values)}
+
+    @property
     def fiducial_set(self) -> str | None:
         """Existing registry fiducial-set tag, or ``None`` when not a preset."""
         if not self.is_fixed:
