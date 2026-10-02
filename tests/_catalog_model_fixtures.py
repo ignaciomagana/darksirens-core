@@ -31,24 +31,25 @@ NSIDE = 2
 NPIX = 12 * NSIDE * NSIDE
 
 
-def catalog_store(seed=11, *, z_depth=None, n_max=6, empty=(3, 17, 30), z_hi=0.28):
-    """An nside-2 standardized catalog store with a few empty rows."""
+def catalog_store(seed=11, *, z_depth=None, n_max=6, empty=(3, 17, 30), z_hi=0.28, nside=NSIDE):
+    """A standardized full-sky catalog store (nside 2 by default) with a few empty rows."""
     rng = np.random.default_rng(seed)
-    ngals = rng.integers(1, n_max + 1, NPIX).astype(np.int32)
+    npix = 12 * nside * nside
+    ngals = rng.integers(1, n_max + 1, npix).astype(np.int32)
     ngals[list(empty)] = 0
-    zgals = np.full((NPIX, n_max), 100.0)
-    dzgals = np.ones((NPIX, n_max))
-    wgals = np.zeros((NPIX, n_max))
+    zgals = np.full((npix, n_max), 100.0)
+    dzgals = np.ones((npix, n_max))
+    wgals = np.zeros((npix, n_max))
     for row, n in enumerate(ngals):
         zgals[row, :n] = np.sort(rng.uniform(0.02, z_hi, n))
         dzgals[row, :n] = 0.01 * (1.0 + zgals[row, :n])
         wgals[row, :n] = rng.uniform(0.5, 2.0, n)
     return CatalogStore(
         path=f"catalog-fixture-{seed}.h5",
-        nside=NSIDE,
+        nside=nside,
         z_depth=z_depth,
         catalog=GalaxyCatalog(
-            apix=np.pi / (3.0 * NSIDE * NSIDE),
+            apix=np.pi / (3.0 * nside * nside),
             zgals=zgals,
             dzgals=dzgals,
             wgals=wgals,

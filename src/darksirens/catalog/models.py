@@ -117,6 +117,25 @@ def build_incomplete_catalog_prior_state_from_curves(
         kernels, pin_ok = pinned_catalog_kernel_state(
             cosmo, params, catalog, pinned_kernel
         )
+    return assemble_incomplete_catalog_prior_state(kernels, pin_ok, catalog, curves)
+
+
+def assemble_incomplete_catalog_prior_state(
+    kernels: CatalogKernelState,
+    pin_ok,
+    catalog: GalaxyCatalog,
+    curves,
+) -> IncompleteCatalogPriorState:
+    """The conditional prior state from an already-built kernel state and curves.
+
+    The second half of :func:`build_incomplete_catalog_prior_state_from_curves`,
+    for a caller that builds the kernel state once and assembles several
+    states from it (for example one per missing-host curve of a member
+    ensemble): the finite-depth observed count, the row normaliser
+    ``N_obs + N_miss`` and the poison of a failed pin probe (``pin_ok``
+    ``False``) or galaxy list.  ``pin_ok`` is ``None`` without a pin.
+    """
+
     Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
     Nobs = Nobs * jnp.exp(kernels.log_depth_mass)
     log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
@@ -301,6 +320,7 @@ __all__ = [
     "IncompleteCatalogPriorState",
     "build_complete_catalog_prior_state",
     "build_incomplete_catalog_prior_state",
+    "assemble_incomplete_catalog_prior_state",
     "build_incomplete_catalog_prior_state_from_curves",
     "eval_complete_catalog_prior_state",
     "eval_complete_catalog_prior_state_vmap",

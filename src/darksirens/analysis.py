@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import operator
+import re
 from typing import Any
 import warnings
 
@@ -45,6 +46,19 @@ SELECTION_NUISANCES = {
     "gaussian": (("M0hat", -23.0, -18.0), ("sigma_M", 0.05, 3.0)),
     "schechter": (("Mstar_hat", -23.0, -18.0), ("alpha", -1.9, 0.0)),
 }
+
+#: Settings of ``model(..., catalog_sky_weighting=...)``. ``"conditional"``
+#: (the default) normalizes the host density in every sky row separately (one
+#: catalog only); ``"field"`` keeps each row's host mass and normalizes by the
+#: catalog's survey-global total, which a multi-catalog mixture requires.
+CATALOG_SKY_WEIGHTINGS = ("conditional", "field")
+#: Settings of ``model(..., field_normalizer=...)`` for a field-weighted
+#: analysis: ``"auto"`` (the default) is ``"moments"`` for
+#: ``completeness="selection"`` and ``"direct"`` otherwise
+#: (:mod:`darksirens.catalog.mixture`).
+FIELD_NORMALIZER_SETTINGS = ("auto", "direct", "moments")
+#: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
+MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
 #: Settings of ``model(..., kernel_pin=...)``.
 KERNEL_PIN_SETTINGS = ("auto", "off")
@@ -90,6 +104,55 @@ class IncompleteCatalogRedshift:
     selection: Any = None
     row_fraction: Any = field(default=None, compare=False, repr=False)
     row_fraction_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class CatalogComponent:
+    """One catalog of a field-weighted (mixture) analysis.
+
+    ``catalog`` is the :class:`~darksirens.catalog.io.CatalogStore`;
+    ``selection`` the validated runtime selection model under
+    ``completeness="selection"`` (``None`` for the count ratio);
+    ``row_fraction`` its optional coverage fraction per store row, compared
+    through ``row_fraction_sha256``.
+    """
+
+    catalog: Any
+    selection: Any = None
+    row_fraction: Any = field(default=None, compare=False, repr=False)
+    row_fraction_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class FieldCatalogMixtureRedshift:
+    """Field-weighted host density of one or more catalogs (``catalog_sky_weighting="field"``).
+
+    ``components`` are the catalogs in order (catalog ``k + 1`` of the
+    labels' ``_c{k+1}`` suffix), ``completeness`` is ``"incomplete"`` (the
+    per-row count ratio) or ``"selection"`` for all of them, ``n0_units`` the
+    unit of every ``log10n0``, and ``normalizer`` the resolved form of each
+    catalog's survey-global normaliser (``"direct"`` or ``"moments"``, see
+    :mod:`darksirens.catalog.mixture`; it is not evaluated for one catalog,
+    where it cancels).
+    """
+
+    components: tuple
+    completeness: str = "incomplete"
+    n0_units: str = "physical"
+    normalizer: str = "direct"
+
+    @property
+    def n_catalogs(self) -> int:
+        return len(self.components)
+
+    @property
+    def catalogs(self) -> tuple:
+        return tuple(component.catalog for component in self.components)
+
+
+def catalog_label_suffix(index: int) -> str:
+    """Label suffix of catalog ``index`` (0-based): ``""`` for the first, ``"_c{k}"`` after."""
+    return "" if index == 0 else f"_c{index + 1}"
 
 
 @dataclass(frozen=True)
@@ -196,6 +259,7 @@ class Analysis:
         | IncompleteCatalogRedshift
         | CompleteCatalogRedshift
         | BrightRedshift
+        | FieldCatalogMixtureRedshift
     )
     parameters: ParameterPlan
     population_latex: str
@@ -383,6 +447,152 @@ def _resolve_redshift(
     )
 
 
+def _single_selection_types():
+    """What one catalog's ``selection`` can be (a NamedTuple is also a tuple)."""
+    from darksirens.selection.catalog import (
+        GaussianMagnitudeSelection,
+        SchechterMagnitudeSelection,
+    )
+
+    return (Mapping, GaussianMagnitudeSelection, SchechterMagnitudeSelection)
+
+
+def _per_catalog(value, n, what, single_types):
+    """``value`` as a length-``n`` tuple: a list/tuple gives one entry per catalog,
+    anything else (an instance of ``single_types`` or ``None``) is the one
+    catalog's entry and needs ``n == 1``."""
+    if value is None:
+        return (None,) * n
+    if isinstance(value, single_types) or not isinstance(value, (list, tuple)):
+        if n != 1:
+            raise ValueError(
+                f"{what} must give one entry per catalog (a list of {n}) for a "
+                f"{n}-catalog analysis"
+            )
+        return (value,)
+    entries = tuple(value)
+    if len(entries) != n:
+        raise ValueError(f"{what} has {len(entries)} entries for {n} catalogs")
+    return entries
+
+
+def _resolve_mixture(
+    catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer
+):
+    """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``."""
+    from darksirens.catalog.io import CatalogStore
+
+    if not catalogs or not all(isinstance(c, CatalogStore) for c in catalogs):
+        raise TypeError(
+            "catalog must be a CatalogStore returned by ds.load_catalog, or a list of them"
+        )
+    if completeness not in (None, "incomplete", "selection"):
+        raise ValueError(
+            "catalog_sky_weighting='field' supports completeness='incomplete' (the "
+            f"per-row count ratio) or 'selection', got completeness={completeness!r}"
+        )
+    completeness = completeness or "incomplete"
+    if n0_units is not None and n0_units not in N0_UNITS_SETTINGS:
+        raise ValueError(f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}")
+    if field_normalizer is None:
+        field_normalizer = "auto"
+    if field_normalizer not in FIELD_NORMALIZER_SETTINGS:
+        raise ValueError(
+            f"field_normalizer must be one of {FIELD_NORMALIZER_SETTINGS}, got "
+            f"{field_normalizer!r}"
+        )
+    if field_normalizer == "moments" and completeness != "selection":
+        raise ValueError(
+            "field_normalizer='moments' is exact only for completeness='selection' "
+            "(the count ratio's clip at 1 does not factor); use 'direct' or 'auto'"
+        )
+    normalizer = (
+        ("moments" if completeness == "selection" else "direct")
+        if field_normalizer == "auto"
+        else field_normalizer
+    )
+    n = len(catalogs)
+    selections = _per_catalog(selection, n, "selection", _single_selection_types())
+    import numpy as np
+
+    fractions = _per_catalog(row_fraction, n, "row_fraction", (np.ndarray,))
+    if completeness != "selection" and (
+        any(s is not None for s in selections) or any(f is not None for f in fractions)
+    ):
+        raise ValueError(
+            "selection and row_fraction apply only to completeness='selection', got "
+            f"completeness={completeness!r}"
+        )
+    if n >= 2:
+        import numpy as np
+
+        for k, store in enumerate(catalogs):
+            rows = int(np.shape(store.catalog.zgals)[0])
+            ids = store.catalog.unique_pixels
+            full_sky = rows == 12 * int(store.nside) ** 2 and (
+                ids is None or np.array_equal(np.asarray(ids), np.arange(rows))
+            )
+            if not full_sky:
+                raise ValueError(
+                    f"catalog {k + 1} must hold every HEALPix row of its sky "
+                    f"(12 * nside**2 = {12 * int(store.nside) ** 2} rows in pixel "
+                    f"order, as ds.load_catalog returns it), got {rows} rows: a "
+                    "mixture's normaliser Z_k sums the host mass of every row, "
+                    "empty rows included"
+                )
+    components = []
+    for k, (store, sel, frac) in enumerate(zip(catalogs, selections, fractions)):
+        if completeness == "selection" and sel is None:
+            raise ValueError(
+                f"completeness='selection' requires a selection model for catalog {k + 1}"
+            )
+        fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
+        components.append(
+            CatalogComponent(
+                catalog=store,
+                selection=None if sel is None else resolve_selection_model(sel),
+                row_fraction=fraction,
+                row_fraction_sha256=digest,
+            )
+        )
+    return FieldCatalogMixtureRedshift(
+        components=tuple(components),
+        completeness=completeness,
+        n0_units=n0_units or "physical",
+        normalizer=normalizer,
+    )
+
+
+def _survey_block(redshift, catalog_priors):
+    """The catalog block in coordinate order: ``(label, lower, upper, kind, opt_in)``.
+
+    ``opt_in`` entries (selection nuisances) are sampled only when
+    ``survey_priors`` names them; the others unless ``fixed_survey`` does. A
+    mixture has one block per catalog (suffixed labels after the first) and
+    then the weights ``fcat_2 .. fcat_K`` with ``Beta(1, K - m + 1)`` priors.
+    """
+    if isinstance(redshift, FieldCatalogMixtureRedshift):
+        components = redshift.components
+    else:
+        components = (redshift,)
+    block = []
+    for k, component in enumerate(components):
+        suffix = catalog_label_suffix(k)
+        for name, lo, hi in catalog_priors:
+            block.append((name + suffix, lo, hi, _UNIFORM, False))
+        selection = getattr(component, "selection", None)
+        if selection is not None:
+            for name, lo, hi in SELECTION_NUISANCES[selection_family(selection)]:
+                block.append((name + suffix, lo, hi, _UNIFORM, True))
+    if isinstance(redshift, FieldCatalogMixtureRedshift):
+        n = redshift.n_catalogs
+        for m in range(2, n + 1):
+            block.append(
+                (MIXTURE_WEIGHT_LABEL.format(m), 0.0, 1.0, ("beta", 1.0, float(n - m + 1)), False)
+            )
+    return block
+
+
 def _check_fixed_in_prior(what, value, lo, hi, allow_out_of_prior) -> None:
     """Refuse a fixed value outside its prior bounds, or warn under the opt-out.
 
@@ -461,6 +671,11 @@ _SURVEY_PRIOR_FLOORS = {
 }
 
 
+def _base_name(label: str) -> str:
+    """A survey label without its catalog suffix (``"delta_c2"`` -> ``"delta"``)."""
+    return re.sub(r"_c[0-9]+$", "", label)
+
+
 def _survey_prior_entry(label, spec, default_lo, default_hi, base=None):
     """``(lower, upper, prior_kind)`` of one ``model(survey_priors=...)`` entry.
 
@@ -501,7 +716,7 @@ def _survey_prior_entry(label, spec, default_lo, default_hi, base=None):
     hi = fixed_scalar(f"{what} upper bound", hi)
     if not lo < hi:
         raise ValueError(f"{what} bounds must satisfy lower < upper, got {(lo, hi)!r}")
-    floor = _SURVEY_PRIOR_FLOORS.get(label if base is None else base)
+    floor = _SURVEY_PRIOR_FLOORS.get(_base_name(label) if base is None else base)
     if floor is not None:
         edge, inclusive = floor
         if lo < edge or (lo == edge and not inclusive):
@@ -694,13 +909,35 @@ def _kernel_pin_setting(value) -> str:
     return value
 
 
-def _catalog_model_record(redshift) -> str:
+def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     """``ParameterPlan.catalog_model``: the non-default catalog-model settings.
 
     ``""`` for every analysis without one (so existing plans and their
     fingerprints are unchanged); for ``completeness="selection"`` the selection
-    model's runtime payload and, when set, the row fraction's sha256.
+    model's runtime payload and, when set, the row fraction's sha256; for a
+    field-weighted analysis the weighting, completeness, number of catalogs,
+    normaliser, each catalog's kernel-pin activity and its selection payload
+    and row-fraction digest.
     """
+    if isinstance(redshift, FieldCatalogMixtureRedshift):
+        from darksirens.selection.catalog import selection_to_mapping
+
+        return _canonical_json({
+            "sky_weighting": "field",
+            "completeness": redshift.completeness,
+            "n_catalogs": redshift.n_catalogs,
+            "normalizer": redshift.normalizer,
+            "kernel_pin_active": list(catalog_kernel_pins_active(redshift, labels, kernel_pin)),
+            "catalogs": [
+                {
+                    "selection": (
+                        None if c.selection is None else selection_to_mapping(c.selection)
+                    ),
+                    "row_fraction_sha256": c.row_fraction_sha256,
+                }
+                for c in redshift.components
+            ],
+        })
     selection = getattr(redshift, "selection", None)
     if selection is None:
         return ""
@@ -716,6 +953,26 @@ def _catalog_model_record(redshift) -> str:
     return _canonical_json(record)
 
 
+def catalog_kernel_pins_active(redshift, sampled_labels, setting="auto") -> tuple:
+    """Per catalog of a field-weighted analysis, whether its kernel is pinned.
+
+    Catalog ``k`` (labels suffixed ``_c{k}`` after the first) is pinned under
+    ``setting="auto"`` when none of ``Om0``, ``w0``, ``wa`` and its own
+    ``delta``, ``sigma_kde`` is sampled; the pin then serves both its compact
+    view and, for its survey-global normaliser, its full sky.
+    """
+    if _kernel_pin_setting(setting) != "auto":
+        return (False,) * redshift.n_catalogs
+    sampled = {str(label) for label in sampled_labels}
+    shared = ("Om0", "w0", "wa")
+    out = []
+    for k in range(redshift.n_catalogs):
+        suffix = catalog_label_suffix(k)
+        own = (f"delta{suffix}", f"sigma_kde{suffix}")
+        out.append(not any(name in sampled for name in shared + own))
+    return tuple(out)
+
+
 def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     """Whether the bound likelihood pins the catalog kernel at bind time.
 
@@ -729,6 +986,9 @@ def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     """
     if _kernel_pin_setting(setting) != "auto":
         return False
+    if isinstance(redshift, FieldCatalogMixtureRedshift):
+        # Any catalog pinned (catalog_kernel_pins_active has each one).
+        return any(catalog_kernel_pins_active(redshift, sampled_labels, setting))
     if not isinstance(redshift, IncompleteCatalogRedshift):
         return False
     sampled = {str(label) for label in sampled_labels}
@@ -752,6 +1012,8 @@ def model(
     selection=None,
     row_fraction=None,
     survey_priors=None,
+    catalog_sky_weighting="conditional",
+    field_normalizer=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -843,6 +1105,37 @@ def model(
     [0, 0.05]; the selection nuisances ``M0hat`` [-23, -18], ``sigma_M``
     [0.05, 3], ``Mstar_hat`` [-23, -18], ``alpha`` [-1.9, 0]). A parameter
     cannot be both fixed and given a prior.
+
+    ``catalog_sky_weighting="field"`` (opt-in; the default ``"conditional"``
+    normalizes every sky row by itself) keeps each row's host mass and
+    normalizes each catalog by its survey-global host count
+    (:mod:`darksirens.catalog.mixture`). ``catalog`` may then be a list of
+    ``K >= 1`` catalog stores, each in its own HEALPix pixelization: the
+    host density of a GW sample is the mixture ``sum_k w_k n_k(z | p_k) /
+    Z_k`` over the catalogs, the field numerator ``n_k`` of
+    :mod:`darksirens.catalog.field` at the sample's row ``p_k`` of catalog k
+    divided by catalog k's full-sky total ``Z_k``, for PE and selection
+    samples alike. ``completeness`` is ``"incomplete"`` (count ratio) or
+    ``"selection"`` for every catalog; ``selection`` and ``row_fraction`` are
+    then lists with one entry per catalog (a ``row_fraction`` entry may be
+    ``None``). Each catalog has its own survey block, labelled ``log10n0``,
+    ``delta``, ``sigma_kde`` (and selection nuisances named in
+    ``survey_priors``) for the first and with the suffix ``_c{k}`` for
+    catalog ``k >= 2`` (``log10n0_c2``, ...); ``fixed_survey`` and
+    ``survey_priors`` take these labels. The weights are the stick-breaking
+    coordinates ``fcat_2 .. fcat_K`` with ``fcat_m ~ Beta(1, K - m + 1)``
+    (uniform on the simplex; ``w_1 = prod (1 - fcat_m)``, at ``K = 2`` ``w =
+    (1 - fcat_2, fcat_2)``), placed after the survey blocks; ``fixed_survey``
+    may fix them. With one catalog ``Z_1`` cancels and is not evaluated, and
+    the likelihood equals the field host-density seam's. ``field_normalizer``
+    picks how ``Z_k`` is computed: ``"auto"`` (default) is ``"moments"`` for
+    the selection completeness, exact and cheap, and ``"direct"`` (the
+    full-sky row sums) for the count ratio, the only exact form there. The
+    kernel pin applies per catalog (to its compact rows and, with a survey
+    depth, its full sky) when ``Om0``, ``w0``, ``wa`` and its own ``delta``,
+    ``sigma_kde`` are fixed. The plan records the weighting, completeness,
+    number of catalogs, normaliser, per-catalog pin activity and selection
+    payloads in ``ParameterPlan.catalog_model``.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -858,26 +1151,76 @@ def model(
         raise TypeError("allow_out_of_prior must be True or False")
     kernel_pin = _kernel_pin_setting(kernel_pin)
 
-    redshift, catalog_priors = _resolve_redshift(
-        catalog,
-        completeness,
-        empty_policy=empty_policy,
-        n0_units=n0_units,
-        counterparts=counterparts,
-        counterpart_nside=counterpart_nside,
-        selection=selection,
-        row_fraction=row_fraction,
-    )
-    selection_model = getattr(redshift, "selection", None)
-    selection_priors = (
-        () if selection_model is None
-        else SELECTION_NUISANCES[selection_family(selection_model)]
-    )
+    if catalog_sky_weighting not in CATALOG_SKY_WEIGHTINGS:
+        raise ValueError(
+            f"catalog_sky_weighting must be one of {CATALOG_SKY_WEIGHTINGS}, got "
+            f"{catalog_sky_weighting!r}"
+        )
+    several = isinstance(catalog, (list, tuple))
+    if catalog_sky_weighting == "field":
+        if catalog is None:
+            raise ValueError("catalog_sky_weighting='field' requires a catalog")
+        if counterparts is not None or counterpart_nside is not None:
+            raise ValueError("bright sirens do not take a galaxy catalog")
+        if empty_policy is not None:
+            raise ValueError(
+                "empty_policy applies only to completeness='complete', which "
+                "catalog_sky_weighting='field' does not support"
+            )
+        redshift = _resolve_mixture(
+            tuple(catalog) if several else (catalog,),
+            completeness,
+            n0_units=n0_units,
+            selection=selection,
+            row_fraction=row_fraction,
+            field_normalizer=field_normalizer,
+        )
+        catalog_priors = _INCOMPLETE_CATALOG_PRIORS
+    else:
+        if field_normalizer is not None:
+            raise ValueError(
+                "field_normalizer applies only to catalog_sky_weighting='field'"
+            )
+        if several:
+            if len(catalog) != 1:
+                raise ValueError(
+                    f"a mixture of {len(catalog)} catalogs requires "
+                    "catalog_sky_weighting='field': each catalog's weight is then "
+                    "its host fraction, normalized by its survey-global host count "
+                    "(the conditional weighting normalizes every sky row by itself "
+                    "and has no such fraction)"
+                )
+            (catalog,) = catalog
+            (selection,) = _per_catalog(selection, 1, "selection", _single_selection_types())
+            if isinstance(row_fraction, (list, tuple)):
+                (row_fraction,) = _per_catalog(row_fraction, 1, "row_fraction", ())
+        redshift, catalog_priors = _resolve_redshift(
+            catalog,
+            completeness,
+            empty_policy=empty_policy,
+            n0_units=n0_units,
+            counterparts=counterparts,
+            counterpart_nside=counterpart_nside,
+            selection=selection,
+            row_fraction=row_fraction,
+        )
+    block = _survey_block(redshift, catalog_priors)
+    fcat_labels = {label for label, *_ in block if label.startswith("fcat_")}
     survey_fixed = _resolve_fixed_survey(
-        fixed_survey, catalog_priors, allow_out_of_prior, selection_priors
+        fixed_survey,
+        [(label, lo, hi) for label, lo, hi, _, opt_in in block if not opt_in],
+        allow_out_of_prior,
+        [(label, lo, hi) for label, lo, hi, _, opt_in in block if opt_in],
     )
     survey_prior_overrides = _resolve_survey_priors(
-        survey_priors, catalog_priors, selection_priors, survey_fixed
+        survey_priors,
+        [
+            (label, lo, hi)
+            for label, lo, hi, _, opt_in in block
+            if not opt_in and label not in fcat_labels
+        ],
+        [(label, lo, hi) for label, lo, hi, _, opt_in in block if opt_in],
+        survey_fixed,
     )
     if isinstance(redshift, BrightRedshift) and angular != "isotropic":
         raise ValueError(
@@ -980,25 +1323,18 @@ def model(
         prior_kinds.extend(tuple(kind) for kind in pop_kinds)
         n_population = len(pop_labels)
 
+    # The catalog block: per catalog, its survey parameters and (only when
+    # survey_priors names them) its selection nuisances; then a mixture's
+    # weights. Fixed entries leave the coordinates.
     n_catalog = 0
-    for name, lo, hi in catalog_priors:
-        if name in survey_fixed:
+    for name, lo, hi, kind, opt_in in block:
+        if name in survey_fixed or (opt_in and name not in survey_prior_overrides):
             continue
-        lo, hi, kind = survey_prior_overrides.get(name, (lo, hi, _UNIFORM))
+        lo, hi, kind = survey_prior_overrides.get(name, (lo, hi, kind))
         labels.append(name)
         lower.append(float(lo))
         upper.append(float(hi))
-        prior_kinds.append(kind)
-        n_catalog += 1
-    # Selection nuisances are sampled only when survey_priors names them.
-    for name, _lo, _hi in selection_priors:
-        if name not in survey_prior_overrides:
-            continue
-        lo, hi, kind = survey_prior_overrides[name]
-        labels.append(name)
-        lower.append(float(lo))
-        upper.append(float(hi))
-        prior_kinds.append(kind)
+        prior_kinds.append(tuple(kind))
         n_catalog += 1
 
     labels.extend(angular_labels)
@@ -1045,7 +1381,7 @@ def model(
         kernel_pin=kernel_pin,
         kernel_pin_active=kernel_pin_applies(redshift, labels, kernel_pin),
         n0_units=getattr(redshift, "n0_units", "physical"),
-        catalog_model=_catalog_model_record(redshift),
+        catalog_model=_catalog_model_record(redshift, labels, kernel_pin),
     )
     return Analysis(
         cosmology=cosmology,
@@ -1060,6 +1396,10 @@ def model(
 
 __all__ = [
     "Analysis",
+    "CATALOG_SKY_WEIGHTINGS",
+    "CatalogComponent",
+    "FIELD_NORMALIZER_SETTINGS",
+    "FieldCatalogMixtureRedshift",
     "COMPLETENESS_SETTINGS",
     "ParameterPlan",
     "SELECTION_NUISANCES",

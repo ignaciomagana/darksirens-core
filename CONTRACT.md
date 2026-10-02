@@ -51,7 +51,10 @@ Core does not own:
 - native DESI/KIBO/Legacy/GLADE schemas, masks, depth-map construction, raw
   survey ingestion/weights or survey selection fitting;
 - Q/LSS ensembles, latent density fields, galaxy-count likelihoods or
-  multitracer state;
+  multitracer state (core owns the generic field-weighted mixture of
+  standardized catalogs, `catalog_sky_weighting="field"`, and its
+  missing-host extension point; tracer likelihoods, Q tables and member
+  provenance stay in the LSS companion);
 - lensing-specific physical state, partitions, marks or likelihoods;
 - campaign-specific command glue;
 - a generic plugin registry or `universe_model` switchboard.
@@ -187,6 +190,46 @@ below).
   `catalog.selection` (`CatalogParameters.selection`, `None` otherwise). On
   the frozen reference's `c_mode="selection"` fixture the likelihood agrees
   with it to 3e-14 (`tools/probe_selection_completeness.py`).
+- `model(..., catalog_sky_weighting="conditional"|"field",
+  field_normalizer=None)`: the default `"conditional"` is the frozen
+  per-row normalization (one catalog). `"field"` (opt-in) keeps each row's
+  host mass and divides by the catalog's survey-global total
+  `Z_k = sum_p [N_obs,p m_p + N_miss,p]` over every row of its sky
+  (`darksirens.catalog.mixture`). `catalog` may then be a list of `K >= 1`
+  catalog stores, each holding every row of its own HEALPix sky (different
+  `nside` are allowed): a GW sample's host density is
+  `sum_k w_k n_k(z | p_k) / Z_k` with `n_k` the field numerator at its row
+  `p_k` of catalog k, for PE samples and injections alike. With one catalog
+  `Z_1` cancels and is not evaluated (the value is the field host-density
+  seam's, to rounding). `completeness` is `"incomplete"` or `"selection"`
+  for every catalog (`"complete"` is refused); `selection` and
+  `row_fraction` are then lists with one entry per catalog. Catalog 1's survey
+  labels are `log10n0`, `delta`, `sigma_kde` (plus selection nuisances named
+  in `survey_priors`), catalog `k >= 2`'s carry the suffix `_c{k}`, and the
+  weights are the stick-breaking coordinates `fcat_2 .. fcat_K` after the
+  survey blocks, `fcat_m ~ Beta(1, K - m + 1)` on [0, 1] (uniform on the
+  simplex; `w = (1 - fcat_2, fcat_2)` at `K = 2`), the frozen reference's
+  labels, priors and order; `fixed_survey` and `survey_priors` take these
+  labels (`fixed_survey` may fix a weight). `field_normalizer="auto"` (the
+  default) evaluates `Z_k` in the `"moments"` form for the selection
+  completeness (one curve, exact) and in the `"direct"` form (every full-sky
+  row's curves, row blocked) for the count ratio, the only exact form there;
+  `"moments"` with the count ratio is refused. The kernel pin applies per
+  catalog, to its compact view and (with a survey depth) its full sky, when
+  `Om0`, `w0`, `wa` and its own `delta`, `sigma_kde` are fixed; each pin's
+  catalog digest is checked against its view when the binding is made. A
+  conditional analysis given `K >= 2` catalogs is refused. `compute_dtype="float32"`,
+  `missing_density="gather"`, `kernel_layout="galaxy_list"`, `n0_units`, the
+  soft and hard guards and the layout options apply as for the ordinary
+  incomplete catalog. `decode_parameters` returns
+  `CatalogMixtureParameters(components, log_weights)` as `catalog` (one
+  `CatalogParameters` per catalog with its store's `z_depth`) and refuses an
+  explicit `z_depth`. `ParameterPlan.catalog_model` records the weighting,
+  completeness, number of catalogs, normaliser, per-catalog pin activity,
+  selection payloads and row-fraction digests. On the frozen reference's
+  `darksiren_log_likelihood(..., catalog_sky_weighting="field",
+  n_catalogs=K)` the likelihood agrees to 3e-14
+  (`tools/probe_catalog_mixture.py`; on split mock T, 72 points, 3e-14).
 - `model(..., survey_priors={label: prior})` (opt-in) sets the prior of named
   survey parameters of a catalog analysis: `(lower, upper)` or
   `("uniform", lower, upper)`, a normal `("normal", loc, scale)` truncated to
@@ -391,6 +434,35 @@ new catalog view needs a new pin.
 `kernel_pin_active` on the target's plan, so `parameter_plan_semantic` puts
 them in the target's run fingerprint. Without a pin the seam's program is
 unchanged.
+
+### Catalog mixture seam
+
+`ds.model(catalog=[...], catalog_sky_weighting="field")` is the ordinary path's
+field-weighted host density of `K >= 1` standardized catalogs
+(`darksirens.catalog.mixture`, `darksirens.likelihood.mixture`). A companion
+that modulates a catalog's missing-host density (for example a Q table)
+passes a `MissingHostExtension` to
+`darksirens.likelihood.mixture.make_catalog_mixture_target(analysis, events=,
+injections=, extension=)`, which returns an `InferenceTarget` whose
+coordinates are the analysis's labels followed by the extension's
+(`parameter_spec()`). The extension is an explicit argument, never
+registered. Core calls `missing_density(context, dN_miss)` on each catalog's
+compact rows and, for `K >= 2`, on its full sky, recomputes every row's
+`N_miss` from the result by the redshift-grid trapezoid, and builds the
+numerator's row masses and `Z_k` from it; `missing_total(context)` may
+instead return the modulated full-sky missing mass (for example from moments
+the extension precomputed), and `None` makes core sum the modulated full-sky
+curves. `n_members = M >= 1` makes the likelihood `logsumexp_m logL_m -
+log M` over one member index shared by every catalog, with the
+member-independent work (kernels, base curves, observed totals) done once.
+The `MissingHostContext` gives the catalog index, the view and its global
+rows, the member, the extension's parameters and `data` (a jit operand, never
+a constant), the proposal's cosmology and catalog parameters, `dN_exp`, the
+depth mask, the selection curve `Cbar(z)`, the view's row fraction and the
+full-sky observed total. `missing_density="gather"` is refused with an
+extension. The target's fingerprint provenance records the analysis plan's
+semantic, the non-default likelihood options and the extension's
+`provenance()`.
 
 There is no model-name discovery, entry-point registration or callback registry.
 

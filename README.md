@@ -106,6 +106,24 @@ analysis = ds.model(
 )
 ```
 
+Several catalogs combine in a field-weighted mixture: each sample's host
+density is `sum_k w_k n_k(z | p_k) / Z_k`, with each catalog's host mass
+normalized by its survey-global total and stick-breaking weights `fcat_k`:
+
+```python
+analysis = ds.model(
+    cosmology=cosmology,
+    population=population,
+    catalog=[galaxies, agn],
+    catalog_sky_weighting="field",
+    completeness="selection",
+    selection=[galaxy_selection, agn_selection],
+    fixed_survey={"delta": 0.0, "sigma_kde": 0.0, "delta_c2": 0.0, "sigma_kde_c2": 0.0},
+    survey_priors={"log10n0_c2": (-6.0, -4.0)},
+)
+analysis.parameters.labels  # ('H0', 'log10n0', 'log10n0_c2', 'fcat_2')
+```
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog

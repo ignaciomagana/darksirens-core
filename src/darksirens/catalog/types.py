@@ -56,6 +56,20 @@ class CatalogParameters(NamedTuple):
     selection: Any = None
 
 
+class CatalogMixtureParameters(NamedTuple):
+    """The catalog parameters of a field-weighted (one- or multi-catalog) analysis.
+
+    ``components`` holds one :class:`CatalogParameters` per catalog, in the
+    analysis's order (each with its own ``n0``, ``delta``, ``sigma_kde``,
+    ``z_depth`` and ``selection``); ``log_weights`` is the ``(K,)`` array of
+    log mixture weights decoded from the sticks ``fcat_2 .. fcat_K``
+    (``(0.0,)`` for one catalog).
+    """
+
+    components: tuple
+    log_weights: Any
+
+
 class GalaxyIndex(NamedTuple):
     """Where the real galaxies of a padded catalog sit, as one flat list.
 
