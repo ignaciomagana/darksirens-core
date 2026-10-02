@@ -28,7 +28,9 @@ from darksirens.catalog.redshift import (
     PinnedCatalogKernel,
     build_pinned_catalog_kernel,
     check_pinned_catalog_kernel,
+    with_galaxy_index,
 )
+from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, physical_n0
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
@@ -117,6 +119,13 @@ def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
             None
             if catalog.unique_pixels is None
             else jnp.asarray(catalog.unique_pixels, dtype=jnp.int32)
+        ),
+        galaxy_index=(
+            None
+            if getattr(catalog, "galaxy_index", None) is None
+            else catalog.galaxy_index._replace(
+                flat=jnp.asarray(catalog.galaxy_index.flat)
+            )
         ),
     )
 
@@ -715,6 +724,14 @@ def bind_analysis(
             catalog_store.catalog, global_pe, global_sel
         )
         catalog = _jax_catalog(views.catalog)
+        # Opt-in (kernel_layout="galaxy_list", darksirens.catalog.settings):
+        # the compact view carries the list of its real galaxies, and the
+        # per-galaxy kernel normaliser runs over that list only.
+        if (
+            isinstance(analysis.redshift, IncompleteCatalogRedshift)
+            and catalog_evaluation_settings().kernel_layout == "galaxy_list"
+        ):
+            catalog = with_galaxy_index(catalog)
         pe_pixels = views.pe_sample_to_row
         sel_pixels = views.selection_sample_to_row
         cache = (

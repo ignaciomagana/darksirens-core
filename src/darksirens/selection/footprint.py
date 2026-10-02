@@ -21,7 +21,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from darksirens.catalog.completeness import CompletionCurves, build_completion_state
+from darksirens.catalog.completeness import (
+    CompletionCurves,
+    GatheredCompletionCurves,
+    build_completion_state,
+    gathered_missing_count,
+)
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.parameters import CosmologyParameters
@@ -113,7 +118,61 @@ def selection_completion_curves_with_row_fraction(
     )
 
 
+def gathered_selection_completion_curves_with_row_fraction(
+    cosmo: CosmologyParameters,
+    params: CatalogParameters,
+    catalog: GalaxyCatalog,
+    model,
+    row_fraction,
+    distance_table=None,
+) -> GatheredCompletionCurves:
+    """:func:`selection_completion_curves_with_row_fraction` kept as factors.
+
+    The opt-in ``missing_density="gather"`` form
+    (:mod:`darksirens.catalog.settings`) for a field target: the row fraction
+    ``f_p``, the clipped radial selection curve ``Cbar(z)``, ``dN_exp(z)`` and
+    the depth mask, with ``N_miss`` reduced in row blocks, and no
+    ``(N_rows, N_z)`` grid.  Pass it to
+    :func:`~darksirens.catalog.field.build_field_incomplete_catalog_prior_state_from_curves`
+    as ``curves``; the prior reads ``dN_miss`` at each sample's bracketing
+    grid nodes with the arithmetic of the grid.  ``f``, ``C`` and ``C_eff``
+    are not formed.
+    """
+
+    state = build_completion_state(
+        cosmo,
+        params,
+        catalog,
+        distance_table=distance_table,
+    )
+    cbar = jnp.clip(
+        selection_curve(zgrid, cosmo, model, distance_table=distance_table),
+        0.0,
+        1.0,
+    )
+    fraction = jnp.asarray(row_fraction, dtype=cbar.dtype)
+    n_rows = int(catalog.zgals.shape[0])
+    if fraction.ndim != 1 or int(fraction.shape[0]) != n_rows:
+        raise ValueError(
+            "row_fraction must have static shape (N_catalog_rows,), got "
+            f"{tuple(fraction.shape)} for {n_rows} rows"
+        )
+    depth_mask = None if params.z_depth is None else zgrid <= params.z_depth
+    return GatheredCompletionCurves(
+        observed=None,
+        row_fraction=fraction,
+        z_factor=cbar,
+        dN_exp=state.dN_exp,
+        depth_mask=depth_mask,
+        N_miss=gathered_missing_count(
+            row_fraction=fraction, z_factor=cbar, dN_exp=state.dN_exp,
+            depth_mask=depth_mask,
+        ),
+    )
+
+
 __all__ = [
+    "gathered_selection_completion_curves_with_row_fraction",
     "selection_completion_curves_with_row_fraction",
     "validate_selection_row_fraction",
 ]

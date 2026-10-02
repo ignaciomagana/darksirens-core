@@ -349,8 +349,12 @@ def core_numerics_semantic(likelihood=None) -> dict:
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
     ``DARKSIRENS_SKY_ZNORM_HI``, ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
-    ``DARKSIRENS_GW_N_*`` and ``DARKSIRENS_GW_PAIRING_*``); the normalisation
-    grids can also be changed at runtime by ``configure_normalization_grids``.
+    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
+    ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
+    runtime by ``configure_normalization_grids`` and the catalog evaluation
+    layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
+    enters only when it is not the default, so existing fingerprints are
+    unchanged.
     Values are read from the resolved module state, not from ``os.environ``,
     so they are what the likelihood actually uses.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
@@ -368,6 +372,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
     the one ``core_numerics_semantic()`` has always returned.
     """
 
+    from darksirens.catalog.settings import catalog_evaluation_settings
     from darksirens.cosmology import _grid, distances
     from darksirens.population import angular_advanced, gp, utils
 
@@ -379,6 +384,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
         if options:
             extra["likelihood_options"] = options
 
+    catalog_evaluation = catalog_evaluation_settings().to_dict()
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {
@@ -395,6 +401,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
             "nodes": angular_advanced._ZNORM_N,
         },
         "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
         **extra,
     })
 
