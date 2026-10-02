@@ -613,8 +613,11 @@ def test_the_extension_modulates_the_incomplete_catalogs_only():
 def test_kernel_window_composes_and_poisons_a_complete_catalog():
     """The opt-in kernel window on every compact view (count, selection and
     complete) matches the default; a width beyond the one the window was
-    sized for poisons the complete catalog's branch as it does the others."""
-    analysis = _model([A_DEPTH, B, C], completeness=["incomplete", "selection", "complete"],
+    sized for poisons the complete catalog's branch as it does the others.
+    The complete catalog has long rows, so its window sums fewer slots than
+    a row holds and its verdict is traced."""
+    dense = catalog_store(41, n_max=200, z_hi=0.45, empty=(0, 1))
+    analysis = _model([A_DEPTH, B, dense], completeness=["incomplete", "selection", "complete"],
                       selection=[None, SEL_B, None],
                       survey_priors={"sigma_kde": (0.0, 0.004), "sigma_kde_c2": (0.0, 0.004),
                                      "sigma_kde_c3": (0.0, 0.004)})
@@ -626,9 +629,24 @@ def test_kernel_window_composes_and_poisons_a_complete_catalog():
     finally:
         configure_catalog_evaluation(kernel_window="off")
     assert all(c.compact.kernel_window is not None for c in windowed.model_operands.components)
+    complete_view = windowed.model_operands.components[2].compact
+    assert complete_view.kernel_window.size < complete_view.zgals.shape[1]
     for theta in thetas:
         np.testing.assert_allclose(float(windowed(theta)), float(ref(theta)), rtol=0.0, atol=1e-8)
     wide = thetas[0].copy()
     wide[list(analysis.parameters.labels).index("sigma_kde_c3")] = 0.05
     assert np.isfinite(float(ref(wide)))
     assert float(windowed(wide)) == -np.inf
+    # The same for an incomplete catalog: before the branch poison was added
+    # to every term, the mixture's logsumexp dropped the poisoned branch and
+    # returned a finite value from the others.
+    pair = _model([A, dense], survey_priors={"sigma_kde_c2": (0.0, 0.004)})
+    configure_catalog_evaluation(kernel_window=1e-10)
+    try:
+        windowed = _bind(pair)
+    finally:
+        configure_catalog_evaluation(kernel_window="off")
+    theta = _points(pair, n=1)[0]
+    assert np.isfinite(float(windowed(theta)))
+    theta[list(pair.parameters.labels).index("sigma_kde_c2")] = 0.05
+    assert float(windowed(theta)) == -np.inf

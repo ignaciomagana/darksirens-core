@@ -124,6 +124,10 @@ analysis = ds.model(
 analysis.parameters.labels  # ('H0', 'log10n0', 'log10n0_c2', 'fcat_2')
 ```
 
+Each catalog may have its own completeness, for example
+`completeness=["incomplete", "selection"]` with `selection=[None,
+agn_selection]`, or `"complete"` for a catalog that holds every host.
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog
