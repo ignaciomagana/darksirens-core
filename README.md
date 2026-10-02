@@ -257,6 +257,21 @@ user typed them rather than as a silent `-inf`:
   default. It is recorded in the run fingerprint, composes with
   `compute_dtype="float32"`, and cannot be combined with the m1 grid. The
   default (`"per_sample"`) is unchanged.
+- `darksirens.catalog.settings.configure_catalog_evaluation(kernel_window=1e-10)` (env
+  `DARKSIRENS_CATALOG_KERNEL_WINDOW=1e-10`, set before binding) is an opt-in
+  speed option for catalogs with many galaxies per sky pixel: each GW sample's
+  catalog kernel is summed over a fixed-length window of its pixel's
+  redshift-sorted galaxies instead of all of them. The window is sized at bind
+  time (at the fixed `sigma_kde`, or at its prior's upper edge when it is
+  sampled) so that, at every redshift, the part of the sum it leaves out is at
+  most the tolerance times the pixel's largest single-galaxy peak term; a
+  traced check makes the likelihood `-inf` (never a truncated value) if the
+  window's premises fail at a proposal. It applies to incomplete, complete and
+  field-weighted catalog analyses, with the kernel pin, the galaxy list,
+  `missing_density="gather"` and `compute_dtype="float32"`; catalog rows must
+  be sorted by redshift (the `load_catalog` default). It is recorded in the run
+  fingerprint; the default (off) is unchanged bit for bit. See
+  `darksirens.catalog.redshift.kernel_window` for the bound.
 
 ## Ownership boundary
 

@@ -1,8 +1,10 @@
 """Opt-in evaluation layouts of the ordinary incomplete-catalog likelihood.
 
 Two settings change how the dark-siren catalog terms are laid out in memory,
-not what they compute.  Both default to the historical layout, and a default
-setting leaves every traced program, and so every likelihood value, unchanged.
+not what they compute; a third (``kernel_window``) bounds the per-sample
+catalog kernel sum to a redshift window, with a stated tolerance on what it
+leaves out.  All default to the historical evaluation, and a default setting
+leaves every traced program, and so every likelihood value, unchanged.
 
 ``kernel_layout``
     ``"padded"`` (default) evaluates each galaxy's 24-node kernel normaliser
@@ -34,9 +36,28 @@ setting leaves every traced program, and so every likelihood value, unchanged.
     setting; a field target opts in by building its curves with the gathered
     builders.
 
+``kernel_window``
+    ``None`` (default, ``"off"``) sums each GW sample's catalog kernel over
+    every galaxy of its sky row.  A tolerance ``eps`` in ``(0, 1)`` (for
+    example ``1e-10``) sums it over a fixed-length window of the row's
+    redshift-sorted galaxies around the sample redshift instead, sized at
+    bind time so that the part of the sum it leaves out is at most ``eps``
+    times the row's largest single-galaxy peak term, at every redshift (see
+    :func:`darksirens.catalog.redshift.kernel_window` for the bound and its
+    proof).  This is the one setting here that changes values: by at most
+    that bound.  :func:`darksirens.runtime_binding.bind_analysis` attaches
+    the window to an incomplete- or complete-catalog binding's catalog view,
+    and to each compact view of a field-weighted analysis, sized at the
+    analysis's fixed ``sigma_kde`` or, when it is sampled, at its prior's
+    upper edge; the rows must be sorted by redshift (the default of
+    :func:`darksirens.catalog.io.load_catalog`).  A caller that builds its
+    own catalog view (a field target) attaches it with
+    :func:`darksirens.catalog.redshift.with_kernel_window`.
+
 Configure with :func:`configure_catalog_evaluation` or the environment
-variables ``DARKSIRENS_CATALOG_KERNEL_LAYOUT`` and
-``DARKSIRENS_CATALOG_MISSING_DENSITY`` (read at import).  Like the population
+variables ``DARKSIRENS_CATALOG_KERNEL_LAYOUT``,
+``DARKSIRENS_CATALOG_MISSING_DENSITY`` and ``DARKSIRENS_CATALOG_KERNEL_WINDOW``
+(read at import; ``"off"`` or a tolerance).  Like the population
 normalisation settings they are read when a likelihood is bound or traced, so
 set them before binding.  A non-default value enters
 :func:`darksirens.inference.run_fingerprint.core_numerics_semantic`; the
@@ -45,6 +66,7 @@ defaults do not, so existing fingerprints are unchanged.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import asdict, dataclass, replace
 
@@ -54,22 +76,50 @@ KERNEL_LAYOUTS = ("padded", "galaxy_list")
 #: Evaluations of the missing-host density (first entry is the default).
 MISSING_DENSITY_MODES = ("grid", "gather")
 
-_DEFAULTS = {"kernel_layout": KERNEL_LAYOUTS[0], "missing_density": MISSING_DENSITY_MODES[0]}
+_DEFAULTS = {
+    "kernel_layout": KERNEL_LAYOUTS[0],
+    "missing_density": MISSING_DENSITY_MODES[0],
+    "kernel_window": None,
+}
 _ENV = {
     "kernel_layout": "DARKSIRENS_CATALOG_KERNEL_LAYOUT",
     "missing_density": "DARKSIRENS_CATALOG_MISSING_DENSITY",
+    "kernel_window": "DARKSIRENS_CATALOG_KERNEL_WINDOW",
 }
 _CHOICES = {"kernel_layout": KERNEL_LAYOUTS, "missing_density": MISSING_DENSITY_MODES}
 
 
+def _kernel_window_tolerance(value):
+    """``None`` for off (``None`` or ``"off"``), else the tolerance as a float in (0, 1)."""
+
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "off")):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"kernel_window must be 'off' or a tolerance in (0, 1), got {value!r}")
+    try:
+        eps = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"kernel_window must be 'off' or a tolerance in (0, 1), got {value!r} "
+            f"(env {_ENV['kernel_window']})"
+        ) from None
+    if not (math.isfinite(eps) and 0.0 < eps < 1.0):
+        raise ValueError(
+            f"kernel_window must be 'off' or a tolerance in (0, 1), got {value!r} "
+            f"(env {_ENV['kernel_window']})"
+        )
+    return eps
+
+
 @dataclass(frozen=True)
 class CatalogEvaluationSettings:
-    """Memory layouts of the incomplete-catalog terms (see the module docstring)."""
+    """Evaluation of the incomplete-catalog terms (see the module docstring)."""
 
     kernel_layout: str = os.environ.get(_ENV["kernel_layout"], _DEFAULTS["kernel_layout"])
     missing_density: str = os.environ.get(
         _ENV["missing_density"], _DEFAULTS["missing_density"]
     )
+    kernel_window: float | None = os.environ.get(_ENV["kernel_window"], None)
 
     def __post_init__(self):
         for name, choices in _CHOICES.items():
@@ -78,8 +128,11 @@ class CatalogEvaluationSettings:
                 raise ValueError(
                     f"{name} must be one of {choices}, got {value!r} (env {_ENV[name]})"
                 )
+        object.__setattr__(
+            self, "kernel_window", _kernel_window_tolerance(self.kernel_window)
+        )
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict:
         """The non-default settings only: empty at the defaults."""
 
         return {
@@ -102,12 +155,14 @@ def configure_catalog_evaluation(
     *,
     kernel_layout: str | None = None,
     missing_density: str | None = None,
+    kernel_window: float | str | None = None,
 ) -> CatalogEvaluationSettings:
     """Update the catalog evaluation settings and return them.
 
-    Omitting an argument (``None``) leaves that setting unchanged.  Configure
-    before binding or tracing a likelihood: a jitted likelihood keeps the
-    layout it was traced with.
+    Omitting an argument (``None``) leaves that setting unchanged;
+    ``kernel_window="off"`` turns the kernel window off.  Configure before
+    binding or tracing a likelihood: a jitted likelihood keeps the layout it
+    was traced with, and a binding keeps the window it was bound with.
     """
 
     global _SETTINGS
@@ -117,6 +172,7 @@ def configure_catalog_evaluation(
         for key, value in {
             "kernel_layout": kernel_layout,
             "missing_density": missing_density,
+            "kernel_window": kernel_window,
         }.items()
         if value is not None
     }

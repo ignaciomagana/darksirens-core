@@ -367,6 +367,28 @@ def likelihood_options_semantic(source) -> dict:
     return canonical_semantic(out, "semantic.core_numerics.likelihood_options")
 
 
+def _bound_kernel_window(likelihood):
+    """``(tolerance,)`` of the kernel window a binding was bound with, ``(None,)``
+    for a catalog binding without one, ``None`` when ``likelihood`` carries no
+    catalog view (a mapping, a spectral or bright binding, nothing)."""
+
+    if likelihood is None or isinstance(likelihood, Mapping):
+        return None
+    views = []
+    catalog = getattr(likelihood, "catalog", None)
+    if catalog is not None and hasattr(catalog, "zgals"):
+        views.append(catalog)
+    for component in getattr(getattr(likelihood, "model_operands", None), "components", ()):
+        views.append(component.compact)
+    if not views:
+        return None
+    windows = [getattr(view, "kernel_window", None) for view in views]
+    tolerances = {float(w.tolerance) for w in windows if w is not None}
+    if not tolerances:
+        return (None,)
+    return (min(tolerances),)
+
+
 def core_numerics_semantic(likelihood=None) -> dict:
     """Target-setting numerics core resolved in THIS process.
 
@@ -409,6 +431,13 @@ def core_numerics_semantic(likelihood=None) -> dict:
             extra["likelihood_options"] = options
 
     catalog_evaluation = catalog_evaluation_settings().to_dict()
+    bound_window = _bound_kernel_window(likelihood)
+    if bound_window is not None:
+        # A binding carries the kernel window it was bound with, which is what
+        # its likelihood evaluates, whatever the setting is now.
+        catalog_evaluation.pop("kernel_window", None)
+        if bound_window[0] is not None:
+            catalog_evaluation["kernel_window"] = bound_window[0]
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {

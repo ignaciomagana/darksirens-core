@@ -33,6 +33,7 @@ from darksirens.catalog.redshift import (
     build_pinned_catalog_kernel,
     check_pinned_catalog_kernel,
     with_galaxy_index,
+    with_kernel_window,
 )
 from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import (
@@ -882,6 +883,37 @@ def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
     return build_pinned_catalog_kernel(cosmology, catalog_params, catalog)
 
 
+def _kernel_window_sigma_kde(analysis, k=None) -> float:
+    """The largest ``|sigma_kde|`` the bound likelihood evaluates (catalog ``k``).
+
+    The analysis's fixed ``sigma_kde``, or, when it is sampled, the upper
+    edge of its prior (every prior is bounded): the opt-in kernel window is
+    sized there and so holds at every proposal inside the prior
+    (:func:`darksirens.catalog.redshift.kernel_window`). Outside it, the
+    window's traced check makes the likelihood ``-inf``.
+    """
+    plan = analysis.parameters
+    decoded = _decode_theta(
+        analysis, jnp.asarray(plan.upper, dtype=jnp.float64), z_depth=None
+    ).catalog
+    params = decoded if k is None else decoded.components[k]
+    sigma = params.sigma_kde
+    labels = plan.labels
+    name = "sigma_kde" if k is None else "sigma_kde" + catalog_label_suffix(k)
+    if name in labels:
+        i = labels.index(name)
+        sigma = max(abs(float(plan.lower[i])), abs(float(plan.upper[i])))
+    return abs(float(sigma))
+
+
+def _with_kernel_window(analysis, catalog, k=None):
+    """``catalog`` with the opt-in kernel window when it is configured."""
+    tolerance = catalog_evaluation_settings().kernel_window
+    if tolerance is None:
+        return catalog
+    return with_kernel_window(catalog, tolerance, _kernel_window_sigma_kde(analysis, k))
+
+
 def _mixture_pin_premise(analysis, k):
     """Catalog ``k``'s fixed cosmology and catalog parameters (the pin premise)."""
     decoded = _decode_theta(
@@ -943,6 +975,10 @@ def _bind_mixture(analysis, events, injections):
             compact = with_galaxy_index(compact)
             if full is not None and not light:
                 full = with_galaxy_index(full)
+        # Opt-in (kernel_window, darksirens.catalog.settings): only the compact
+        # view is evaluated per sample; the full view feeds the normaliser,
+        # which sums no kernel.
+        compact = _with_kernel_window(analysis, compact, k)
         compact_cache = full_cache = None
         if count_ratio:
             if full is not None:
@@ -1163,6 +1199,9 @@ def bind_analysis(
             and catalog_evaluation_settings().kernel_layout == "galaxy_list"
         ):
             catalog = with_galaxy_index(catalog)
+        # Opt-in (kernel_window, darksirens.catalog.settings): each sample's
+        # kernel sum runs over a redshift window of its row, sized here.
+        catalog = _with_kernel_window(analysis, catalog)
         pe_pixels = views.pe_sample_to_row
         sel_pixels = views.selection_sample_to_row
         selection_completeness = (

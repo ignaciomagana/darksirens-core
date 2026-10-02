@@ -219,7 +219,8 @@ below).
   `Om0`, `w0`, `wa` and its own `delta`, `sigma_kde` are fixed; each pin's
   catalog digest is checked against its view when the binding is made. A
   conditional analysis given `K >= 2` catalogs is refused. `compute_dtype="float32"`,
-  `missing_density="gather"`, `kernel_layout="galaxy_list"`, `n0_units`, the
+  `missing_density="gather"`, `kernel_layout="galaxy_list"`, `kernel_window`
+  (on each compact view), `n0_units`, the
   soft and hard guards and the layout options apply as for the ordinary
   incomplete catalog. `decode_parameters` returns
   `CatalogMixtureParameters(components, log_weights)` as `catalog` (one

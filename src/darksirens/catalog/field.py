@@ -264,7 +264,11 @@ def build_field_incomplete_catalog_prior_state_from_curves(
     the missing-host density is then read per sample from its factors instead
     of from ``(N_rows, N_z)`` grids, with the same arithmetic.  A catalog
     carrying a galaxy list (:func:`~darksirens.catalog.redshift.with_galaxy_index`)
-    has its per-galaxy kernel normaliser evaluated on the real galaxies only.
+    has its per-galaxy kernel normaliser evaluated on the real galaxies only,
+    and one carrying a kernel window
+    (:func:`~darksirens.catalog.redshift.with_kernel_window`) has each
+    sample's kernel summed over the window, its traced verdict spent on the
+    row host mass as a failed probe is.
     """
 
     if pinned_kernel is not None:

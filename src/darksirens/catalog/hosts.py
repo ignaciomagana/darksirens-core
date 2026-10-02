@@ -401,6 +401,11 @@ def build_marked_catalog_kernel_state(
 ):
     """Build the marked observed-host kernel and row host amplitudes."""
 
+    if getattr(catalog, "kernel_window", None) is not None:
+        raise ValueError(
+            "the marked host kernel does not take the opt-in kernel window: build it "
+            "from a catalog without one (catalog._replace(kernel_window=None))"
+        )
     model._check_names(marks.names)
     if marks.values.shape[:2] != catalog.zgals.shape:
         raise ValueError(
