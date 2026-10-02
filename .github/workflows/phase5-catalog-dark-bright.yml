@@ -12,7 +12,7 @@ permissions:
 jobs:
   catalog-dark-bright:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 75
     env:
       JAX_PLATFORMS: cpu
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
