@@ -13,6 +13,12 @@ hierarchical reducer's. With one catalog the density is ``n_1`` alone: ``Z_1``
 is common to every sample and cancels between the event evidences and
 ``N log mu``, so it is not evaluated.
 
+Each catalog has its own completeness (``ds.model(..., completeness=[...])``):
+the count ratio and the selection curve give ``n_k = N_obs,p p_cat + dN_miss,p``
+with their own missing-host curves, and a complete catalog gives ``n_k =
+N_obs,p p_cat(z | p)`` (no missing hosts, no survey depth) with ``Z_k = sum_p
+N_obs,p``, the frozen reference's field convention of the complete catalog.
+
 With per-catalog population blocks (``ds.model(...,
 per_catalog_population=...)``) each catalog's population enters its own
 branch instead of multiplying the collapsed mixture:
@@ -57,7 +63,11 @@ from darksirens.catalog.models import (
     assemble_incomplete_catalog_prior_state,
     eval_incomplete_catalog_prior_state_vmap,
 )
-from darksirens.catalog.redshift import build_catalog_kernel_state, pinned_catalog_kernel_state
+from darksirens.catalog.redshift import (
+    build_catalog_kernel_state,
+    eval_log_catalog_prior_state,
+    pinned_catalog_kernel_state,
+)
 from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.cosmology._grid import zgrid
 from darksirens.selection.catalog import selection_curve
@@ -108,6 +118,59 @@ class _CatalogPieces(NamedTuple):
     curves: Any
     observed_total: Any
     observed_poison: Any
+
+
+class _CompleteFieldView(NamedTuple):
+    """A complete catalog's field density over ``Z``: ``log N_obs,p + log p_cat - log Z``."""
+
+    kernels: Any
+    log_Nobs: Any
+    log_Z: Any
+
+
+#: Completeness settings of one catalog of the field mixture.
+_COMPLETENESS = ("incomplete", "selection", "complete")
+
+
+def _per_catalog_setting(value, n, what):
+    """One value for every catalog, or a length-``n`` sequence, as a tuple."""
+    if isinstance(value, str):
+        return (value,) * n
+    values = tuple(value)
+    if len(values) != n:
+        raise ValueError(f"{what} has {len(values)} entries for {n} catalogs")
+    return values
+
+
+def _complete_params(params):
+    """A complete catalog's kernel has no survey depth (the conditional complete model)."""
+    return params._replace(z_depth=None)
+
+
+def _complete_view(kernels, pin_ok, catalog, log_Z_total):
+    """The field view of a complete catalog: the row counts and ``log Z`` (+ pin poison).
+
+    ``log_Z_total`` is ``log sum_p N_obs,p`` over the full sky (``0`` for one
+    catalog, where it cancels); a failed pin probe poisons it with NaN, as on
+    the incomplete catalog's row normaliser.
+    """
+    Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
+    log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
+    log_Z = jnp.asarray(log_Z_total, dtype=zgrid.dtype)
+    if pin_ok is not None:
+        log_Z = log_Z + jnp.where(pin_ok, 0.0, jnp.nan)
+    return _CompleteFieldView(kernels=kernels, log_Nobs=log_Nobs, log_Z=log_Z)
+
+
+def _eval_complete_field_vmap(z, rows, view, catalog):
+    """``log N_obs,p + log p_cat(z | p) - log Z`` at paired samples (``-inf`` on an empty row)."""
+
+    def one(zi, ri):
+        log_p_cat = eval_log_catalog_prior_state(zi, ri, view.kernels, catalog)
+        log_p_cat = jnp.nan_to_num(log_p_cat, nan=-jnp.inf, neginf=-jnp.inf)
+        return view.log_Nobs[ri] + log_p_cat - view.log_Z
+
+    return jax.vmap(one)(z, rows)
 
 
 def _depth_mask(params):
@@ -263,15 +326,20 @@ def field_mixture_log_likelihood(
     collapsed mixture, on the unchanged program.
     ``gw_pe.pixels`` and ``gw_sel.pixels`` are the
     samples' compact rows, ``(N,)`` for one catalog and ``(N, K)`` (one
-    column per catalog) otherwise. ``normalizer`` is the form of each
-    ``Z_k`` (``"direct"`` or ``"moments"``, the latter for
-    ``completeness="selection"`` only). ``compute_dtype="float32"`` evaluates
+    column per catalog) otherwise. ``completeness`` is ``"incomplete"``,
+    ``"selection"`` or ``"complete"``, one value for every catalog or one
+    per catalog. ``normalizer`` is the form of each ``Z_k`` (``"direct"`` or
+    ``"moments"``, the latter for ``completeness="selection"`` only), one
+    value or one per catalog; a complete catalog's ``Z_k`` is its full-sky
+    galaxy count. ``compute_dtype="float32"`` evaluates
     the per-sample weights, mixture included, in float32 (the per-proposal
     state and every reduction stay float64). ``extension`` is an optional
     :class:`~darksirens.catalog.mixture.MissingHostExtension` with its
     ``extension_params`` (its block of the coordinates) and
     ``extension_data``; with ``n_members = M >= 1`` the result is
-    ``logsumexp_m logL_m - log M``.
+    ``logsumexp_m logL_m - log M``. The extension is not called for a
+    complete catalog, which has no missing hosts. ``compute_dtype="float32"``
+    is refused with a complete catalog.
     """
 
     components = tuple(operands.components)
@@ -279,10 +347,15 @@ def field_mixture_log_likelihood(
     n = len(components)
     if len(params_k) != n:
         raise ValueError(f"{len(params_k)} catalog parameter blocks for {n} catalogs")
-    if completeness not in ("incomplete", "selection"):
-        raise ValueError(f"unsupported completeness {completeness!r}")
-    if normalizer == "moments" and completeness != "selection":
-        raise ValueError("the moments normalizer is exact only for completeness='selection'")
+    completeness = _per_catalog_setting(completeness, n, "completeness")
+    normalizer = _per_catalog_setting(normalizer, n, "normalizer")
+    for comp, norm in zip(completeness, normalizer):
+        if comp not in _COMPLETENESS:
+            raise ValueError(f"unsupported completeness {comp!r}")
+        if norm == "moments" and comp != "selection":
+            raise ValueError(
+                "the moments normalizer is exact only for completeness='selection'"
+            )
     n_members = 0 if extension is None else int(getattr(extension, "n_members", 0) or 0)
     if n_members < 0:
         raise ValueError("MissingHostExtension.n_members must be >= 0")
@@ -299,6 +372,10 @@ def field_mixture_log_likelihood(
     compute_dtype = _resolve_compute_dtype(
         compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
     )
+    if compute_dtype is not None and "complete" in completeness:
+        raise ValueError(
+            f"compute_dtype={compute_dtype!r} is not implemented for a complete catalog"
+        )
     log_weights = jnp.asarray(catalog_parameters.log_weights)
     # Per-catalog population blocks (ds.model(..., per_catalog_population=...)):
     # one population vector per catalog, multiplied into its own branch. None
@@ -314,8 +391,19 @@ def field_mixture_log_likelihood(
     # Member-independent work, once per proposal.
     pieces = []
     for k, (params, component) in enumerate(zip(params_k, components)):
+        if completeness[k] == "complete":
+            # Z_k = sum_p N_obs,p over the full sky: no depth, no missing hosts.
+            kernels, pin_ok = _kernels(
+                cosmology, _complete_params(params), component.compact, component.compact_pin
+            )
+            obs = (
+                jnp.sum(jnp.asarray(component.full.ngals, dtype=zgrid.dtype))
+                if n >= 2 else None
+            )
+            pieces.append(_CatalogPieces(kernels, pin_ok, None, obs, None))
+            continue
         kernels, pin_ok = _kernels(cosmology, params, component.compact, component.compact_pin)
-        curves = _compact_curves(cosmology, params, component, completeness, gather)
+        curves = _compact_curves(cosmology, params, component, completeness[k], gather)
         if n >= 2:
             obs, obs_poison = _observed(cosmology, params, component)
         else:
@@ -341,11 +429,19 @@ def field_mixture_log_likelihood(
     def evaluate(member):
         views = []
         for k, (params, component, piece) in enumerate(zip(params_k, components, pieces)):
+            if completeness[k] == "complete":
+                log_total = (
+                    jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if n >= 2 else 0.0
+                )
+                views.append(
+                    _complete_view(piece.kernels, piece.pin_ok, component.compact, log_total)
+                )
+                continue
             curves = piece.curves
             if extension is not None:
                 ctx = _context(
                     k, "compact", component.compact.unique_pixels, member, extension_params,
-                    extension_data, cosmology, params, completeness,
+                    extension_data, cosmology, params, completeness[k],
                     component.compact_row_fraction, None, component.compact,
                 )
                 curves = modulated_curves(curves, extension.missing_density(ctx, curves.dN_miss))
@@ -355,7 +451,7 @@ def field_mixture_log_likelihood(
             poison = poison_of(state.log_Z)
             if n >= 2:
                 total = piece.observed_total + _missing_total(
-                    k, cosmology, params, component, completeness, normalizer,
+                    k, cosmology, params, component, completeness[k], normalizer[k],
                     extension, member, extension_params, extension_data, piece.observed_total,
                 )
                 log_Z = jnp.log(jnp.maximum(total, 1.0e-300)) + piece.observed_poison + poison
@@ -373,9 +469,11 @@ def field_mixture_log_likelihood(
     def _reduce(views, member, branch_poison=None):
         def prior(z, pix, _catalog):
             terms = [
-                eval_incomplete_catalog_prior_state_vmap(
-                    z, _column(pix, k), views[k], components[k].compact
-                )
+                (
+                    _eval_complete_field_vmap
+                    if completeness[k] == "complete"
+                    else eval_incomplete_catalog_prior_state_vmap
+                )(z, _column(pix, k), views[k], components[k].compact)
                 for k in range(n)
             ]
             if n == 1:
