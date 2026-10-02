@@ -57,7 +57,9 @@ likelihood rejects any proposal that produces −∞.
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 
 from .utils import (
@@ -66,7 +68,9 @@ from .utils import (
     get_pairing_m1_grid,
     get_pairing_edge_quadrature,
     get_pairing_panel_quadrature,
+    get_pairing_taper_table,
     normalization_grid_settings,
+    sfilter_low_cap,
     M_LO,
     M_HI,
 )
@@ -583,6 +587,231 @@ class PairingModel(ABC):
             n_sc = n_sc + closed[0] / scale_s[..., 0]
         return n_sc, scale_s[..., 0]
 
+    def _kernel_power(self, theta):
+        r"""``beta`` of a secondary-mass-tapered ``q**beta`` kernel, or ``None``.
+
+        Declares the structure the opt-in ``pairing_norm="per_point"``
+        normaliser (:meth:`_per_point_density`) is exact for:
+
+        * ``p_unnorm(q | m1) = q**beta * K(q m1)``, where ``K`` is zero below
+          ``m_edge``, ``utils.sfilter_low(m2, m_edge, m_shoulder - m_edge)`` on
+          the taper window and identically one at and above ``m_shoulder``
+          (``(m_edge, m_shoulder)`` from :meth:`_taper_shoulder`);
+        * :meth:`_plateau_integral` returns the closed form of
+          ``int_{q_lo}^{1} q**beta dq``;
+        * no extra split points (:meth:`_panel_edges` returns ``()``).
+
+        Both production pairings (``PowerLawPairing`` and
+        ``GWTC5FiducialBPL2PeaksPairing``) declare it.  ``None`` (the default)
+        keeps the per-sample q-quadrature for that model under either
+        ``pairing_norm`` value.
+        """
+        del theta
+        return None
+
+    def _per_point_density(self, p, m1, m_min, dm_min, theta, beta):
+        r"""``p / N(m1)`` with the taper integrated once per likelihood point.
+
+        Used by ``pairing_norm="per_point"`` for a model that declares
+        :meth:`_kernel_power`; ``p`` is ``_eval_unnorm(m1, q, ...)``.  Returns
+        0.0 where ``N`` is zero (no support), and the caller applies the q
+        support mask.
+
+        Substituting ``m2 = q m1`` in ``N(m1) = int_{q_cut}^{1} q**beta K(q m1) dq``
+        gives ``N(m1) = m1**(-1-beta) G(m1)`` with
+        ``G(m) = int_{m_edge}^{m} m2**beta K(m2) dm2``: the primary mass enters
+        only through the upper limit.  Two regimes:
+
+        * ``m1 >= m_shoulder`` (almost every sample): the taper part is the
+          whole window, ``G(m_shoulder)``, ONE scalar per likelihood point, and
+          the rest is the closed-form plateau, so
+          ``N = m1**(-1-beta) G(m_shoulder) + int_{q_a}^{1} q**beta dq`` with
+          ``q_a = m_shoulder/m1``.  ``G(m_shoulder)`` is taken with the
+          per-sample rule's own ``PAIRING_PANEL_NQ`` Gauss-Legendre nodes, which
+          in ``m2`` are the same for every ``m1`` above the shoulder: this is
+          the default's quadrature rule, evaluated once instead of per sample,
+          and it agrees with it to rounding.
+        * ``m1`` inside the window, ``s = (m1 - m_edge)/(m_shoulder - m_edge)``
+          in ``(0, 1)``: ``log G`` is read from a per-point table on the static
+          grid :func:`~darksirens.population.utils.get_pairing_taper_table`
+          (``lambda = log s``), built from Gauss-Legendre cell integrals (closed
+          form on the segment where the taper sits on its floor) and
+          interpolated by quintic Hermite with the exact first and second
+          derivatives at the nodes.
+
+        Accuracy, measured against a converged reference (composite GL-16 on
+        40,000 log-graded cells of the window, the floor's kink on a cell edge)
+        for both production pairings at 20 corners of the prior box
+        (``beta`` in {-2, -1, 0.9, 7}; ``(m_edge, dm)`` from (2, 10) to
+        (10, 0.01)), ``s`` from 1e-7 to 10: ``|d log N| <= 4.5e-10`` (the worst
+        at ``dm = 0.01``, where ``N`` is that ill-conditioned in ``m1``;
+        ``<= 7e-11`` for ``dm >= 4.7``).  The per-sample default is
+        ``<= 2.5e-7`` off the same reference except in the narrow band where
+        the taper leaves its floor (``s`` about 0.0076-0.0095, ``m1`` within
+        0.1 Msun of the edge for a 10 Msun taper), where its 32-node rule
+        misses the kink and is up to 1.7e-3 off: there the two options differ
+        by the default's error.  Above the shoulder they agree to rounding.
+
+        The table integrates the REDUCED kernel
+        ``p_unnorm(m2/m_edge | m_edge) = (m2/m_edge)**beta K(m2)`` and adds
+        ``log(dm) + beta log(m_edge)`` back as a scalar, so no tabulated value
+        leaves float32's normal range when the per-sample dtype is float32.
+        The kernel is evaluated in the per-sample dtype (its floor depends on
+        it, and ``N`` must normalise the same kernel the density uses); the
+        cell sums, cumulative sum and Hermite coefficients are float64.
+
+        The density is ``p exp(-log N)`` with half the taper's dynamic range
+        moved onto ``p``: in the taper toe ``p`` and ``N`` both sit near the
+        taper floor ``exp(-cap)``, ``N`` can be a further 1e-6 below it, and in
+        float32 ``exp(-log N)`` alone overflows.  There is no per-sample
+        division by ``N``, so a taper-toe row never squares a tiny normaliser
+        in a backward pass (the reason the per-sample rule factors out a
+        scale).  Both regimes are evaluated for every sample (they are
+        selects), so each is kept finite on every input.
+        """
+        kdt = jnp.result_type(m1)
+        adt = jnp.float64
+        tab = get_pairing_taper_table(np.dtype(kdt).name)
+        m_edge, m_sh = self._taper_shoulder(m_min, dm_min, theta)
+        m_edge = _match_dtype(jnp.asarray(m_edge), m1)
+        m_sh = _match_dtype(jnp.asarray(m_sh), m1)
+        beta = _match_dtype(jnp.asarray(beta), m1)
+        dm = m_sh - m_edge
+        # dm == 0 is in the GWTC-5 prior (delta_m2 in [0, 10]): the window is
+        # empty and every m1 > m_edge takes the plateau branch.  The table is
+        # still built (on a unit window, finite and unused) so that nothing in
+        # the unselected branch is NaN.
+        safe_dm = jnp.where(dm > 0, dm, 1.0)
+        safe_edge = jnp.where(m_edge > 0, m_edge, 1.0)
+
+        def kern(u, width=safe_dm):
+            # Reduced kernel at m2 = m_edge + u dm: (m2/m_edge)**beta K(m2).
+            m2 = m_edge + u * width
+            return self._eval_unnorm(jnp.broadcast_to(safe_edge, jnp.shape(m2)),
+                                     m2 / safe_edge, m_min, dm_min, theta)
+
+        def node_data(s_n, r_n):
+            # log R and its first two lambda-derivatives at nodes s_n, where
+            # dR/dlambda = s kern(s).
+            u_n = _match_dtype(s_n, m1)
+            k_n, kp_n = jax.jvp(kern, (u_n,), (jnp.ones_like(u_n),))
+            k_n, kp_n = k_n.astype(adt), kp_n.astype(adt)
+            y1 = s_n * k_n / r_n
+            return jnp.log(r_n), y1, y1 + s_n * s_n * kp_n / r_n - y1 * y1
+
+        def hermite(lam_n, y, y1, y2):
+            # Quintic Hermite coefficients of each cell, in t = (lambda - lam_i)/h.
+            h = lam_n[1:] - lam_n[:-1]
+            d0, d1 = y1[:-1] * h, y1[1:] * h
+            a0, a1 = y2[:-1] * h * h, y2[1:] * h * h
+            dy = y[1:] - y[:-1]
+            return (y[:-1], d0, 0.5 * a0,
+                    10.0 * dy - 6.0 * d0 - 4.0 * d1 - 1.5 * a0 + 0.5 * a1,
+                    -15.0 * dy + 8.0 * d0 + 7.0 * d1 + 1.5 * a0 - a1,
+                    6.0 * dy - 3.0 * d0 - 3.0 * d1 - 0.5 * a0 + 0.5 * a1)
+
+        # ---- per likelihood point -------------------------------------------
+        # Whole window with the per-sample rule's nodes (m2-space form), on the
+        # raw width like the per-sample rule's own panel.  At dm == 0 (an edge
+        # of the GWTC-5 prior) the one-sided dN/d(dm) is then 0 in units of
+        # m1**(-1-beta) m_edge**beta (window +1, plateau -1); the per-sample
+        # rule's is 0 or -1 per sample, depending on how q_cut * m1 rounds,
+        # and the exact one is -1/2, the taper averaging to 1/2 over the
+        # vanishing window (tests/test_pairing_per_point.py).  Inside the
+        # prior the two agree.
+        t_p, w_p = get_pairing_panel_quadrature()
+        t_p, w_p = _match_dtype(t_p, m1), _match_dtype(w_p, m1)
+        g_full = dm * jnp.sum(w_p * kern(t_p, dm))
+        log_edge = jnp.log(safe_edge)
+        # Reduced cumulative integral R(s) = int_0^s kern(u) du.
+        # Floor segment: the taper sits on its floor K_f there, so the reduced
+        # kernel is K_f (1 + x)**beta with x = s dm/m_edge and R and its
+        # derivatives are closed form.  Evaluating the kernel instead fails at
+        # the low end of the segment, where m_edge + s dm rounds to m_edge
+        # (s dm below one ulp of m_edge) and the kernel is exactly zero.
+        u_mid = 0.5 * float(np.exp(tab.lam_mid))
+        ratio = (safe_dm / safe_edge).astype(adt)
+        k_mid = kern(_match_dtype(jnp.asarray(u_mid), m1)).astype(adt)
+        beta_a = beta.astype(adt)
+        log_kf = (jnp.log(jnp.where(k_mid > 0, k_mid, 1.0))
+                  - beta_a * jnp.log1p(u_mid * ratio))
+        x = jnp.exp(tab.lam_floor) * ratio
+        l1 = jnp.log1p(x)
+        small_x = x < 1e-6
+        l1x = jnp.where(small_x, 1.0 - 0.5 * x + x * x / 3.0, l1 / jnp.where(small_x, 1.0, x))
+        z = (beta_a + 1.0) * l1                       # (1 + x)**(beta+1) = exp(z)
+        small_z = jnp.abs(z) < 1e-6
+        e_z = jnp.where(small_z, 1.0 + 0.5 * z + z * z / 6.0,
+                        jnp.expm1(z) / jnp.where(small_z, 1.0, z))
+        # R = K_f s l1x e_z (the beta = -1 limit is e_z = 1, R = K_f log1p(x)/r).
+        y_f = log_kf + tab.lam_floor + jnp.log(l1x) + jnp.log(e_z)
+        y1_f = jnp.exp(beta_a * l1) / (l1x * e_z)     # s kern / R
+        y2_f = y1_f * (1.0 + beta_a * x / (1.0 + x)) - y1_f * y1_f
+        coef_f = hermite(tab.lam_floor, y_f, y1_f, y2_f)
+        # Band and main: cumulative cell integrals from the first band node.
+        s_u = jnp.exp(tab.lam_upper)
+        a, b = s_u[:-1], s_u[1:]
+        u_cells = a[:, None] + tab.t * (b - a)[:, None]
+        cell = jnp.sum(tab.w * kern(_match_dtype(u_cells, m1)).astype(adt), axis=-1) * (b - a)
+        r0 = s_u[0] * jnp.sum(tab.w * kern(_match_dtype(s_u[0] * tab.t, m1)).astype(adt))
+        r_u = jnp.concatenate([r0[None], r0 + jnp.cumsum(cell)])
+        y_u, y1_u, y2_u = node_data(s_u[:-1], r_u[:-1])
+        # The last node is the shoulder itself, where the taper is identically
+        # one with every derivative zero, so the kernel there is the bare
+        # (m_shoulder/m_edge)**beta.  It is set in closed form rather than
+        # evaluated: at m2 == m_shoulder up to rounding, sfilter_low can see
+        # m2 - m_min - dm round to exactly 0.0 while m2 < m_min + dm, and then
+        # returns its floor (measured: under jit the last-cell log N was
+        # 3.9e-3 off at beta = 0.22, m_min = 4.90, dm_min = 8.77).
+        m_top = m_edge + safe_dm
+        k_top = jnp.exp(beta * jnp.log(m_top / safe_edge)).astype(adt)
+        kp_top = (beta * safe_dm / m_top).astype(adt) * k_top
+        r_top = r_u[-1]
+        y1_top = k_top / r_top
+        y_u = jnp.concatenate([y_u, jnp.log(r_top)[None]])
+        y1_u = jnp.concatenate([y1_u, y1_top[None]])
+        y2_u = jnp.concatenate([y2_u, (y1_top + kp_top / r_top - y1_top * y1_top)[None]])
+        coef_u = hermite(tab.lam_upper, y_u, y1_u, y2_u)
+        # One flat table, coefficient k of cell i at k * n_cells + i: one
+        # gather operand instead of six (measured on CPU: the six-table form
+        # gathers 5x slower).
+        coef = jnp.concatenate([jnp.concatenate([cf, cu]) for cf, cu in zip(coef_f, coef_u)])
+        coef = _match_dtype(coef, m1)
+        n_cells = sum(tab.counts)
+        log_scale = jnp.log(safe_dm) + beta * log_edge         # G = dm m_edge**beta R
+
+        # ---- per sample -------------------------------------------------------
+        safe_m1 = jnp.where(m1 > 0.0, m1, 1.0)
+        log_m1 = jnp.log(safe_m1)
+        _, q_a, _ = self._panel_boundaries(m1, m_min, dm_min, theta)
+        # Above the shoulder: whole-window scalar plus the closed-form plateau.
+        n_hi = (jnp.exp(beta * log_edge - (beta + 1.0) * log_m1) * g_full
+                + self._plateau_integral(m1, q_a, m_min, dm_min, theta)[0])
+        in_hi = m1 >= m_sh
+        # Inside the window: the table.  Below its first node (s < 4e-18) the
+        # floor segment continues with slope one, i.e. G proportional to s.
+        s = (m1 - m_edge) / safe_dm
+        live = s > 0.0
+        lam = jnp.log(jnp.clip(jnp.where(live, s, 1.0), None, 1.0))
+        lam_e = jnp.maximum(lam, tab.origins[0])
+        in_floor = lam_e < tab.lam_mid
+        in_band = (~in_floor) & (lam_e < tab.lam_split)
+        pick = lambda f, bd, mn: jnp.where(in_floor, f, jnp.where(in_band, bd, mn))  # noqa: E731
+        o, h, n = tab.origins, tab.widths, tab.counts
+        u = (lam_e - pick(*o)) * pick(*(1.0 / hh for hh in h))
+        k = jnp.clip(jnp.floor(u), 0.0, pick(*(nn - 1.0 for nn in n)))
+        tt = u - k
+        cell_ix = (k + pick(0.0, float(n[0]), float(n[0] + n[1]))).astype(jnp.int32)
+        c0, c1, c2, c3, c4, c5 = (coef[cell_ix + j * n_cells] for j in range(6))
+        log_r = c0 + tt * (c1 + tt * (c2 + tt * (c3 + tt * (c4 + tt * c5))))
+        log_n = log_r + (lam - lam_e) + log_scale - (beta + 1.0) * log_m1
+        half = 0.5 * sfilter_low_cap(kdt)
+        log_n = jnp.where(in_hi, jnp.log(jnp.where(n_hi > 0, n_hi, 1.0)), log_n)
+        dens = (p * float(np.exp(half))) * jnp.exp(-(log_n + half))
+        # N > 0 exactly when m1 > m_edge, in both regimes (above the shoulder
+        # with an empty window, m1 == m_edge is the only zero of n_hi).
+        return jnp.where(live, dens, 0.0)
+
     def __call__(self, m1, q, m_min, dm_min, theta):
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
         # SUPPORT MASK.  Every normaliser below integrates over (q_cut, 1] --
@@ -603,6 +832,15 @@ class PairingModel(ABC):
         # interpolates it per sample.
         settings = normalization_grid_settings()
         n_grid = settings.pairing_m1_grid
+        # OPT-IN per-point normaliser (static branch, like the two above): the
+        # taper is integrated once per likelihood point and every sample is
+        # closed form or a table lookup (_per_point_density).  A model that
+        # does not declare the structure it needs keeps the per-sample rule.
+        beta_pp = (self._kernel_power(theta)
+                   if settings.pairing_norm == "per_point" else None)
+        if beta_pp is not None:
+            dens = self._per_point_density(p, m1, m_min, dm_min, theta, beta_pp)
+            return jnp.where(in_support, dens, 0.0)
         if n_grid is None:
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.

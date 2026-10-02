@@ -4,6 +4,7 @@ import math
 import os
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -126,6 +127,43 @@ PAIRING_PANEL_NQ: int = 32
 #: change bit for bit, or to resume its checkpoint.
 PAIRING_SCALES = ("node_max", "analytic")
 
+#: Where the pairing normaliser is integrated (see ``PairingModel.__call__``):
+#: ``"per_sample"`` (default) runs the q-quadrature for every PE sample and
+#: injection; ``"per_point"`` (opt-in) integrates the low-mass taper once per
+#: likelihood point and evaluates each sample in closed form or from a small
+#: per-point table (``PairingModel._per_point_log_norm``).  Only pairings that
+#: declare the ``q**beta`` times secondary-mass-taper structure
+#: (``PairingModel._kernel_power``) take ``"per_point"``; every other pairing
+#: keeps the per-sample quadrature.
+PAIRING_NORMS = ("per_sample", "per_point")
+
+# Grid of the per-point taper table (``pairing_norm="per_point"``), in
+# lambda = log s, s = (m1 - m_edge)/(m_shoulder - m_edge) the primary mass's
+# position inside the secondary-mass taper window.  Three segments of
+# equal-width cells:
+#
+# * FLOOR: lambda in [PAIRING_TAPER_FLOOR_LAMBDA, lambda_cap), where
+#   ``sfilter_low`` sits on its floor 1/(exp(cap) + 1) and the integrand is a
+#   smooth power law (cells of width about PAIRING_TAPER_FLOOR_H).  Below the
+#   segment the table is continued with slope one, which is exact to O(s).
+# * BAND: PAIRING_TAPER_BAND_N cells of width PAIRING_TAPER_BAND_H just above
+#   lambda_cap, where the taper turns on (width in lambda about 1/cap).
+# * MAIN: the rest, up to the shoulder s = 1, in PAIRING_TAPER_MAIN_N cells.
+#
+# lambda_cap (``sfilter_low_floor_fraction``) is a kink of the integrand; it is
+# the shared edge of the first two segments, so no cell straddles it.  Each
+# cell's integral takes PAIRING_TAPER_CELL_NQ Gauss-Legendre nodes, and log of
+# the cumulative integral is interpolated by quintic Hermite with exact first
+# and second derivatives at the nodes.  Like PAIRING_PANEL_NQ these are module
+# constants, not settings: the rule is calibrated as a whole (see
+# PairingModel._per_point_density for the measured accuracy).
+PAIRING_TAPER_FLOOR_LAMBDA: float = -40.0
+PAIRING_TAPER_FLOOR_H: float = 0.1
+PAIRING_TAPER_BAND_N: int = 300
+PAIRING_TAPER_BAND_H: float = 1.0e-3
+PAIRING_TAPER_MAIN_N: int = 480
+PAIRING_TAPER_CELL_NQ: int = 8
+
 
 @dataclass(frozen=True)
 class NormalizationGridSettings:
@@ -199,6 +237,20 @@ class NormalizationGridSettings:
     model's support would silently bias the pairing normaliser inside the
     support; :func:`size_pairing_grid_to_support` /
     :func:`assert_pairing_grid_covers_support` keep it truthful.
+
+    ``pairing_norm`` (env ``DARKSIRENS_GW_PAIRING_NORM``) is ``"per_sample"``
+    (default) or the opt-in ``"per_point"``, which integrates the pairing's
+    secondary-mass taper once per likelihood point instead of once per sample
+    (``PairingModel._per_point_density``).  It is a different answer to the
+    question ``pairing_m1_grid`` answers, and the two are mutually exclusive.
+    The m1 grid interpolates ``log N`` on a STATIC log-m1 grid spanning
+    ``[m_lo, pairing_m_hi]``, so a sampled support edge cuts through its cells
+    and every sample still pays a per-sample Gauss-Legendre edge rule (it is a
+    select, evaluated for all rows).  ``"per_point"`` uses no static m1 grid:
+    above the taper shoulder ``N`` is algebraically the default's own rule
+    (one scalar per point plus the closed-form plateau), and inside the taper
+    window it reads a table in support-relative coordinates, so no cell ever
+    straddles the edge.  It needs no support sizing and no ``pairing_m_hi``.
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
@@ -208,6 +260,7 @@ class NormalizationGridSettings:
     pairing_edge_nq: int = _env_int("DARKSIRENS_GW_PAIRING_EDGE_NQ", 48)
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
+    pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "per_sample")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -246,6 +299,22 @@ class NormalizationGridSettings:
                 f"pairing_scale must be one of {PAIRING_SCALES}, got "
                 f"{self.pairing_scale!r} (env DARKSIRENS_GW_PAIRING_SCALE)"
             )
+        if self.pairing_norm not in PAIRING_NORMS:
+            raise ValueError(
+                f"pairing_norm must be one of {PAIRING_NORMS}, got "
+                f"{self.pairing_norm!r} (env DARKSIRENS_GW_PAIRING_NORM)"
+            )
+        # The two opt-ins answer the same question differently: the m1 grid
+        # interpolates the per-sample normaliser from static nodes, "per_point"
+        # replaces the per-sample quadrature it approximates.  Refuse the pair
+        # rather than let one silently override the other.
+        if self.pairing_norm == "per_point" and self.pairing_m1_grid is not None:
+            raise ValueError(
+                "pairing_norm='per_point' and pairing_m1_grid are mutually "
+                "exclusive: set pairing_m1_grid=None (env "
+                "DARKSIRENS_GW_PAIRING_M1_GRID=none) to use the per-point "
+                "normaliser, or pairing_norm='per_sample' to use the m1 grid"
+            )
         pt = float(self.pairing_edge_tol)
         if not pt > 0.0:
             raise ValueError(f"pairing_edge_tol must be > 0, got {pt}")
@@ -278,6 +347,12 @@ class NormalizationGridSettings:
         # refused as a settings change (set "node_max" to resume it).
         if out["pairing_scale"] == "node_max":
             del out["pairing_scale"]
+        # "per_sample" is the default and every run before the per-point
+        # option existed used it: leave it out so their fingerprints keep
+        # matching.  A "per_point" run records it, so its checkpoint is not
+        # resumed under the per-sample normaliser, or the reverse.
+        if out["pairing_norm"] == "per_sample":
+            del out["pairing_norm"]
         return out
 
 
@@ -303,6 +378,7 @@ def configure_normalization_grids(
     pairing_edge_nq: int | None = None,
     pairing_edge_tol: float | None = None,
     pairing_scale: str | None = None,
+    pairing_norm: str | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -314,8 +390,10 @@ def configure_normalization_grids(
     grid's upper bound (see :func:`size_pairing_grid_to_support`); callers
     should normally use that helper rather than setting the bound directly.
     ``pairing_scale`` is ``"analytic"`` (default) or ``"node_max"``; see
-    :data:`PAIRING_SCALES`. Like every setting here it is read when a
-    likelihood is traced, so configure it before binding the analysis.
+    :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"per_sample"`` (default) or
+    ``"per_point"``; see :data:`PAIRING_NORMS`. Like every setting here they
+    are read when a likelihood is traced, so configure them before binding the
+    analysis.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
@@ -325,7 +403,8 @@ def configure_normalization_grids(
                         "pairing_m_hi": pairing_m_hi,
                         "pairing_edge_nq": pairing_edge_nq,
                         "pairing_edge_tol": pairing_edge_tol,
-                        "pairing_scale": pairing_scale}.items():
+                        "pairing_scale": pairing_scale,
+                        "pairing_norm": pairing_norm}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:
@@ -590,6 +669,78 @@ def get_pairing_edge_quadrature():
     """
     s = normalization_grid_settings()
     return _gauss_legendre_01(s.pairing_edge_nq)
+
+
+def sfilter_low_cap(dtype) -> float:
+    """The exponent cap of :func:`sfilter_low` in ``dtype`` (see ``_sfilter_expo_cap``)."""
+    return min(130.0, 0.9 * math.log(float(np.finfo(np.dtype(dtype)).max)))
+
+
+def sfilter_low_floor_fraction(dtype) -> float:
+    r"""Window fraction below which :func:`sfilter_low` sits on its floor.
+
+    ``sfilter_low(m_min + u dm, m_min, dm)`` is ``1/(exp(e(u)) + 1)`` with
+    ``e(u) = 1/u - 1/(1 - u)`` clipped to the dtype's cap (see
+    ``_sfilter_expo_cap``), so for ``0 < u < u_cap`` it is the constant
+    ``1/(exp(cap) + 1)``.  ``u_cap`` solves ``e(u) = cap`` and depends on the
+    dtype only (130 in float64, about 79.85 in float32), never on the taper
+    parameters.
+    """
+    cap = sfilter_low_cap(dtype)
+    return 2.0 / ((cap + 2.0) + math.sqrt(cap * cap + 4.0))
+
+
+class PairingTaperTable(NamedTuple):
+    """Static grid of the per-point taper table; see :func:`get_pairing_taper_table`."""
+
+    lam_floor: jnp.ndarray   # floor-segment nodes, lam_min .. lam_c (float64)
+    lam_upper: jnp.ndarray   # band + main nodes, lam0 .. 0 (float64)
+    origins: tuple           # first node of each segment (floor, band, main)
+    widths: tuple            # cell width of each segment
+    counts: tuple            # cell count of each segment
+    lam_mid: float           # floor/band boundary used per sample
+    lam_split: float         # band/main boundary
+    t: jnp.ndarray           # per-cell Gauss-Legendre nodes on (0, 1)
+    w: jnp.ndarray           # and weights
+
+
+@lru_cache(maxsize=4)
+def get_pairing_taper_table(dtype_name: str) -> PairingTaperTable:
+    """Static grid of the per-point pairing taper table (``pairing_norm="per_point"``).
+
+    Nodes in ``lambda = log s`` (see the ``PAIRING_TAPER_*`` constants).  The
+    floor segment ends a relative ``sqrt(eps)`` BELOW the floor point
+    :func:`sfilter_low_floor_fraction` of the per-sample dtype and the band
+    starts the same distance above it, so every node is strictly on one side of
+    the taper's kink and the derivatives the table stores there are the
+    one-sided ones of that side.  The grid depends on the dtype only: it is a
+    compile-time constant, so a proposal never retraces on it.
+    """
+    dt = np.dtype(dtype_name)
+    lam_cap = math.log(sfilter_low_floor_fraction(dt))
+    margin = math.sqrt(float(np.finfo(dt).eps))
+    lam_c, lam0 = lam_cap - margin, lam_cap + margin
+    lam_min = PAIRING_TAPER_FLOOR_LAMBDA
+    n_floor = int(math.ceil((lam_c - lam_min) / PAIRING_TAPER_FLOOR_H))
+    h_floor = (lam_c - lam_min) / n_floor
+    lam_split = lam0 + PAIRING_TAPER_BAND_N * PAIRING_TAPER_BAND_H
+    h_main = -lam_split / PAIRING_TAPER_MAIN_N
+    lam_floor = lam_min + h_floor * np.arange(n_floor + 1)
+    lam_floor[-1] = lam_c
+    lam_upper = np.concatenate([
+        lam0 + PAIRING_TAPER_BAND_H * np.arange(PAIRING_TAPER_BAND_N + 1),
+        lam_split + h_main * np.arange(1, PAIRING_TAPER_MAIN_N + 1),
+    ])
+    lam_upper[-1] = 0.0
+    t, w = _gauss_legendre_01(PAIRING_TAPER_CELL_NQ)
+    with ensure_compile_time_eval():
+        return PairingTaperTable(
+            lam_floor=jnp.asarray(lam_floor, dtype=jnp.float64),
+            lam_upper=jnp.asarray(lam_upper, dtype=jnp.float64),
+            origins=(lam_min, lam0, lam_split),
+            widths=(h_floor, PAIRING_TAPER_BAND_H, h_main),
+            counts=(n_floor, PAIRING_TAPER_BAND_N, PAIRING_TAPER_MAIN_N),
+            lam_mid=lam_cap, lam_split=lam_split, t=t, w=w)
 
 
 # Backward-compatible aliases.  They reflect import-time/default settings;

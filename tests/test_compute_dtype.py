@@ -376,6 +376,35 @@ def test_float32_composes_with_both_pairing_scales():
     assert max(abs(a - n) for a, n in zip(an, nm)) < TOL
 
 
+@contextlib.contextmanager
+def _pairing_norm(norm):
+    """Set where the pairing normaliser is integrated, restoring the default."""
+    before = normalization_grid_settings().pairing_norm
+    configure_normalization_grids(pairing_norm=norm)
+    try:
+        yield
+    finally:
+        configure_normalization_grids(pairing_norm=before)
+
+
+@pytest.mark.parametrize("kind", ["spectral", "dark"])
+def test_float32_composes_with_the_per_point_pairing_normaliser(kind):
+    # pairing_norm="per_point" builds its taper table from the float32 kernel
+    # (the taper's floor depends on the dtype) and accumulates it in float64;
+    # the per-sample lookups stay float32. Against the float64 per-point
+    # likelihood the shift is the ordinary float32 one.
+    with _pairing_norm("per_point"):
+        b64 = _bind(kind)
+        b32 = _bind(kind, compute_dtype="float32")
+        diffs = []
+        for t in _near_map_thetas(b64):
+            want, got = float(b64(jnp.asarray(t))), float(b32(jnp.asarray(t)))
+            assert np.isfinite(want) and np.isfinite(got), (t, want, got)
+            diffs.append(abs(got - want))
+        assert max(diffs) < TOL, diffs
+        _check_per_sample_dtypes(kind)
+
+
 def _walk(jaxpr, visit):
     for eqn in jaxpr.eqns:
         visit(eqn)
