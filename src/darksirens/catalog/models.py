@@ -133,7 +133,8 @@ def assemble_incomplete_catalog_prior_state(
     states from it (for example one per missing-host curve of a member
     ensemble): the finite-depth observed count, the row normaliser
     ``N_obs + N_miss`` and the poison of a failed pin probe (``pin_ok``
-    ``False``) or galaxy list.  ``pin_ok`` is ``None`` without a pin.
+    ``False``), galaxy list or kernel window.  ``pin_ok`` is ``None`` without
+    a pin.
     """
 
     Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
@@ -147,6 +148,10 @@ def assemble_incomplete_catalog_prior_state(
         # A galaxy list that is not this catalog's real galaxies: the same
         # poison as a failed pin probe (opt-in kernel_layout="galaxy_list").
         log_Z = log_Z + jnp.where(kernels.layout_ok, 0.0, jnp.nan)
+    if getattr(kernels, "window_ok", None) is not None:
+        # A kernel window that does not hold for this catalog at this
+        # sigma_kde (opt-in kernel_window): the same poison.
+        log_Z = log_Z + jnp.where(kernels.window_ok, 0.0, jnp.nan)
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_Nobs,
@@ -281,7 +286,10 @@ def eval_complete_catalog_prior_state(
 
     ``"zero"`` is the default: under the complete-catalog assumption a
     galaxy-free row has no hosts. ``"volume"`` re-admits the normalized
-    dV_c/dz prior there and is an opt-in robustness approximation.
+    dV_c/dz prior there and is an opt-in robustness approximation.  A kernel
+    window that does not hold (``state.kernels.window_ok`` ``False``, opt-in
+    ``kernel_window``) makes every value NaN, which the sample weights turn
+    into a ``-inf`` likelihood.
     """
 
     if empty_policy not in ("zero", "volume"):
@@ -295,7 +303,10 @@ def eval_complete_catalog_prior_state(
         empty_value = log_interp_zgrid(z, state.log_pvol)
     else:
         empty_value = -jnp.inf
-    return jnp.where(state.row_has[row], log_p_cat, empty_value)
+    out = jnp.where(state.row_has[row], log_p_cat, empty_value)
+    if getattr(state.kernels, "window_ok", None) is not None:
+        out = out + jnp.where(state.kernels.window_ok, 0.0, jnp.nan)
+    return out
 
 
 def eval_complete_catalog_prior_state_vmap(

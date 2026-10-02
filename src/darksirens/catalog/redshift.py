@@ -86,6 +86,11 @@ class CatalogKernelState(NamedTuple):
     traced verdict that the list is exactly the catalog's real galaxies,
     which the incomplete-catalog prior spends on its normaliser (a stale list
     makes the likelihood ``-inf``, never a finite wrong value).
+
+    ``window_ok`` is ``None`` except on a state built from a catalog that
+    carries a kernel window (:func:`with_kernel_window`) shorter than its
+    rows: there it is the traced verdict of :func:`kernel_window_ok` at this
+    proposal's ``sigma_kde``, which the catalog priors spend the same way.
     """
 
     log_g_grid: Any
@@ -99,6 +104,7 @@ class CatalogKernelState(NamedTuple):
     log_kw_eff_rowmax: Any
     inv_sig_eff: Any
     layout_ok: Any = None
+    window_ok: Any = None
 
 
 def log_galaxy_measure_grid(
@@ -516,7 +522,9 @@ def build_catalog_kernel_state(
     A catalog that carries a galaxy list (:func:`with_galaxy_index`) has its
     per-galaxy normaliser evaluated on the real galaxies only (the opt-in
     ``kernel_layout="galaxy_list"``); every other step, and the state
-    returned, is the padded one.
+    returned, is the padded one.  A catalog that carries a kernel window
+    (:func:`with_kernel_window`) also gets the window's traced verdict
+    (``window_ok``).
     """
 
     log_g_grid = log_galaxy_measure_grid(cosmo, params)
@@ -570,6 +578,7 @@ def build_catalog_kernel_state(
         log_kw_eff_rowmax=_log_kw_eff_rowmax(log_kw_eff),
         inv_sig_eff=_inv_sig_eff(log_kw_eff, sig_eff),
         layout_ok=layout_ok,
+        window_ok=_state_window_ok(catalog, params),
     )
 
 
@@ -986,8 +995,339 @@ def pinned_catalog_kernel_state(
         log_kw_eff=pinned.log_kw_eff + shift,
         log_kw_eff_rowmax=pinned.log_kw_eff_rowmax + shift,
         inv_sig_eff=pinned.inv_sig_eff,
+        window_ok=_state_window_ok(catalog, params),
     )
     return state, ok
+
+
+# ------------------------------------------------------------------------
+# Opt-in redshift window of the per-sample kernel sum
+# ------------------------------------------------------------------------
+#: Relative margin of a window's stored half-width over ``k_r sigma_max,r``.
+#: It covers the rounding of the window's boundary comparisons and, under
+#: ``compute_dtype="float32"``, of the float32 redshifts and widths the sum
+#: then reads (a relative change of at most ~4e-4 in ``u``).
+_WINDOW_WIDTH_MARGIN: float = 2.0e-3
+
+#: The margin the traced check demands (half the stored one), so the host
+#: construction and the traced check never disagree by a rounding.
+_WINDOW_CHECK_MARGIN: float = 1.0e-3
+
+#: Absolute redshift slack added to every interval the window must span.
+_WINDOW_Z_SLACK: float = 1.0e-12
+
+
+class CatalogKernelWindow(NamedTuple):
+    """The opt-in redshift window of the per-sample catalog kernel sum.
+
+    ``half_width`` is the ``(N_rows,)`` array of half-widths ``K_r`` (zero
+    on an empty row), ``size`` the static window length ``W`` (the slots each
+    sample sums), ``tolerance`` the tolerance ``eps`` it was sized for, and
+    ``sigma_kde`` the largest ``|sigma_kde|`` it covers.  Built on the host
+    by :func:`kernel_window`, where the bound is stated and proved.
+    ``half_width`` is the only pytree leaf; ``size``, ``tolerance`` and
+    ``sigma_kde`` are static (``size`` sets the shape of the traced program)
+    and compare by value, so a window of another size retraces.
+    """
+
+    half_width: Any
+    size: int
+    tolerance: float
+    sigma_kde: float
+
+
+def _flatten_window_with_keys(window):
+    return ((jax.tree_util.GetAttrKey("half_width"), window.half_width),), (
+        window.size,
+        window.tolerance,
+        window.sigma_kde,
+    )
+
+
+def _flatten_window(window):
+    return (window.half_width,), (window.size, window.tolerance, window.sigma_kde)
+
+
+def _unflatten_window(aux, children):
+    return CatalogKernelWindow(children[0], *aux)
+
+
+jax.tree_util.register_pytree_with_keys(
+    CatalogKernelWindow, _flatten_window_with_keys, _unflatten_window, _flatten_window
+)
+
+
+def _window_k(ngals, tolerance, xp=np):
+    """``k_r = sqrt(2 ln(max(n_r, 1) / eps))``, the half-width in units of ``sigma_max,r``."""
+
+    n = xp.maximum(xp.asarray(ngals).astype(xp.float64), 1.0)
+    return xp.sqrt(2.0 * xp.log(n / tolerance))
+
+
+def _rows_sorted(z, ngals, xp=np):
+    """Whether every row's real prefix is non-decreasing in redshift."""
+
+    n_max = z.shape[1]
+    if n_max < 2:
+        return xp.asarray(True)
+    later_real = xp.arange(1, n_max)[None, :] < xp.asarray(ngals)[:, None]
+    return xp.all((z[:, 1:] >= z[:, :-1]) | ~later_real)
+
+
+def kernel_window(
+    catalog: GalaxyCatalog,
+    tolerance: float,
+    sigma_kde: float,
+) -> CatalogKernelWindow:
+    """Size the redshift window of the per-sample kernel sum (host side, NumPy).
+
+    The per-sample sum (:func:`eval_log_catalog_prior_state`) is, in units of
+    the row's largest single-galaxy peak term ``exp(m_r)``,
+
+        s(z) = sum_i a_i exp(-(z - z_i)**2 / (2 sigma_i**2)),
+        a_i = exp(log_kw_eff_i - m_r) <= 1,
+
+    with ``sigma_i = max(sqrt(dz_i**2 + sigma_kde**2), 1e-4)``.  For a row of
+    ``n_r`` real galaxies, sorted by redshift, take
+
+        sigma_max,r = max_i sigma_i,  k_r = sqrt(2 ln(max(n_r, 1) / eps)),
+        K_r = k_r sigma_max,r (1 + 2e-3),
+
+    and let ``W`` be the largest number of a row's galaxies in any closed
+    redshift interval of length ``2 K_r`` (plus a 1e-12 slack), over all rows.
+    For a sample at ``z`` the evaluator sums ``W`` consecutive slots of the
+    row that contain every real galaxy with ``|z - z_i| <= K_r``: those
+    galaxies are consecutive in the sorted row and at most ``W`` of them, so
+    such slots exist; of the admissible starts it takes the one that centres
+    the slots on ``z`` (the spare slots go to the nearest galaxies on both
+    sides; three fixed-step binary searches find it).
+
+    Bound.  Every omitted galaxy has ``|z - z_i| > K_r >= k_r sigma_i``, so
+    its term is at most ``a_i exp(-k_r**2 / 2) <= exp(-k_r**2 / 2)``; at most
+    ``n_r`` are omitted, so
+
+        0 <= s_full(z) - s_window(z) <= n_r exp(-k_r**2 / 2) = eps
+
+    for every ``z``, every row (ragged, empty, clustered, with outliers) and
+    any spread of per-galaxy widths.  The bound is relative to the row's
+    largest single-galaxy peak term, not to ``s(z)``: where ``s(z)`` is far
+    below that peak (between well-separated galaxies) the relative error of
+    the sum can exceed ``eps``, and no window shorter than the row can bound
+    it there (the omitted galaxies may be the dominant ones).  It holds for
+    every ``sigma_kde`` with ``|sigma_kde|`` at most the one given here,
+    since each ``sigma_i`` grows with ``|sigma_kde|``: a sampled
+    ``sigma_kde`` is covered by sizing the window at its prior's upper edge.
+
+    Requires concrete arrays and rows sorted by redshift over the real
+    prefix (the default of :func:`darksirens.catalog.io.load_catalog`);
+    raises ``ValueError`` otherwise.  ``size`` is at least 1 and at most
+    ``N_max``; a window as long as the rows sums every slot (the default
+    evaluator).
+    """
+
+    if any(
+        isinstance(leaf, jax.core.Tracer)
+        for leaf in jax.tree_util.tree_leaves(
+            (catalog.zgals, catalog.dzgals, catalog.ngals)
+        )
+    ):
+        raise TypeError(
+            "kernel_window reads the catalog on the host: build it outside any jit or trace"
+        )
+    eps = float(tolerance)
+    if not (np.isfinite(eps) and 0.0 < eps < 1.0):
+        raise ValueError(f"the kernel window tolerance must be in (0, 1), got {tolerance!r}")
+    sigma = abs(float(sigma_kde))
+    if not np.isfinite(sigma):
+        raise ValueError(f"the kernel window sigma_kde must be finite, got {sigma_kde!r}")
+    z = np.asarray(catalog.zgals, dtype=np.float64)
+    dz = np.asarray(catalog.dzgals, dtype=np.float64)
+    ngals = np.asarray(catalog.ngals).astype(np.int64)
+    if z.ndim != 2 or dz.shape != z.shape:
+        raise ValueError("zgals and dzgals must be (N_rows, N_max)")
+    n_rows, n_max = z.shape
+    if ngals.shape != (n_rows,) or np.any(ngals < 0) or np.any(ngals > n_max):
+        raise ValueError("ngals must be (N_rows,) counts in [0, N_max]")
+    real = np.arange(n_max)[None, :] < ngals[:, None]
+    if not bool(np.all(np.isfinite(z[real]))):
+        raise ValueError("the kernel window needs finite real-galaxy redshifts")
+    if not bool(_rows_sorted(z, ngals)):
+        raise ValueError(
+            "the kernel window needs each row's galaxies sorted by redshift: load the "
+            "catalog with sort_rows_by_z=True (the default of load_catalog)"
+        )
+    sig = np.where(
+        real, np.maximum(np.sqrt(dz**2 + sigma**2), SIGMA_EFF_FLOOR), 0.0
+    )
+    sig_max = sig.max(axis=1) if n_max else np.zeros(n_rows)
+    half_width = _window_k(ngals, eps) * sig_max * (1.0 + _WINDOW_WIDTH_MARGIN)
+    half_width = np.where(ngals > 0, half_width, 0.0)
+    span = 2.0 * half_width * (1.0 + 1.0e-9) + 2.0 * _WINDOW_Z_SLACK
+    size = 1
+    for row in np.flatnonzero(ngals > 0):
+        zz = z[row, : ngals[row]]
+        upper = np.searchsorted(zz, zz + span[row], side="right")
+        size = max(size, int(np.max(upper - np.arange(zz.size))))
+    size = min(size, max(n_max, 1))
+    if isinstance(catalog.zgals, jax.Array):
+        half_width = jnp.asarray(half_width)
+    return CatalogKernelWindow(
+        half_width=half_width, size=int(size), tolerance=eps, sigma_kde=sigma
+    )
+
+
+def with_kernel_window(
+    catalog: GalaxyCatalog,
+    tolerance: float,
+    sigma_kde: float,
+) -> GalaxyCatalog:
+    """``catalog`` carrying its :class:`CatalogKernelWindow` (the window opt-in).
+
+    With the window attached, :func:`eval_log_catalog_prior_state` sums each
+    sample's kernel over the window's ``W`` slots rather than the whole row,
+    leaving out at most ``tolerance`` times the row's largest single-galaxy
+    peak term (:func:`kernel_window`), and every kernel state built from the
+    catalog carries the traced verdict :func:`kernel_window_ok`.  Attach it
+    to the final catalog view (after compaction), at the largest
+    ``|sigma_kde|`` the likelihood will be evaluated at; a window that does
+    not fit the catalog it is served with, or a larger ``sigma_kde``, makes
+    the catalog likelihood ``-inf``, never a finite wrong value.
+    """
+
+    return catalog._replace(kernel_window=kernel_window(catalog, tolerance, sigma_kde))
+
+
+def _window_active(catalog) -> bool:
+    """Whether ``catalog``'s window sums fewer slots than its rows hold (static)."""
+
+    window = getattr(catalog, "kernel_window", None)
+    return window is not None and int(window.size) < int(np.shape(catalog.zgals)[1])
+
+
+def kernel_window_ok(catalog: GalaxyCatalog, sigma_kde):
+    """Traced check that ``catalog``'s kernel window holds at ``sigma_kde``.
+
+    True when every row's real prefix is sorted by redshift, every ``W + 1``
+    consecutive real galaxies of a row span more than ``2 K_r`` (so no
+    interval of that length holds more than ``W``), and
+    ``K_r >= k_r sigma_max,r (1 + 1e-3)`` at this ``sigma_kde``: exactly the
+    premises of the bound in :func:`kernel_window`, read from the catalog
+    being evaluated.  ``O(N_rows N_max)`` elementwise work per call.
+    """
+
+    window = catalog.kernel_window
+    z = jnp.asarray(catalog.zgals)
+    dz = jnp.asarray(catalog.dzgals)
+    ngals = jnp.asarray(catalog.ngals)
+    n_rows, n_max = (int(n) for n in z.shape)
+    half_width = jnp.asarray(window.half_width)
+    if tuple(half_width.shape) != (n_rows,):
+        raise ValueError(
+            f"the kernel window has {tuple(half_width.shape)} half-widths for a catalog of "
+            f"{n_rows} rows: attach it with with_kernel_window to the catalog view it serves"
+        )
+    size = int(window.size)
+    real = jnp.arange(n_max)[None, :] < ngals[:, None]
+    sig = jnp.where(
+        real, jnp.maximum(jnp.sqrt(dz**2 + sigma_kde**2), SIGMA_EFF_FLOOR), 0.0
+    )
+    need = _window_k(ngals, window.tolerance, jnp) * jnp.max(sig, axis=1)
+    ok = jnp.all(half_width >= need * (1.0 + _WINDOW_CHECK_MARGIN))
+    ok = ok & _rows_sorted(z, ngals, jnp)
+    if size < n_max:
+        later_real = jnp.arange(size, n_max)[None, :] < ngals[:, None]
+        spans = z[:, size:] - z[:, :-size]
+        ok = ok & jnp.all(
+            (spans > 2.0 * half_width[:, None] + _WINDOW_Z_SLACK) | ~later_real
+        )
+    return ok
+
+
+def _state_window_ok(catalog, params):
+    """A kernel state's ``window_ok``: ``None`` unless the catalog's window is active."""
+
+    if not _window_active(catalog):
+        return None
+    return kernel_window_ok(catalog, params.sigma_kde)
+
+
+def _row_bound(zgals, row, n, target, *, upper: bool):
+    """``#{i < n : z_i < target}`` (``<=`` if ``upper``) on a sorted real prefix.
+
+    A binary search in a fixed number of steps, each reading one slot of the
+    row, so a sample never reads the whole row.
+    """
+
+    n_max = int(zgals.shape[1])
+    lo = jnp.zeros((), dtype=jnp.int32)
+    hi = n
+    for _ in range(max(n_max, 1).bit_length()):
+        mid = (lo + hi) // 2
+        zm = zgals[row, jnp.minimum(mid, n_max - 1)]
+        below = (zm <= target) if upper else (zm < target)
+        active = lo < hi
+        lo = jnp.where(active & below, mid + 1, lo)
+        hi = jnp.where(active & ~below, mid, hi)
+    return lo
+
+
+def _kernel_window_start(z, row, zgals, ngals, half_width, size: int):
+    """First slot of a sample's window: ``size`` slots covering ``[z - K, z + K]``.
+
+    With ``first = #{z_i < z - K}`` and ``last = #{z_i <= z + K}`` (real
+    galaxies; ``last - first <= size`` wherever the window holds), any start
+    in ``[last - size, first]`` covers every galaxy within ``K`` of ``z``.
+    The start is the one that centres the window on ``z`` in slot order,
+    clipped to that range, so the spare slots go to the nearest galaxies on
+    both sides.  The comparisons are in float64 whatever the sample's dtype.
+    """
+
+    z64 = jnp.asarray(z).astype(jnp.float64)
+    k = half_width[row]
+    n = jnp.asarray(ngals[row], dtype=jnp.int32)
+    first = _row_bound(zgals, row, n, z64 - k, upper=False)
+    last = _row_bound(zgals, row, n, z64 + k, upper=True)
+    centre = _row_bound(zgals, row, n, z64, upper=False)
+    start = jnp.minimum(jnp.maximum(centre - size // 2, last - size), first)
+    # Explicitly in [0, N_max - size]: lax.dynamic_slice reads a negative
+    # start from the end of the row, as Python indexing does.  Moving the
+    # start right to 0 keeps [first, last) inside (last <= size there), and
+    # moving it left to N_max - size does too (first <= N_max - size or the
+    # slots end at the row's last slot).
+    return jnp.clip(start, 0, max(int(zgals.shape[1]) - size, 0))
+
+
+def _window_slice(values, row, start, size: int):
+    """``values[row, start:start + size]``, the start moved left to fit the row."""
+
+    return lax.dynamic_slice(values, (row, start), (1, size))[0]
+
+
+def _eval_windowed(z, row, state: CatalogKernelState, catalog: GalaxyCatalog):
+    """:func:`eval_log_catalog_prior_state` over the catalog's kernel window."""
+
+    window = catalog.kernel_window
+    row = jnp.asarray(row, dtype=jnp.int32)
+    size = int(window.size)
+    start = _kernel_window_start(
+        z, row, catalog.zgals, catalog.ngals, jnp.asarray(window.half_width), size
+    )
+    zs = _window_slice(catalog.zgals, row, start, size)
+    u = (z - zs) * _window_slice(state.inv_sig_eff, row, start, size)
+    m = state.log_kw_eff_rowmax[row]
+    s = jnp.sum(
+        jnp.exp(_window_slice(state.log_kw_eff, row, start, size) - m - 0.5 * u * u)
+    )
+    log_mix = m + jnp.where(
+        s > 0.0,
+        jnp.log(jnp.where(s > 0.0, s, 1.0)),
+        -jnp.inf,
+    )
+    log_mix = jnp.where(state.row_empty[row], -jnp.inf, log_mix)
+    out = log_interp_zgrid(z, state.log_g_grid) + log_mix
+    if state.z_depth is not None:
+        out = jnp.where(z <= state.z_depth, out, -jnp.inf)
+    return out
 
 
 def eval_log_catalog_prior_state(
@@ -1003,8 +1343,14 @@ def eval_log_catalog_prior_state(
     reproduces the backend underflow edge: sufficiently remote Gaussian tails
     become exact zero and therefore return ``-inf``.  Phase-5 parity keeps that
     numerical contract instead of inventing a support threshold.
+
+    A catalog carrying a kernel window (:func:`with_kernel_window`) shorter
+    than its rows has the same sum taken over the window's slots only
+    (:func:`kernel_window` states what that leaves out).
     """
 
+    if _window_active(catalog):
+        return _eval_windowed(z, row, state, catalog)
     row = jnp.asarray(row, dtype=jnp.int32)
     zs = catalog.zgals[row]
     u = (z - zs) * state.inv_sig_eff[row]
@@ -1093,6 +1439,7 @@ def log_catalog_prior_vmap(
 
 __all__ = [
     "CatalogKernelState",
+    "CatalogKernelWindow",
     "KERNEL_PIN_DIGEST_SCHEME",
     "KERNEL_PIN_H0_REF",
     "KERNEL_PIN_PROBE_ROWS",
@@ -1106,9 +1453,12 @@ __all__ = [
     "eval_log_catalog_prior_state",
     "eval_log_catalog_prior_state_vmap",
     "galaxy_index",
+    "kernel_window",
+    "kernel_window_ok",
     "log_catalog_prior",
     "log_catalog_prior_vmap",
     "log_galaxy_measure_grid",
     "pinned_catalog_kernel_state",
     "with_galaxy_index",
+    "with_kernel_window",
 ]

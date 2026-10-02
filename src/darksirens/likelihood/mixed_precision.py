@@ -386,11 +386,19 @@ def incomplete_catalog_log_prior(state, catalog, dtype):
     ``missing_density="gather"`` the state's ``dN_miss`` is a
     :class:`~darksirens.catalog.completeness.GatheredCompletionCurves`: the two
     bracketing values are then evaluated in float64 from its factors and
-    rounded, the same numbers the grid path rounds.
+    rounded, the same numbers the grid path rounds.  A catalog carrying an
+    active kernel window (:func:`darksirens.catalog.redshift.with_kernel_window`)
+    has each sample's window found in float64, on the float64 redshifts, and
+    the sum taken over the window's slots of the rounded values.
     """
     from darksirens.catalog.completeness import (
         GatheredCompletionCurves,
         gathered_missing_density,
+    )
+    from darksirens.catalog.redshift import (
+        _kernel_window_start,
+        _window_active,
+        _window_slice,
     )
 
     dtype = np.dtype(dtype)
@@ -408,13 +416,29 @@ def incomplete_catalog_log_prior(state, catalog, dtype):
     log_Z = state.log_Z.astype(dtype)
     zg = _zgrid_mod.zgrid.astype(dtype)
     floor = jnp.finfo(dtype).tiny
+    windowed = _window_active(catalog)
+    if windowed:
+        size = int(catalog.kernel_window.size)
+        half_width = jnp.asarray(catalog.kernel_window.half_width)
+        zgals64 = jnp.asarray(catalog.zgals)
 
     def one(z, row):
         # catalog.redshift.eval_log_catalog_prior_state
         row = jnp.asarray(row, dtype=jnp.int32)
-        u = (z - zgals[row]) * inv_sig[row]
-        m = rowmax[row]
-        s = jnp.sum(jnp.exp(log_kw_eff[row] - m - 0.5 * u * u))
+        if windowed:
+            # catalog.redshift._eval_windowed
+            start = _kernel_window_start(z, row, zgals64, catalog.ngals, half_width, size)
+            u = (z - _window_slice(zgals, row, start, size)) * _window_slice(
+                inv_sig, row, start, size
+            )
+            m = rowmax[row]
+            s = jnp.sum(
+                jnp.exp(_window_slice(log_kw_eff, row, start, size) - m - 0.5 * u * u)
+            )
+        else:
+            u = (z - zgals[row]) * inv_sig[row]
+            m = rowmax[row]
+            s = jnp.sum(jnp.exp(log_kw_eff[row] - m - 0.5 * u * u))
         log_mix = m + jnp.where(s > 0.0, jnp.log(jnp.where(s > 0.0, s, 1.0)), -jnp.inf)
         log_mix = jnp.where(row_empty[row], -jnp.inf, log_mix)
         lg, i_up = log_interp_zgrid(z, log_g)

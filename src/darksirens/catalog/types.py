@@ -98,7 +98,12 @@ class GalaxyCatalog(NamedTuple):
     means row ``r`` is global pixel ``r``.  ``galaxy_index`` is ``None``
     (default) or the :class:`GalaxyIndex` of this catalog's real galaxies,
     attached with :func:`darksirens.catalog.redshift.with_galaxy_index`; only
-    the opt-in galaxy-list kernel layout reads it.
+    the opt-in galaxy-list kernel layout reads it.  ``kernel_window`` is
+    ``None`` (default) or the
+    :class:`~darksirens.catalog.redshift.CatalogKernelWindow` of this catalog,
+    attached with :func:`darksirens.catalog.redshift.with_kernel_window`; only
+    the opt-in ``kernel_window`` setting attaches it, and only the per-sample
+    kernel sum reads it.
     """
 
     apix: Any
@@ -108,6 +113,7 @@ class GalaxyCatalog(NamedTuple):
     ngals: Any
     unique_pixels: Any = None
     galaxy_index: Any = None
+    kernel_window: Any = None
 
 
 class CatalogSampleView(NamedTuple):
