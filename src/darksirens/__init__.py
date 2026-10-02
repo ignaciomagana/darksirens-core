@@ -7,6 +7,7 @@ the public analysis specifications are dependency-light declarations, so
 optional extensions.
 """
 
+from ._binding_depth import BINDING_DEPTH as _BINDING_DEPTH
 from ._jax import configure_jax_runtime
 from ._specs import Cosmology, Population
 
@@ -96,6 +97,25 @@ def model(
     )
 
 
+def decode_parameters(analysis, theta, *, z_depth=_BINDING_DEPTH):
+    """Decode one coordinate vector into the physical parameters the likelihood uses.
+
+    ``analysis`` is a ``ds.model`` analysis or a ``BoundAnalysis``; ``theta``
+    has one value per ``analysis.parameters.labels`` entry. Returns a
+    ``DecodedParameters`` record ``(cosmology, population, catalog, angular)``:
+    the values the bound likelihood evaluates at ``theta``, through the
+    decoder the bound likelihood itself calls. ``z_depth`` defaults to the
+    depth ``bind_analysis`` uses. Works eagerly and under ``jax.jit``,
+    ``jax.vmap`` and ``jax.grad``. See
+    :func:`darksirens.runtime_binding.decode_parameters`.
+    """
+    # No configure_jax_runtime() here: the analysis came from ds.model, which
+    # configured the runtime, and this may run inside a caller's trace.
+    from .runtime_binding import decode_parameters as _decode_parameters
+
+    return _decode_parameters(analysis, theta, z_depth=z_depth)
+
+
 def infer(
     analysis,
     *,
@@ -139,5 +159,6 @@ __all__ = [
     "load_injections",
     "load_catalog",
     "model",
+    "decode_parameters",
     "infer",
 ]

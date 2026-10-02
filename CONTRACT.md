@@ -72,6 +72,7 @@ load_events
 load_injections
 load_catalog
 model
+decode_parameters
 infer
 ```
 
@@ -98,7 +99,10 @@ result = ds.infer(
 ```
 
 Ordinary users should not need low-level GW event structs, catalog internals,
-parameter decoders or sampler adapters.
+parameter decoders or sampler adapters. `decode_parameters` is the one decoder
+on the root surface: it is for companions and diagnostics that need the
+physical parameters behind a coordinate vector (see "Parameter decoding"
+below).
 
 ### Public option contract
 
@@ -264,6 +268,44 @@ interprets neither; the callable runs only when a fingerprint is built. A
 checkpointing target that sets neither warns, because its fingerprint cannot
 tell its likelihood from another target's with the same plan. Ordinary
 analyses are not fingerprinted by `ds.infer`.
+
+### Parameter decoding
+
+`decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH)` returns the
+physical parameters the bound likelihood evaluates at `theta`, as an immutable
+named record `darksirens.runtime_binding.DecodedParameters`:
+
+- `cosmology`: `CosmologyParameters(H0, Om0, w0, wa)`; sampled entries come
+  from `theta`, fixed ones are the plan's values (`fixed_cosmology`);
+- `population`: the full population vector in `population_labels` order,
+  fixed entries (`Population(fixed=...)`) included;
+- `catalog`: `CatalogParameters(n0, delta, sigma_kde, z_depth)` for a catalog
+  analysis, `None` for spectral and bright sirens. `n0` is physical
+  (Mpc^-3): `10**log10n0`, times `(H0 / 100)**3` under `n0_units="h_scaled"`,
+  and `1.0` for `completeness="complete"`. Survey parameters fixed with
+  `fixed_survey` enter as 0-d arrays of `theta`'s dtype. `z_depth` is
+  structural (a Python float or `None`, never traced);
+- `angular`: the angular-model coordinates (`angular_labels`), empty for the
+  isotropic model.
+
+`analysis` is a `ds.model` analysis or a `BoundAnalysis`; `theta` has one
+value per `analysis.parameters.labels` entry, and any other shape raises
+`ValueError` naming the labels. `z_depth` defaults to the depth
+`bind_analysis` uses (the catalog store's `z_depth`, or the binding's); an
+explicit `z_depth` is accepted with an `Analysis` and refused with a
+`BoundAnalysis`. The bound likelihood decodes through the same function
+(`_decode_theta`), so the operations are the same, and a likelihood that
+decodes through `decode_parameters` inside its jitted program compiles to the
+bound program (same optimized HLO, same value). It works eagerly and under
+`jax.jit`, `jax.vmap` and `jax.grad`. Every field is a copy of `theta`, a plan
+value or `10**log10n0`, identical in every context, except the h-scaled `n0`,
+which XLA may round differently in differently compiled programs (eager, jit,
+vmap; within 1e-15 relative).
+
+This is public API, and companion packages (lss, surveys, the DESI consumer)
+decode through it instead of copying the private decoder. Its signature, its
+record's fields and their meaning change only through this contract, like any
+other package-root name.
 
 ### Host-density/redshift seam
 
