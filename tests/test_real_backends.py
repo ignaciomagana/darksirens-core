@@ -325,3 +325,72 @@ def test_custom_target_example_runs_and_prints_a_finite_evidence():
     # The example is a 1-D Gaussian of width 0.2 in a uniform [-1, 1] prior.
     assert abs(value - (-1.3835)) < 0.5
     assert time.time() - started < 120.0
+
+
+# --- TinyNS >= 0.2.0: the livecov preset and the pytree hand-off ------------
+# The real-backends job pins tinyns 0.2.3 and fails on any skip, so these always
+# run there; the full-suite regression job still pins tinyns 0.1.0, where they
+# skip (the live-cov proposal and the pytree hand-off start at 0.2.0).
+_TINYNS_02 = "0.2.0"
+
+
+def test_tinyns_livecov_recovers_the_analytic_evidence_and_posterior():
+    tinyns = pytest.importorskip("tinyns", minversion=_TINYNS_02)
+    from darksirens.inference.tinyns_adapter import tinyns_supports_pytree_loglike
+
+    assert tinyns_supports_pytree_loglike(tinyns), tinyns.__version__
+    result = ds.infer(
+        _target(),
+        sampler="tinyns",
+        tinyns_preset="livecov",
+        nlive=200,
+        dlogz=0.5,
+        show_progress=False,
+        seed=1,
+    )
+    _assert_evidence(result)
+    _assert_standard_normal_posterior(result["samples"])
+    assert result["stop_reason"] == "convergence"
+
+
+def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
+    pytest.importorskip("tinyns", minversion=_TINYNS_02)
+    from test_partial_fixing import COSMOLOGY, MODEL, TAIL, _stores
+
+    events, injections = _stores()
+    analysis = ds.model(cosmology=COSMOLOGY, population=ds.Population(MODEL, fixed=TAIL))
+    result = ds.infer(
+        analysis,
+        events=events,
+        injections=injections,
+        sampler="tinyns",
+        tinyns_preset="livecov",
+        nlive=50,
+        dlogz=1.0,
+        show_progress=False,
+        seed=2,
+    )
+    out = capsys.readouterr().out
+    assert "[*] tinyns log-likelihood form: pytree" in out, out[-2000:]
+    assert np.isfinite(result["logZ"])
+    samples = np.asarray(result["samples"])
+    assert samples.shape[1] == len(analysis.parameters.labels) and np.all(np.isfinite(samples))
+
+
+def test_tinyns_takes_a_jax_partial_target_as_is(capsys):
+    pytest.importorskip("tinyns", minversion=_TINYNS_02)
+    import jax
+    import jax.numpy as jnp
+
+    def _scaled_gaussian(scale, theta):
+        return -0.5 * jnp.sum((theta / scale) ** 2)
+
+    target = _target()
+    target = ds.InferenceTarget(
+        log_likelihood=jax.tree_util.Partial(_scaled_gaussian, jnp.ones(2)),
+        parameters=target.parameters,
+    )
+    result = ds.infer(target, sampler="tinyns", tinyns_preset="livecov", nlive=200, dlogz=0.5,
+                      show_progress=False, seed=3)
+    assert "[*] tinyns log-likelihood form: pytree" in capsys.readouterr().out
+    _assert_evidence(result)
