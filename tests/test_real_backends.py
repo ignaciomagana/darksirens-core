@@ -328,10 +328,14 @@ def test_custom_target_example_runs_and_prints_a_finite_evidence():
 
 
 # --- TinyNS >= 0.2.0: the livecov preset and the pytree hand-off ------------
+# The real-backends job pins tinyns 0.2.3 and fails on any skip, so these always
+# run there; the full-suite regression job still pins tinyns 0.1.0, where they
+# skip (the live-cov proposal and the pytree hand-off start at 0.2.0).
+_TINYNS_02 = "0.2.0"
 
 
 def test_tinyns_livecov_recovers_the_analytic_evidence_and_posterior():
-    tinyns = pytest.importorskip("tinyns")
+    tinyns = pytest.importorskip("tinyns", minversion=_TINYNS_02)
     from darksirens.inference.tinyns_adapter import tinyns_supports_pytree_loglike
 
     assert tinyns_supports_pytree_loglike(tinyns), tinyns.__version__
@@ -350,7 +354,7 @@ def test_tinyns_livecov_recovers_the_analytic_evidence_and_posterior():
 
 
 def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
-    pytest.importorskip("tinyns")
+    pytest.importorskip("tinyns", minversion=_TINYNS_02)
     from test_partial_fixing import COSMOLOGY, MODEL, TAIL, _stores
 
     events, injections = _stores()
@@ -374,7 +378,7 @@ def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
 
 
 def test_tinyns_takes_a_jax_partial_target_as_is(capsys):
-    pytest.importorskip("tinyns")
+    pytest.importorskip("tinyns", minversion=_TINYNS_02)
     import jax
     import jax.numpy as jnp
 
