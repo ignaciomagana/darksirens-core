@@ -79,6 +79,8 @@ def model(
     selection=None,
     row_fraction=None,
     survey_priors=None,
+    catalog_sky_weighting="conditional",
+    field_normalizer=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -100,6 +102,8 @@ def model(
         selection=selection,
         row_fraction=row_fraction,
         survey_priors=survey_priors,
+        catalog_sky_weighting=catalog_sky_weighting,
+        field_normalizer=field_normalizer,
     )
 
 

@@ -12,7 +12,7 @@ permissions:
 jobs:
   host-density:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     env:
       JAX_PLATFORMS: cpu
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"

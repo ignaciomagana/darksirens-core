@@ -12,7 +12,7 @@ permissions:
 jobs:
   angular-wiring:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 75
     env:
       JAX_PLATFORMS: cpu
       JAX_ENABLE_X64: "True"

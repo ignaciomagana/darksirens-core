@@ -12,7 +12,7 @@ permissions:
 jobs:
   catalog-dark-bright:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 75
     env:
       JAX_PLATFORMS: cpu
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
@@ -241,3 +241,20 @@ jobs:
           python candidate/tools/probe_selection_completeness.py \
             --compare /tmp/selection-completeness-legacy.json \
             /tmp/selection-completeness-candidate.json --rtol 1e-12
+
+      - name: Evaluate pinned legacy field-mixture likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/legacy" \
+            python candidate/tools/probe_catalog_mixture.py \
+            --implementation legacy --out /tmp/mixture-legacy.json
+
+      - name: Evaluate reconstructed field-mixture likelihood fixture
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/candidate/src" \
+            python candidate/tools/probe_catalog_mixture.py \
+            --implementation candidate --out /tmp/mixture-candidate.json
+
+      - name: Require field-mixture legacy/new likelihood parity
+        run: |
+          python candidate/tools/probe_catalog_mixture.py \
+            --compare /tmp/mixture-legacy.json /tmp/mixture-candidate.json --rtol 1e-12

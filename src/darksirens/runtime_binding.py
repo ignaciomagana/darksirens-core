@@ -18,8 +18,11 @@ from darksirens.analysis import (
     Analysis,
     BrightRedshift,
     CompleteCatalogRedshift,
+    FieldCatalogMixtureRedshift,
     IncompleteCatalogRedshift,
     SpectralRedshift,
+    catalog_kernel_pins_active,
+    catalog_label_suffix,
     kernel_pin_applies,
 )
 from darksirens.catalog.compact import compact_pe_selection_catalog
@@ -32,7 +35,12 @@ from darksirens.catalog.redshift import (
     with_galaxy_index,
 )
 from darksirens.catalog.settings import catalog_evaluation_settings
-from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, physical_n0
+from darksirens.catalog.types import (
+    CatalogMixtureParameters,
+    CatalogParameters,
+    GalaxyCatalog,
+    physical_n0,
+)
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.runtime import make_gw_event
@@ -199,6 +207,11 @@ class DecodedParameters(NamedTuple):
         or for ``completeness="selection"`` the analysis's runtime selection
         model with every nuisance sampled through ``survey_priors`` replaced
         by its entry of ``theta``. ``None`` for spectral and bright sirens.
+        For a field-weighted analysis (``catalog_sky_weighting="field"``) a
+        :class:`~darksirens.catalog.types.CatalogMixtureParameters`: one
+        ``CatalogParameters`` per catalog (its suffixed labels, its store's
+        ``z_depth``) and the ``(K,)`` log mixture weights of the sticks
+        ``fcat_2 .. fcat_K``.
     ``angular``
         The angular-model coordinates (``ParameterPlan.angular_labels``), a
         slice of ``theta``; empty for the isotropic model.
@@ -251,7 +264,9 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
         population = theta[start : start + plan.n_population]
 
     catalog_params = None
-    if isinstance(analysis.redshift, (IncompleteCatalogRedshift, CompleteCatalogRedshift)):
+    if isinstance(analysis.redshift, FieldCatalogMixtureRedshift):
+        catalog_params = _decode_mixture(analysis, theta, free, cosmology.H0)
+    elif isinstance(analysis.redshift, (IncompleteCatalogRedshift, CompleteCatalogRedshift)):
         fixed_survey = dict(plan.fixed_survey)
 
         def survey(name):
@@ -282,6 +297,44 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
     angular_start = plan.n_cosmology + plan.n_population + plan.n_catalog
     angular = theta[angular_start : angular_start + plan.n_angular]
     return DecodedParameters(cosmology, population, catalog_params, angular)
+
+
+def _decode_mixture(analysis, theta, free, H0) -> CatalogMixtureParameters:
+    """Each catalog's parameters (its suffixed labels) and the mixture's log weights."""
+    from darksirens.catalog.mixture import stick_breaking_log_weights
+
+    redshift = analysis.redshift
+    fixed_survey = dict(analysis.parameters.fixed_survey)
+
+    def value(label):
+        if label in fixed_survey:
+            return jnp.asarray(fixed_survey[label], dtype=theta.dtype)
+        return free[label]
+
+    components = []
+    for k, component in enumerate(redshift.components):
+        suffix = catalog_label_suffix(k)
+        components.append(
+            CatalogParameters(
+                n0=physical_n0(value("log10n0" + suffix), H0, redshift.n0_units),
+                delta=value("delta" + suffix),
+                sigma_kde=value("sigma_kde" + suffix),
+                z_depth=component.catalog.z_depth,
+                selection=(
+                    None
+                    if component.selection is None
+                    else _decode_selection_model(component.selection, free, suffix)
+                ),
+            )
+        )
+    n = redshift.n_catalogs
+    if n == 1:
+        log_weights = jnp.zeros((1,), dtype=theta.dtype)
+    else:
+        log_weights = stick_breaking_log_weights(
+            jnp.stack([value(f"fcat_{m}") for m in range(2, n + 1)])
+        )
+    return CatalogMixtureParameters(tuple(components), log_weights)
 
 
 def _decode_selection_model(selection, sampled, suffix=""):
@@ -337,6 +390,13 @@ def decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH) -> DecodedParam
         depth = analysis.z_depth
         analysis = analysis.analysis
     elif isinstance(analysis, Analysis):
+        if z_depth is not BINDING_DEPTH and isinstance(
+            analysis.redshift, FieldCatalogMixtureRedshift
+        ):
+            raise ValueError(
+                "a field-weighted analysis takes each catalog's z_depth from its "
+                "catalog store; decode_parameters does not take z_depth for it"
+            )
         if z_depth is not BINDING_DEPTH:
             depth = z_depth
         elif isinstance(
@@ -388,6 +448,8 @@ class BoundAnalysis:
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        if isinstance(self.analysis.redshift, FieldCatalogMixtureRedshift):
+            _require_admissible_mixture_pins(self.analysis, self.model_operands)
         if self.kernel_pin is not None:
             _require_admissible_kernel_pin(
                 self.analysis, self.catalog, self.kernel_pin, self.z_depth
@@ -562,6 +624,24 @@ class BoundAnalysis:
                 **bright_common,
             )
 
+        if isinstance(self.analysis.redshift, FieldCatalogMixtureRedshift):
+            from darksirens.likelihood.mixture import field_mixture_log_likelihood
+
+            return field_mixture_log_likelihood(
+                cosmology,
+                population,
+                catalog_params,
+                gw_pe,
+                gw_selection,
+                model_operands,
+                self.n_events,
+                self.nsamp,
+                self.n_draw,
+                completeness=self.analysis.redshift.completeness,
+                normalizer=self.analysis.redshift.normalizer,
+                **ordinary_common,
+            )
+
         if isinstance(self.analysis.redshift, IncompleteCatalogRedshift):
             if model_operands is not None and "row_fraction" in model_operands:
                 # completeness="selection" with a coverage fraction per row of
@@ -720,10 +800,13 @@ def _require_compute_dtype_support(analysis: Analysis, compute_dtype, *, spin_bl
     compute_dtype = resolve_compute_dtype(compute_dtype)
     if compute_dtype is None:
         return None
-    if not isinstance(analysis.redshift, (SpectralRedshift, IncompleteCatalogRedshift)):
+    if not isinstance(
+        analysis.redshift,
+        (SpectralRedshift, IncompleteCatalogRedshift, FieldCatalogMixtureRedshift),
+    ):
         raise ValueError(
-            f"compute_dtype={compute_dtype!r} is implemented for spectral and "
-            "incomplete-catalog analyses only, got a "
+            f"compute_dtype={compute_dtype!r} is implemented for spectral, "
+            "incomplete-catalog and field-weighted analyses only, got a "
             f"{type(analysis.redshift).__name__} analysis"
         )
     population = analysis.population
@@ -762,6 +845,156 @@ def _build_kernel_pin(analysis: Analysis, catalog, z_depth):
         )
     cosmology, catalog_params = _kernel_pin_premise(analysis, z_depth)
     return build_pinned_catalog_kernel(cosmology, catalog_params, catalog)
+
+
+def _mixture_pin_premise(analysis, k):
+    """Catalog ``k``'s fixed cosmology and catalog parameters (the pin premise)."""
+    decoded = _decode_theta(
+        analysis,
+        jnp.full((len(analysis.parameters.labels),), 0.5, dtype=jnp.float64),
+        z_depth=None,
+    )
+    return decoded.cosmology, decoded.catalog.components[k]
+
+
+def _bind_mixture(analysis, events, injections):
+    """Per-catalog compact and full-sky views, caches, pins and row fractions.
+
+    Returns the PE and selection sample rows (``(N,)`` for one catalog,
+    ``(N, K)`` otherwise) and the :class:`~darksirens.likelihood.mixture.CatalogMixtureOperands`.
+    """
+    from darksirens.catalog.completeness import ObservedDensityCache
+    from darksirens.catalog.field import build_pinned_field_kernel
+    from darksirens.likelihood.mixture import (
+        CatalogMixtureComponent,
+        CatalogMixtureOperands,
+    )
+
+    redshift = analysis.redshift
+    n = redshift.n_catalogs
+    pinned = catalog_kernel_pins_active(
+        redshift, analysis.parameters.labels, analysis.parameters.kernel_pin
+    )
+    galaxy_list = catalog_evaluation_settings().kernel_layout == "galaxy_list"
+    count_ratio = redshift.completeness == "incomplete"
+    pe_rows, sel_rows, components = [], [], []
+    for k, component in enumerate(redshift.components):
+        store = component.catalog
+        global_pe = ang2pix_ring(store.nside, events.columns["ra"], events.columns["dec"])
+        global_sel = ang2pix_ring(
+            store.nside, injections.columns["ra"], injections.columns["dec"]
+        )
+        views = compact_pe_selection_catalog(store.catalog, global_pe, global_sel)
+        compact = _jax_catalog(views.catalog)
+        full = None
+        light = False
+        if n >= 2:
+            # The normaliser Z_k reads every row of the catalog's sky; row r of
+            # the full view is store row r. The selection completeness in the
+            # moments form without a survey depth reads only the row count and
+            # the real-galaxy counts, so its full view carries no galaxy slots.
+            light = (
+                not count_ratio
+                and redshift.normalizer == "moments"
+                and store.z_depth is None
+            )
+            source = store.catalog._replace(unique_pixels=None)
+            if light:
+                rows = int(np.shape(source.zgals)[0])
+                empty = np.zeros((rows, 0), dtype=np.float64)
+                source = source._replace(zgals=empty, dzgals=empty, wgals=empty)
+            full = _jax_catalog(source)
+        if galaxy_list:
+            compact = with_galaxy_index(compact)
+            if full is not None and not light:
+                full = with_galaxy_index(full)
+        compact_cache = full_cache = None
+        if count_ratio:
+            if full is not None:
+                full_cache = build_observed_density_cache(full)
+                rows = _store_rows(store.catalog, views.catalog)
+                compact_cache = ObservedDensityCache(
+                    jnp.asarray(np.asarray(full_cache.dN_obs_kde)[rows])
+                )
+            else:
+                compact_cache = build_observed_density_cache(compact)
+        compact_pin = full_pin = None
+        if pinned[k]:
+            cosmology, params = _mixture_pin_premise(analysis, k)
+            compact_pin = build_pinned_field_kernel(cosmology, params, compact)
+            if full is not None and store.z_depth is not None:
+                full_pin = build_pinned_field_kernel(cosmology, params, full)
+        compact_fraction = full_fraction = None
+        if component.row_fraction is not None:
+            compact_fraction = jnp.asarray(
+                _compact_rows_of(component.row_fraction, store.catalog, views.catalog)
+            )
+            if full is not None:
+                full_fraction = jnp.asarray(component.row_fraction)
+        components.append(
+            CatalogMixtureComponent(
+                compact=compact,
+                full=full,
+                compact_cache=compact_cache,
+                full_cache=full_cache,
+                compact_pin=compact_pin,
+                full_pin=full_pin,
+                compact_row_fraction=compact_fraction,
+                full_row_fraction=full_fraction,
+            )
+        )
+        pe_rows.append(np.asarray(views.pe_sample_to_row, dtype=np.int32))
+        sel_rows.append(np.asarray(views.selection_sample_to_row, dtype=np.int32))
+    if n == 1:
+        return pe_rows[0], sel_rows[0], CatalogMixtureOperands(tuple(components))
+    return (
+        np.stack(pe_rows, axis=1),
+        np.stack(sel_rows, axis=1),
+        CatalogMixtureOperands(tuple(components)),
+    )
+
+
+def _require_admissible_mixture_pins(analysis, operands) -> None:
+    """Refuse a field-weighted binding whose pins its plan does not admit or
+    that were not built from its catalog views (host side, digest compared)."""
+    from darksirens.catalog.field import check_field_kernel_pin
+    from darksirens.likelihood.mixture import CatalogMixtureOperands
+
+    redshift = analysis.redshift
+    if not isinstance(operands, CatalogMixtureOperands) or len(operands.components) != redshift.n_catalogs:
+        raise TypeError(
+            "a field-weighted BoundAnalysis needs the CatalogMixtureOperands "
+            "bind_analysis builds, one component per catalog"
+        )
+    pinned = catalog_kernel_pins_active(
+        redshift, analysis.parameters.labels, analysis.parameters.kernel_pin
+    )
+    for k, component in enumerate(operands.components):
+        for view, pin in (("compact", component.compact_pin), ("full", component.full_pin)):
+            if pin is None:
+                continue
+            if not pinned[k]:
+                raise ValueError(
+                    f"catalog {k + 1} carries a {view} kernel pin, but its plan does not "
+                    "admit one; bind the analysis with bind_analysis"
+                )
+            catalog = component.compact if view == "compact" else component.full
+            cosmology, params = _mixture_pin_premise(analysis, k)
+            try:
+                check_field_kernel_pin(pin, cosmology, params, catalog)
+            except ValueError as err:
+                raise ValueError(
+                    f"catalog {k + 1} ({view} view): {err}; rebuild the binding with "
+                    "bind_analysis"
+                ) from None
+
+
+def _store_rows(store_catalog, compact_catalog):
+    from darksirens.catalog.compact import _source_rows_for_pixels
+
+    return _source_rows_for_pixels(
+        store_catalog, np.asarray(compact_catalog.unique_pixels, dtype=np.int64)
+    )
 
 
 def _compact_rows_of(values, store_catalog, compact_catalog):
@@ -866,6 +1099,11 @@ def bind_analysis(
         sel_pixels = np.zeros_like(
             np.asarray(injections.columns["dL"]), dtype=np.int32
         )
+        cache = None
+        z_depth = None
+    elif isinstance(analysis.redshift, FieldCatalogMixtureRedshift):
+        pe_pixels, sel_pixels, model_operands = _bind_mixture(analysis, events, injections)
+        catalog = None
         cache = None
         z_depth = None
     else:

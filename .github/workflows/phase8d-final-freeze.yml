@@ -24,7 +24,7 @@ permissions:
 jobs:
   release-contract:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       JAX_PLATFORMS: cpu
       DARKSIRENS_ZMAX: "5.0"

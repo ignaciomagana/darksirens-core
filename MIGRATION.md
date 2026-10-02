@@ -439,3 +439,34 @@ reference's `darksiren_log_likelihood(..., c_mode=selection)` on a synthetic
 fixture: 3e-14 (`tools/probe_selection_completeness.py`, in the phase-5
 workflow). Every default plan, fingerprint and bound program is unchanged
 (optimized HLO and logL bit for bit against a clean `main`).
+
+### Field-weighted multi-catalog mixture (opt-in, default unchanged)
+
+`ds.model(catalog=[A, B, ...], catalog_sky_weighting="field")` is the
+ordinary path's form of the frozen reference's `universe_model="dark_sirens"`
+with `n_catalogs=K`, `catalog_sky_weighting="field"` and stick weights
+`fcat_k`. Each catalog's host density in a sky row is the field numerator
+`N_obs p_cat + dN_miss` of `darksirens.catalog.field`, divided by its
+survey-global total `Z_k` (the full-sky sum of the same numerator), and the
+catalogs combine as `logsumexp_k [log w_k + log n_k - log Z_k]` per sample,
+for the PE and selection terms alike. Labels, priors and order follow the
+reference (`log10n0`, ..., `log10n0_c2`, ..., `fcat_2 .. fcat_K` with
+`Beta(1, K - m + 1)`), and `completeness="selection"` gives each catalog its
+own selection model. Differences from the reference, all deliberate: each
+catalog keeps its own HEALPix resolution and compact view (the reference's
+loader does the same); `Z_k` is computed in float64 throughout (the
+reference stores the count-ratio normaliser's observed density in float32;
+on the probes and mock T the two agree to 3e-14 anyway); with one catalog
+`Z` is not evaluated, since it cancels (the reference computes it); and
+the reference's aggregate completeness, strata, LSS `delta_g`, marks, Q tables
+and latent fields are not in core: a companion modulates the missing-host
+density through `MissingHostExtension` and
+`darksirens.likelihood.mixture.make_catalog_mixture_target`. New public
+pieces: `darksirens.catalog.mixture` (normaliser forms, stick weights,
+extension protocol and context), `darksirens.likelihood.mixture`,
+`CatalogMixtureParameters`, `ParameterPlan.catalog_model` for the mixture,
+`models.assemble_incomplete_catalog_prior_state` (the second half of the
+accepted state constructor, factored out unchanged). Every default plan,
+fingerprint and bound program is unchanged (optimized HLO and logL bit for
+bit against a clean `main`).
+
