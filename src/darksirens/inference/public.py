@@ -10,6 +10,9 @@ same sampler-facing parameter plan.
 from __future__ import annotations
 
 import math
+import os
+import time
+import warnings
 from types import SimpleNamespace
 
 from darksirens.inference.target import InferenceTarget
@@ -86,7 +89,93 @@ def _apply_angular_prior_volume_correction(result, analysis):
     return result
 
 
-def _execute_target(likelihood, plan, *, sampler, sampler_options):
+# Backends whose checkpoints ds.infer can write or resume (checkpointing.py's
+# CHECKPOINT_BASENAMES; not imported here to keep this module's imports lazy).
+_CHECKPOINTING_SAMPLERS = ("dynesty", "tinyns")
+
+
+def _directory(path):
+    return os.path.dirname(os.path.abspath(os.fspath(path)))
+
+
+def _checkpoint_dirs(sampler, opts):
+    """Directories of the checkpoints this run writes, and of the one it resumes.
+
+    Mirrors the adapters' own resolution: dynesty checkpoints to
+    ``checkpoint_file_resolved`` when ``checkpoint_interval_seconds > 0`` and
+    resumes ``resume_from_resolved``; TinyNS's ``tinyns_checkpoint_path``,
+    ``tinyns_resume_from`` and ``tinyns_checkpoint_path_out`` take
+    precedence over those, and a resume without an explicit output path
+    rewrites the checkpoint it resumes (or the configured checkpoint path).
+    Returns ``((), None)`` when the run neither writes nor resumes one.
+    """
+    if sampler not in _CHECKPOINTING_SAMPLERS:
+        return (), None
+    seconds = float(getattr(opts, "checkpoint_interval_seconds", 0.0) or 0.0)
+    shared = getattr(opts, "checkpoint_file_resolved", None)
+    path = shared if seconds > 0.0 and shared else None
+    resume = getattr(opts, "resume_from_resolved", None)
+    writes = []
+    if sampler == "dynesty":
+        writes.append(path)
+    else:
+        path = getattr(opts, "tinyns_checkpoint_path", None) or path
+        resume = getattr(opts, "tinyns_resume_from", None) or resume
+        out = getattr(opts, "tinyns_checkpoint_path_out", None)
+        if resume:
+            writes.append(out or path or resume)
+        else:
+            writes.append(path)
+    write_dirs = tuple(_directory(item) for item in writes if item)
+    resume_dir = _directory(resume) if resume else None
+    return write_dirs, resume_dir
+
+
+def _stamp_target_fingerprint(target, sampler, opts):
+    """Fingerprint a target run that writes or resumes a checkpoint.
+
+    Gates the resume (a mismatch raises ``ResumeFingerprintError`` unless
+    ``resume_force=True``) and writes ``run_fingerprint.json`` beside every
+    checkpoint the run writes. A run with no checkpoint persists nothing to
+    resume, so nothing is built or written. Returns the digest, or ``None``.
+    """
+    write_dirs, resume_dir = _checkpoint_dirs(sampler, opts)
+    if not write_dirs and resume_dir is None:
+        return None
+    from darksirens.inference.run_fingerprint import (
+        ResumeFingerprintError,
+        gate_and_stamp_checkpoint_fingerprint,
+        inference_target_fingerprint,
+    )
+
+    if target.identity is None and target.provenance is None:
+        warnings.warn(
+            "this InferenceTarget sets neither identity nor provenance, so the "
+            "run fingerprint written beside its checkpoint covers only its "
+            "parameter plan, core numerics and sampler settings: a resume "
+            "cannot tell its likelihood from another target's with the same "
+            "plan. Pass InferenceTarget(..., identity=..., provenance=...).",
+            UserWarning,
+            stacklevel=4,  # the caller of infer()
+        )
+    fingerprint = inference_target_fingerprint(target, sampler=sampler, options=opts)
+    try:
+        gate_and_stamp_checkpoint_fingerprint(
+            opts,
+            fingerprint,
+            write_dirs=write_dirs,
+            resume_dir=resume_dir,
+            run_timestamp=time.strftime("%Y%m%dT%H%M%S"),
+        )
+    except ResumeFingerprintError as exc:
+        raise ResumeFingerprintError(
+            f"{exc}\nThrough ds.infer: drop resume_from_resolved (and "
+            "tinyns_resume_from) to start fresh, or pass resume_force=True."
+        ) from exc
+    return fingerprint["digest"]
+
+
+def _execute_target(likelihood, plan, *, sampler, sampler_options, target=None):
     from darksirens.inference.prior import make_prior_transform
 
     prior_transform = make_prior_transform(
@@ -96,10 +185,13 @@ def _execute_target(likelihood, plan, *, sampler, sampler_options):
         joint_constraints=plan.joint_constraints,
     )
     opts = _sampler_namespace(sampler, sampler_options)
+    digest = (
+        None if target is None else _stamp_target_fingerprint(target, sampler, opts)
+    )
 
     from darksirens.inference.sampling import run_sampler
 
-    return run_sampler(
+    result = run_sampler(
         sampler,
         likelihood,
         prior_transform,
@@ -110,6 +202,9 @@ def _execute_target(likelihood, plan, *, sampler, sampler_options):
         prior_kinds=plan.prior_kinds,
         joint_constraints=plan.joint_constraints,
     )
+    if digest is not None:
+        result["run_fingerprint_digest"] = digest
+    return result
 
 
 def infer(
@@ -143,6 +238,20 @@ def infer(
     sampler reports a finite ``logZ``, ``logZ_corrected``. The raw ``logZ``
     stays exactly as the sampler reported it.
 
+    A target run that writes or resumes a dynesty or TinyNS checkpoint is
+    fingerprinted (:func:`~darksirens.inference.run_fingerprint.inference_target_semantic`:
+    the parameter plan, core numerics, sampler settings and the target's
+    ``identity`` and ``provenance``). ``run_fingerprint.json`` is written
+    beside every checkpoint the run writes, a resume whose checkpoint
+    directory holds a different (or no) fingerprint raises
+    ``ResumeFingerprintError`` unless the sampler option
+    ``resume_force=True`` is given, and the result carries
+    ``run_fingerprint_digest``. A target run without a checkpoint is
+    unchanged. Ordinary analyses are not fingerprinted here: a caller that
+    checkpoints one composes its fingerprint from
+    ``parameter_plan_semantic``, ``core_numerics_semantic(bound)`` and its
+    own data identity.
+
     Sampler names are intentionally not validated here. The Phase-6 dispatcher
     must see the request first because a zero-free target has exact evidence and
     returns before any backend validation or optional-backend import.
@@ -172,6 +281,7 @@ def infer(
             analysis.parameters,
             sampler=sampler,
             sampler_options=sampler_options,
+            target=analysis,
         )
 
     if events is None or injections is None:

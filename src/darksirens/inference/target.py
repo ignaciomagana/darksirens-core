@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 import math
-from typing import Callable
+from typing import Any, Callable
 
 from darksirens.analysis import ParameterPlan
 
@@ -153,15 +154,46 @@ class InferenceTarget:
     Specialized packages construct the likelihood and any opaque scientific
     state themselves. Core owns only the shared parameter/prior/sampler
     execution contract.
+
+    Two optional fields make the target's run fingerprint (written beside
+    its checkpoint by ``ds.infer``, see
+    :func:`darksirens.inference.run_fingerprint.inference_target_semantic`)
+    cover what core cannot see:
+
+    * ``identity``: a JSON-like value naming the target (e.g. ``{"package":
+      "...", "target": "...", "version": "..."}``); hashed as given.
+    * ``provenance``: a mapping, or a zero-argument callable returning one,
+      describing the state the likelihood was built from (artifact content
+      hashes, fixed values, likelihood options). The callable is invoked
+      only when a fingerprint is built, so an expensive hash is paid only by
+      a run that checkpoints or resumes.
+
+    Both are canonicalised like every semantic value (numbers, strings,
+    lists, str-keyed mappings, numpy arrays; anything else raises). Core
+    never interprets either. Neither enters the dataclass hash.
     """
 
     log_likelihood: Callable
     parameters: ParameterPlan
+    identity: Any = field(default=None, kw_only=True, hash=False)
+    provenance: Any = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         if not callable(self.log_likelihood):
             raise TypeError("log_likelihood must be callable")
         _validate_parameter_plan(self.parameters)
+        from .run_fingerprint import canonical_semantic
+
+        # Fail at construction, not at the first checkpoint.
+        if self.identity is not None:
+            canonical_semantic(self.identity, "InferenceTarget.identity")
+        if isinstance(self.provenance, Mapping):
+            canonical_semantic(self.provenance, "InferenceTarget.provenance")
+        elif self.provenance is not None and not callable(self.provenance):
+            raise TypeError(
+                "InferenceTarget.provenance must be a mapping or a zero-argument "
+                "callable returning one"
+            )
 
 
 __all__ = ["InferenceTarget", "combine_parameter_plans"]
