@@ -309,6 +309,58 @@ def make_log_weight(
     return fn
 
 
+def make_branch_log_weight(
+    *,
+    dtype,
+    cosmology: CosmologyParameters,
+    branch_pop_params,
+    dL_grid,
+    log_p_pop,
+    log_prior_branches,
+):
+    """:func:`make_log_weight` for a mixture whose branches carry their own population.
+
+    ``log_prior_branches(z, pix)`` returns the list of branch terms ``log w_k
+    + log p_k(z | pix)`` in ``dtype``, one per ``branch_pop_params`` entry;
+    the weight is ``logsumexp_k[term_k + log p_pop(.. | L_k)]`` minus the
+    Jacobian and the proposal, the arithmetic of
+    :func:`darksirens.likelihood.weights.log_sample_weight_branches` in
+    ``dtype``. Value-only, like :func:`make_log_weight`.
+    """
+    from darksirens.catalog.mixture import mixture_logsumexp
+
+    dtype = np.dtype(dtype)
+    cosmo_c = _cast_cosmology(cosmology, dtype)
+    pops_c = tuple(jnp.asarray(p).astype(dtype) for p in branch_pop_params)
+    dL_grid_c = jnp.asarray(dL_grid).astype(dtype)
+    dL_lo, dL_hi = dL_grid_c[0], dL_grid_c[-1]
+
+    def fn(m1det, q, dL, chieff, pix, prior_wt, spin=None):
+        if spin is not None:
+            raise ValueError(
+                "compute_dtype='float32' is not implemented for a component-spin block"
+            )
+        m1det, q, dL, chieff, prior_wt = (
+            jnp.asarray(a).astype(dtype) for a in (m1det, q, dL, chieff, prior_wt)
+        )
+        supported = (dL >= dL_lo) & (dL <= dL_hi)
+        dL_c = jnp.clip(dL, dL_lo, dL_hi)
+        z = z_of_dL(dL_c, dL_grid_c)
+        m1src = m1det / (1.0 + z)
+        branches = log_prior_branches(z, pix)
+        terms = [
+            term + log_p_pop(m1src, q, z, chieff, pop)
+            for term, pop in zip(branches, pops_c)
+        ]
+        ldw = (
+            mixture_logsumexp(terms) - log_jacobian(z, dL_c, cosmo_c)
+        ) - jnp.log(prior_wt)
+        ldw = jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
+        return _value_only(ldw.astype(jnp.float64))
+
+    return fn
+
+
 def volume_log_prior(cosmology: CosmologyParameters, dtype):
     """Catalog-free ``log p(z) ∝ log dV_c/dz``: grid in float64, lookup in ``dtype``.
 

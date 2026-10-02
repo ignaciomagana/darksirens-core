@@ -63,11 +63,16 @@ class CatalogMixtureParameters(NamedTuple):
     analysis's order (each with its own ``n0``, ``delta``, ``sigma_kde``,
     ``z_depth`` and ``selection``); ``log_weights`` is the ``(K,)`` array of
     log mixture weights decoded from the sticks ``fcat_2 .. fcat_K``
-    (``(0.0,)`` for one catalog).
+    (``(0.0,)`` for one catalog). ``populations`` is ``None`` (the default:
+    every catalog shares the analysis's one population vector) or, for
+    ``ds.model(..., per_catalog_population=...)``, one full population vector
+    per catalog, catalog 1's first: each catalog's own ``_c{k}`` population
+    labels, and catalog 1's values for every other entry.
     """
 
     components: tuple
     log_weights: Any
+    populations: Any = None
 
 
 class GalaxyIndex(NamedTuple):

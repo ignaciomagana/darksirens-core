@@ -214,6 +214,13 @@ class ParameterPlan:
     selection model), ``""`` for every analysis that has none, so
     :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
     records it only when it is set; :attr:`catalog_model_settings` decodes it.
+    ``catalog_population`` records ``model(..., per_catalog_population=...)``:
+    ``(catalog number, base population labels)`` pairs, in catalog order and
+    the labels in model order, one per catalog ``k >= 2`` that carries its own
+    copy of those parameters (labels ``<label>_c{k}``); ``()`` (the default)
+    when every catalog shares the one population. ``n_catalog_population``
+    counts those coordinates, which sit after the catalogs' survey blocks and
+    before the mixture weights.
     """
 
     labels: tuple[str, ...]
@@ -236,6 +243,8 @@ class ParameterPlan:
     kernel_pin_active: bool = False
     n0_units: str = "physical"
     catalog_model: str = ""
+    catalog_population: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    n_catalog_population: int = 0
 
     @property
     def catalog_model_settings(self) -> dict:
@@ -897,6 +906,160 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
         )
 
 
+def per_catalog_population_label(label: str, catalog_number: int) -> str:
+    """The label of catalog ``catalog_number``'s own copy of population ``label``.
+
+    ``"<label>_c{k}"``, the frozen reference's spelling (for example
+    ``"$\\mu_\\chi$_c2"``), the suffix every per-catalog block carries.
+    """
+    return f"{label}_c{int(catalog_number)}"
+
+
+def _resolve_per_catalog_population(spec, redshift, model_obj, pop_labels):
+    """Check ``model(per_catalog_population={k: [parameter, ...]})``.
+
+    Returns ``((k, labels), ...)`` in catalog order, each ``labels`` the base
+    population labels catalog ``k`` carries its own copy of, in model order.
+    A parameter is named by its label or its ASCII name, as in
+    ``Population(fixed=...)``.
+    """
+    if spec is None:
+        return ()
+    if not isinstance(spec, Mapping):
+        raise TypeError(
+            "per_catalog_population must be a mapping {catalog number: [population "
+            "parameter, ...]}, for example {2: ['G.mu', 'mu_chi']}"
+        )
+    if not spec:
+        return ()
+    if not isinstance(redshift, FieldCatalogMixtureRedshift) or redshift.n_catalogs < 2:
+        raise ValueError(
+            "per_catalog_population applies only to a mixture of two or more "
+            "catalogs (catalog=[A, B, ...] with catalog_sky_weighting='field'): with "
+            "one catalog its population is the analysis's population"
+        )
+    n = redshift.n_catalogs
+    names = [str(getattr(s, "name", "") or "") for s in model_obj.param_specs]
+    if len(names) != len(pop_labels):
+        raise RuntimeError("population parameter names do not match the labels")
+    by_key: dict[str, set[int]] = {}
+    for index, label in enumerate(pop_labels):
+        by_key.setdefault(label, set()).add(index)
+    for index, name in enumerate(names):
+        if name:
+            by_key.setdefault(name, set()).add(index)
+
+    out = []
+    for key in spec:
+        if isinstance(key, bool) or not isinstance(key, int):
+            raise TypeError(
+                f"per_catalog_population keys are catalog numbers (2 .. {n}, the "
+                f"labels' _c{{k}} suffix), got {key!r}"
+            )
+        if key == 1:
+            raise ValueError(
+                "per_catalog_population names catalog 1, whose population is the "
+                "analysis's population (the unsuffixed labels); name catalogs "
+                f"2 .. {n} only"
+            )
+        if not 2 <= key <= n:
+            raise ValueError(
+                f"per_catalog_population names catalog {key}, outside 2 .. {n}"
+            )
+    for key in sorted(spec):
+        entries = spec[key]
+        if isinstance(entries, str):
+            entries = (entries,)
+        try:
+            entries = tuple(entries)
+        except TypeError as exc:
+            raise TypeError(
+                f"per_catalog_population[{key}] must be a list of population "
+                f"parameter names or labels, got {spec[key]!r}"
+            ) from exc
+        if not entries:
+            raise ValueError(
+                f"per_catalog_population[{key}] is empty; omit catalog {key} to "
+                "share the population"
+            )
+        chosen: set[int] = set()
+        unknown = []
+        for entry in entries:
+            hits = by_key.get(str(entry)) if isinstance(entry, str) else None
+            if not hits:
+                unknown.append(entry)
+                continue
+            if len(hits) > 1:
+                raise ValueError(
+                    f"population key {entry!r} is ambiguous: it names "
+                    f"{[pop_labels[i] for i in sorted(hits)]}"
+                )
+            (index,) = hits
+            if index in chosen:
+                raise ValueError(
+                    f"per_catalog_population[{key}] names {pop_labels[index]!r} twice"
+                )
+            chosen.add(index)
+        if unknown:
+            raise ValueError(
+                f"unknown population parameter(s) {unknown} in "
+                f"per_catalog_population[{key}]; use a label from {list(pop_labels)} "
+                f"or a name from {[name for name in names if name]}"
+            )
+        out.append((int(key), tuple(pop_labels[i] for i in sorted(chosen))))
+    return tuple(out)
+
+
+def _per_catalog_constraint_groups(model_obj, catalog_population):
+    """The model's joint constraints, suffixed, for each catalog's own copies.
+
+    A group whose members all have catalog ``k``'s own copy gets the same
+    constraint on those copies. A group only part of which is copied cannot
+    be a cube map (its members are in two blocks); it keeps the population
+    model's likelihood-side rejection, with a warning.
+    """
+    groups = []
+    for kind, members in getattr(model_obj, "constraint_groups", None) or ():
+        members = tuple(str(m) for m in members)
+        for k, labels in catalog_population:
+            owned = [m for m in members if m in labels]
+            if len(owned) == len(members):
+                groups.append(
+                    (kind, tuple(per_catalog_population_label(m, k) for m in members))
+                )
+            elif owned:
+                warnings.warn(
+                    f"joint prior constraint {kind}{members} has only {owned} copied "
+                    f"for catalog {k}; catalog {k}'s copy keeps the population "
+                    "model's likelihood-side rejection (the invalid region has "
+                    "zero likelihood)",
+                    RuntimeWarning,
+                    stacklevel=4,
+                )
+    return tuple(groups)
+
+
+def _append_catalog_population(
+    catalog_population, pop_labels, pop_lower, pop_upper, pop_kinds,
+    labels, lower, upper, prior_kinds,
+) -> int:
+    """Append the per-catalog population coordinates; return their number."""
+    index = {label: i for i, label in enumerate(pop_labels)}
+    count = 0
+    for k, owned in catalog_population:
+        for label in owned:
+            copy = per_catalog_population_label(label, k)
+            if copy in labels:
+                raise ValueError(f"per-catalog population label {copy!r} is already a label")
+            i = index[label]
+            labels.append(copy)
+            lower.append(float(pop_lower[i]))
+            upper.append(float(pop_upper[i]))
+            prior_kinds.append(tuple(pop_kinds[i]))
+            count += 1
+    return count
+
+
 def _kernel_pin_setting(value) -> str:
     if not isinstance(value, str):
         raise TypeError(
@@ -1014,6 +1177,7 @@ def model(
     survey_priors=None,
     catalog_sky_weighting="conditional",
     field_normalizer=None,
+    per_catalog_population=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -1136,6 +1300,36 @@ def model(
     ``sigma_kde`` are fixed. The plan records the weighting, completeness,
     number of catalogs, normaliser, per-catalog pin activity and selection
     payloads in ``ParameterPlan.catalog_model``.
+
+    ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
+    ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
+    labels' ``_c{k}`` suffix) its own copy of the named population
+    parameters, each named by its label or its ASCII name as in
+    ``Population(fixed=...)``; for example ``{2: ["G.mu", "mu_chi"]}``. Each
+    catalog's population then multiplies its own branch of the host-density
+    mixture, for the PE samples and the injections alike:
+
+        log w = logsumexp_k [ log w_k + log p_pop(theta | L_k)
+                              + log n_k(z | p_k) - log Z_k ] - log J - log pi.
+
+    Catalog 1's population ``L_1`` is the analysis's population (its labels,
+    sampled or fixed as ``population`` says). Catalog ``k``'s ``L_k`` is
+    ``L_1`` with each named entry replaced by its own coordinate
+    ``"<label>_c{k}"``: an absolute value, not an offset, with the base
+    parameter's prior bounds and prior kind. Every entry not named is read
+    from ``L_1`` and so shared: a sampled base width is common to every
+    catalog. The copies sit after the survey blocks and before the mixture
+    weights (the frozen reference's order), catalog by catalog, each in model
+    order. A joint prior constraint of the model whose members are all
+    copied applies to the copies too. The selection term uses the same
+    per-catalog kernel, so the expected detected fraction is ``mu = sum_k
+    w_k alpha_k(L_k)``, ``alpha_k`` the detectable fraction of branch k's
+    population over branch k's host density (``p_det`` integrated against
+    ``p_pop(. | L_k) n_k / Z_k``), estimated from the same injections. The
+    plan records the blocks (``ParameterPlan.catalog_population``) and a run
+    fingerprint changes with them; ``ds.decode_parameters`` returns the K
+    vectors as ``catalog.populations``. Without it (the default) one
+    population multiplies the whole mixture and nothing changes.
     """
     if cosmology is None:
         cosmology = Cosmology()
@@ -1245,6 +1439,21 @@ def model(
         shared_gamma=population.shared_gamma,
     )
     pop_labels = tuple(str(label) for label in pop_labels)
+    catalog_population = ()
+    population_constraints = ()
+    if per_catalog_population is not None:
+        population_model = get_model(
+            population.model_name,
+            shared_beta=population.shared_beta,
+            shared_spin=population.shared_spin,
+            shared_gamma=population.shared_gamma,
+        )
+        catalog_population = _resolve_per_catalog_population(
+            per_catalog_population, redshift, population_model, pop_labels
+        )
+        population_constraints = _per_catalog_constraint_groups(
+            population_model, catalog_population
+        )
 
     angular_lower, angular_upper, angular_labels, angular_kinds, angular_latex = (
         angular_model_prior_parser(angular)
@@ -1327,7 +1536,17 @@ def model(
     # survey_priors names them) its selection nuisances; then a mixture's
     # weights. Fixed entries leave the coordinates.
     n_catalog = 0
+    n_catalog_population = 0
+    copies_placed = not catalog_population
     for name, lo, hi, kind, opt_in in block:
+        if not copies_placed and name in fcat_labels:
+            # Per-catalog population copies: after every survey block, before
+            # the mixture weights.
+            n_catalog_population = _append_catalog_population(
+                catalog_population, pop_labels, pop_lower, pop_upper, pop_kinds,
+                labels, lower, upper, prior_kinds,
+            )
+            copies_placed = True
         if name in survey_fixed or (opt_in and name not in survey_prior_overrides):
             continue
         lo, hi, kind = survey_prior_overrides.get(name, (lo, hi, kind))
@@ -1352,7 +1571,7 @@ def model(
         shared_beta=population.shared_beta,
         shared_spin=population.shared_spin,
         shared_gamma=population.shared_gamma,
-        extra_constraint_groups=angular_constraints,
+        extra_constraint_groups=tuple(angular_constraints) + population_constraints,
     )
 
     plan = ParameterPlan(
@@ -1382,6 +1601,8 @@ def model(
         kernel_pin_active=kernel_pin_applies(redshift, labels, kernel_pin),
         n0_units=getattr(redshift, "n0_units", "physical"),
         catalog_model=_catalog_model_record(redshift, labels, kernel_pin),
+        catalog_population=catalog_population,
+        n_catalog_population=n_catalog_population,
     )
     return Analysis(
         cosmology=cosmology,
@@ -1408,4 +1629,5 @@ __all__ = [
     "CompleteCatalogRedshift",
     "BrightRedshift",
     "model",
+    "per_catalog_population_label",
 ]

@@ -13,6 +13,16 @@ hierarchical reducer's. With one catalog the density is ``n_1`` alone: ``Z_1``
 is common to every sample and cancels between the event evidences and
 ``N log mu``, so it is not evaluated.
 
+With per-catalog population blocks (``ds.model(...,
+per_catalog_population=...)``) each catalog's population enters its own
+branch instead of multiplying the collapsed mixture:
+
+    log w = logsumexp_k [ log w_k + log p_pop(theta | L_k) + log n_k - log Z_k ]
+            - log J - log pi,
+
+for the PE samples and the injections alike, so the expected detected
+fraction is ``mu = sum_k w_k alpha_k(L_k)``.
+
 :func:`field_mixture_log_likelihood` evaluates it from bind-time operands
 (:class:`CatalogMixtureOperands`); ``ds.model(..., catalog_sky_weighting=
 "field")`` binds it through :func:`darksirens.runtime_binding.bind_analysis`,
@@ -240,7 +250,18 @@ def field_mixture_log_likelihood(
     ``catalog_parameters`` is a
     :class:`~darksirens.catalog.types.CatalogMixtureParameters` (one
     :class:`~darksirens.catalog.types.CatalogParameters` per catalog and the
-    ``(K,)`` log weights); ``gw_pe.pixels`` and ``gw_sel.pixels`` are the
+    ``(K,)`` log weights). When its ``populations`` is set (one population
+    vector per catalog, ``ds.model(..., per_catalog_population=...)``) each
+    catalog's population enters its own branch, for the PE samples and the
+    injections alike:
+
+        log w = logsumexp_k [ log w_k + log p_pop(theta | L_k)
+                              + log n_k(z | p_k) - log Z_k ] - log J - log pi,
+
+    where ``population`` is catalog 1's vector (``populations[0]``); with
+    ``populations`` ``None`` (the default) one population multiplies the
+    collapsed mixture, on the unchanged program.
+    ``gw_pe.pixels`` and ``gw_sel.pixels`` are the
     samples' compact rows, ``(N,)`` for one catalog and ``(N, K)`` (one
     column per catalog) otherwise. ``normalizer`` is the form of each
     ``Z_k`` (``"direct"`` or ``"moments"``, the latter for
@@ -277,6 +298,16 @@ def field_mixture_log_likelihood(
         compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
     )
     log_weights = jnp.asarray(catalog_parameters.log_weights)
+    # Per-catalog population blocks (ds.model(..., per_catalog_population=...)):
+    # one population vector per catalog, multiplied into its own branch. None
+    # (the default) is the one shared population, on the unchanged program.
+    branch_pops = getattr(catalog_parameters, "populations", None)
+    if branch_pops is not None:
+        branch_pops = tuple(branch_pops)
+        if n < 2:
+            raise ValueError("per-catalog populations require two or more catalogs")
+        if len(branch_pops) != n:
+            raise ValueError(f"{len(branch_pops)} population vectors for {n} catalogs")
 
     # Member-independent work, once per proposal.
     pieces = []
@@ -328,6 +359,8 @@ def field_mixture_log_likelihood(
             ]
             if n == 1:
                 return terms[0]
+            if branch_pops is not None:
+                return [log_weights[k] + terms[k] for k in range(n)]
             return mixture_logsumexp([log_weights[k] + terms[k] for k in range(n)])
 
         lowp = {}
@@ -345,6 +378,8 @@ def field_mixture_log_likelihood(
                 terms = [fns[k](z, _column(pix, k)) for k in range(n)]
                 if n == 1:
                     return terms[0]
+                if branch_pops is not None:
+                    return [lw[k] + terms[k] for k in range(n)]
                 return mixture_logsumexp([lw[k] + terms[k] for k in range(n)])
 
             lowp = dict(
@@ -369,6 +404,7 @@ def field_mixture_log_likelihood(
             angular_model=angular_model,
             angular_params=angular_params,
             **lowp,
+            **({} if branch_pops is None else {"branch_populations": branch_pops}),
         )
 
     if not n_members:

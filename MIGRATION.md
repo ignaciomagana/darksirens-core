@@ -470,3 +470,29 @@ accepted state constructor, factored out unchanged). Every default plan,
 fingerprint and bound program is unchanged (optimized HLO and logL bit for
 bit against a clean `main`).
 
+### Per-catalog population blocks (opt-in, default unchanged)
+
+`ds.model(catalog=[A, B, ...], catalog_sky_weighting="field",
+per_catalog_population={2: ["G.mu", "mu_chi"]})` is the form of the
+reference's tracer-dependent population blocks (legacy commit af896ca,
+`per_catalog_pop_params=("G.mu_c2", "mu_chi_c2")` with `mixture_pop_params`,
+the code of the gws-agn Analyses 8 to 13). Catalog `k` carries its own copy
+of the named population parameters, labelled `"<label>_c{k}"` (for example
+`"$\mu_{\rm G}$_c2"`), with the base parameter's prior; every other entry is
+catalog 1's and so shared. Each branch's population multiplies its own
+host-density term inside the branch sum, `logsumexp_k [log w_k + log
+p_pop(theta | L_k) + log n_k - log Z_k]`, for the PE samples and the
+injections alike, as the reference does. Labels and order follow the
+reference (the copies after the survey blocks, before `fcat_2 .. fcat_K`).
+Spelling differs: core takes a mapping `{catalog number: [names]}`, names
+being labels or ASCII names (`"mu_chi"`), where the reference took a list of
+suffixed plain names (`"mu_chi_c2"`) or broadcast an unsuffixed one.
+`ds.decode_parameters` returns the K vectors as `catalog.populations`. Parity
+with af896ca's kernel replayed onto the pinned reference c042527: 2.8e-14
+(`tools/probe_catalog_population_blocks.py`, not in CI: af896ca is not on the
+public reference). Run directly on af896ca, the values differ by up to 0.14 on
+the probe's fixture, the shared-population control included: af896ca branches
+from 2b86a2d, and the reference's powerlaw+peak density changed after that
+commit (pairing normaliser and support fixes), which core inherits from
+c042527.
+

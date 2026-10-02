@@ -193,7 +193,8 @@ class DecodedParameters(NamedTuple):
     ``population``
         The full population vector, one entry per
         ``ParameterPlan.population_labels`` in that order, fixed entries
-        included (``Population(fixed=...)``).
+        included (``Population(fixed=...)``). With per-catalog population
+        blocks it is catalog 1's (see ``catalog.populations``).
     ``catalog``
         For a catalog analysis, the
         :class:`~darksirens.catalog.types.CatalogParameters` ``(n0, delta,
@@ -210,8 +211,12 @@ class DecodedParameters(NamedTuple):
         For a field-weighted analysis (``catalog_sky_weighting="field"``) a
         :class:`~darksirens.catalog.types.CatalogMixtureParameters`: one
         ``CatalogParameters`` per catalog (its suffixed labels, its store's
-        ``z_depth``) and the ``(K,)`` log mixture weights of the sticks
-        ``fcat_2 .. fcat_K``.
+        ``z_depth``), the ``(K,)`` log mixture weights of the sticks
+        ``fcat_2 .. fcat_K`` and ``populations``: ``None``, or with
+        ``model(..., per_catalog_population=...)`` one full population vector
+        per catalog, catalog 1's being ``population`` and catalog ``k``'s
+        reading its ``"<label>_c{k}"`` coordinates and, elementwise, catalog
+        1's values for every other entry.
     ``angular``
         The angular-model coordinates (``ParameterPlan.angular_labels``), a
         slice of ``theta``; empty for the isotropic model.
@@ -266,6 +271,10 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
     catalog_params = None
     if isinstance(analysis.redshift, FieldCatalogMixtureRedshift):
         catalog_params = _decode_mixture(analysis, theta, free, cosmology.H0)
+        if plan.catalog_population:
+            catalog_params = catalog_params._replace(
+                populations=_decode_catalog_populations(analysis, population, free)
+            )
     elif isinstance(analysis.redshift, (IncompleteCatalogRedshift, CompleteCatalogRedshift)):
         fixed_survey = dict(plan.fixed_survey)
 
@@ -294,7 +303,9 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
                 selection=_decode_selection_model(selection, free)
             )
 
-    angular_start = plan.n_cosmology + plan.n_population + plan.n_catalog
+    angular_start = (
+        plan.n_cosmology + plan.n_population + plan.n_catalog + plan.n_catalog_population
+    )
     angular = theta[angular_start : angular_start + plan.n_angular]
     return DecodedParameters(cosmology, population, catalog_params, angular)
 
@@ -335,6 +346,30 @@ def _decode_mixture(analysis, theta, free, H0) -> CatalogMixtureParameters:
             jnp.stack([value(f"fcat_{m}") for m in range(2, n + 1)])
         )
     return CatalogMixtureParameters(tuple(components), log_weights)
+
+
+def _decode_catalog_populations(analysis, population, free) -> tuple:
+    """One population vector per catalog of ``per_catalog_population``.
+
+    Catalog 1's is ``population`` itself. Catalog ``k``'s takes each label it
+    owns from its coordinate ``"<label>_c{k}"`` and every other entry from
+    ``population``, elementwise.
+    """
+    from darksirens.analysis import per_catalog_population_label
+
+    plan = analysis.parameters
+    owned = dict(plan.catalog_population)
+    out = [population]
+    for k in range(2, analysis.redshift.n_catalogs + 1):
+        labels = owned.get(k, ())
+        if not labels:
+            out.append(population)
+            continue
+        out.append(jnp.stack([
+            free[per_catalog_population_label(label, k)] if label in labels else population[i]
+            for i, label in enumerate(plan.population_labels)
+        ]))
+    return tuple(out)
 
 
 def _decode_selection_model(selection, sampled, suffix=""):

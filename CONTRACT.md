@@ -230,6 +230,24 @@ below).
   `darksiren_log_likelihood(..., catalog_sky_weighting="field",
   n_catalogs=K)` the likelihood agrees to 3e-14
   (`tools/probe_catalog_mixture.py`; on split mock T, 72 points, 3e-14).
+- `model(..., per_catalog_population={k: [parameter, ...]})` (opt-in, a
+  field-weighted mixture of `K >= 2` catalogs only): catalog `k` (`2 <= k <=
+  K`) carries its own copy of the named population parameters (labels or
+  ASCII names), labelled `"<label>_c{k}"`, with the base parameter's prior
+  bounds and kind; every entry not named is catalog 1's (the analysis's
+  population), so a sampled base width is shared. The copies sit after the
+  survey blocks and before the weights, catalog by catalog in model order. A
+  joint constraint of the model whose members are all copied is applied to
+  the copies. Each catalog's population multiplies its own branch, for PE
+  samples and injections alike: `log w = logsumexp_k [log w_k + log p_pop(theta
+  | L_k) + log n_k - log Z_k] - log J - log pi`, so `mu = sum_k w_k
+  alpha_k(L_k)`. `decode_parameters` returns the K vectors as
+  `catalog.populations` (`CatalogMixtureParameters.populations`, `None`
+  otherwise; catalog 1's is `population`). `ParameterPlan.catalog_population`
+  and `n_catalog_population` record the blocks, and `parameter_plan_semantic`
+  adds them only when set. `compute_dtype="float32"` is supported. Against the
+  reference's tracer-dependent blocks (legacy af896ca, replayed onto c042527)
+  the likelihood agrees to 3e-14 (`tools/probe_catalog_population_blocks.py`).
 - `model(..., survey_priors={label: prior})` (opt-in) sets the prior of named
   survey parameters of a catalog analysis: `(lower, upper)` or
   `("uniform", lower, upper)`, a normal `("normal", loc, scale)` truncated to
