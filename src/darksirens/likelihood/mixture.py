@@ -13,6 +13,16 @@ hierarchical reducer's. With one catalog the density is ``n_1`` alone: ``Z_1``
 is common to every sample and cancels between the event evidences and
 ``N log mu``, so it is not evaluated.
 
+With per-catalog population blocks (``ds.model(...,
+per_catalog_population=...)``) each catalog's population enters its own
+branch instead of multiplying the collapsed mixture:
+
+    log w = logsumexp_k [ log w_k + log p_pop(theta | L_k) + log n_k - log Z_k ]
+            - log J - log pi,
+
+for the PE samples and the injections alike, so the expected detected
+fraction is ``mu = sum_k w_k alpha_k(L_k)``.
+
 :func:`field_mixture_log_likelihood` evaluates it from bind-time operands
 (:class:`CatalogMixtureOperands`); ``ds.model(..., catalog_sky_weighting=
 "field")`` binds it through :func:`darksirens.runtime_binding.bind_analysis`,
@@ -248,8 +258,9 @@ def field_mixture_log_likelihood(
         log w = logsumexp_k [ log w_k + log p_pop(theta | L_k)
                               + log n_k(z | p_k) - log Z_k ] - log J - log pi,
 
-    and ``population`` (catalog 1's vector) is not read; with ``populations``
-    ``None`` (the default) one population multiplies the collapsed mixture.
+    where ``population`` is catalog 1's vector (``populations[0]``); with
+    ``populations`` ``None`` (the default) one population multiplies the
+    collapsed mixture, on the unchanged program.
     ``gw_pe.pixels`` and ``gw_sel.pixels`` are the
     samples' compact rows, ``(N,)`` for one catalog and ``(N, K)`` (one
     column per catalog) otherwise. ``normalizer`` is the form of each
