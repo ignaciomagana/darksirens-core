@@ -8,11 +8,12 @@ parameter-plan coordinates.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
 
+from darksirens._binding_depth import BINDING_DEPTH
 from darksirens.analysis import (
     Analysis,
     BrightRedshift,
@@ -170,7 +171,48 @@ def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
     )
 
 
-def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None):
+class DecodedParameters(NamedTuple):
+    """The physical parameters one coordinate vector stands for.
+
+    Returned by :func:`decode_parameters` (``ds.decode_parameters``). These are
+    the values the bound likelihood evaluates at that coordinate: the bound
+    likelihood decodes through the same function, operation for operation.
+
+    ``cosmology``
+        A :class:`~darksirens.cosmology.parameters.CosmologyParameters`
+        ``(H0, Om0, w0, wa)``: sampled entries are elements of ``theta``, fixed
+        ones the plan's Python floats (``ParameterPlan.fixed_cosmology``).
+    ``population``
+        The full population vector, one entry per
+        ``ParameterPlan.population_labels`` in that order, fixed entries
+        included (``Population(fixed=...)``).
+    ``catalog``
+        For a catalog analysis, the
+        :class:`~darksirens.catalog.types.CatalogParameters` ``(n0, delta,
+        sigma_kde, z_depth)``: ``n0`` is the physical density in Mpc^-3
+        (``10**log10n0``, times ``(H0 / 100)**3`` under
+        ``model(..., n0_units="h_scaled")``; ``1.0`` for
+        ``completeness="complete"``, which has no ``log10n0``), a parameter
+        fixed with ``model(..., fixed_survey={...})`` enters as a 0-d array of
+        ``theta``'s dtype, and ``z_depth`` is the catalog's survey depth (a
+        Python float or ``None``, never traced). ``None`` for spectral and
+        bright sirens.
+    ``angular``
+        The angular-model coordinates (``ParameterPlan.angular_labels``), a
+        slice of ``theta``; empty for the isotropic model.
+
+    The record is an immutable named tuple, so it is a JAX pytree and unpacks
+    as ``cosmology, population, catalog, angular = ...``.
+    """
+
+    cosmology: CosmologyParameters
+    population: Any
+    catalog: CatalogParameters | None
+    angular: Any
+
+
+def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> DecodedParameters:
+    """The one decoder: the bound likelihood and :func:`decode_parameters` both call it."""
     plan = analysis.parameters
     theta = jnp.asarray(theta)
     if theta.ndim != 1 or int(theta.shape[0]) != len(plan.labels):
@@ -230,7 +272,73 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None):
 
     angular_start = plan.n_cosmology + plan.n_population + plan.n_catalog
     angular = theta[angular_start : angular_start + plan.n_angular]
-    return cosmology, population, catalog_params, angular
+    return DecodedParameters(cosmology, population, catalog_params, angular)
+
+
+def decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH) -> DecodedParameters:
+    """Decode one coordinate vector into the physical parameters the likelihood uses.
+
+    ``analysis`` is the :class:`~darksirens.analysis.Analysis` returned by
+    ``ds.model`` or a :class:`BoundAnalysis` from :func:`bind_analysis`.
+    ``theta`` holds one value per ``analysis.parameters.labels`` entry, in that
+    order (the sampled coordinates; fixed parameters are not in it). The
+    result is a :class:`DecodedParameters` record ``(cosmology, population,
+    catalog, angular)``, the values the bound likelihood evaluates at
+    ``theta``: this is the decoder the bound likelihood itself calls, so the
+    arithmetic (fixed values, the ``n0_units`` conversion) is the same,
+    operation for operation, and a likelihood that decodes through it inside
+    its jitted program compiles to the same program as the bound one.
+
+    ``z_depth`` is the survey depth carried in ``catalog.z_depth``. By default
+    it is the one :func:`bind_analysis` uses: the catalog store's ``z_depth``
+    for a catalog analysis, the binding's ``z_depth`` for a
+    :class:`BoundAnalysis`, and ``None`` for spectral and bright sirens. A
+    companion that evaluates against another depth may pass it explicitly
+    with an ``Analysis``; it is refused with a ``BoundAnalysis``, which
+    already fixes it. It never enters the arithmetic of the other fields.
+
+    Pure JAX on ``theta``: it can be called eagerly or inside ``jax.jit``,
+    ``jax.vmap`` and ``jax.grad``. Every field except an h-scaled ``n0`` is a
+    copy of an entry of ``theta`` or a fixed value of the plan (or, for
+    physical units, ``10**log10n0``), identical in every context. The h-scaled
+    ``n0 = 10**log10n0 * (H0 / 100)**3`` is rounded as XLA compiles it: one
+    program may evaluate the cube as ``H0**3 * 1e-6`` and another not, so an
+    eager, a jitted and a vmapped call can differ in the last bit or two
+    (below 1e-15 relative). Inside one program it is the bound likelihood's
+    value. A ``theta`` that is not one-dimensional with one entry per label
+    raises ``ValueError``.
+    """
+    if isinstance(analysis, BoundAnalysis):
+        if z_depth is not BINDING_DEPTH:
+            raise TypeError(
+                "decode_parameters takes z_depth from the BoundAnalysis; pass "
+                "bound.analysis to decode against another depth"
+            )
+        depth = analysis.z_depth
+        analysis = analysis.analysis
+    elif isinstance(analysis, Analysis):
+        if z_depth is not BINDING_DEPTH:
+            depth = z_depth
+        elif isinstance(
+            analysis.redshift, (IncompleteCatalogRedshift, CompleteCatalogRedshift)
+        ):
+            depth = analysis.catalog.z_depth
+        else:
+            depth = None
+    else:
+        raise TypeError(
+            "decode_parameters expects the Analysis returned by ds.model or a "
+            f"BoundAnalysis, got {type(analysis).__name__}"
+        )
+    labels = analysis.parameters.labels
+    shape = tuple(np.shape(theta))
+    if len(shape) != 1 or shape[0] != len(labels):
+        raise ValueError(
+            f"theta must be one-dimensional with one value per sampled parameter "
+            f"(shape ({len(labels)},), in the order of analysis.parameters.labels "
+            f"{list(labels)}), got shape {shape}"
+        )
+    return _decode_theta(analysis, theta, z_depth=depth)
 
 
 @dataclass(frozen=True)
@@ -773,4 +881,10 @@ def bind_analysis(
     )
 
 
-__all__ = ["BoundAnalysis", "bind_analysis", "required_fit_columns"]
+__all__ = [
+    "BoundAnalysis",
+    "DecodedParameters",
+    "bind_analysis",
+    "decode_parameters",
+    "required_fit_columns",
+]

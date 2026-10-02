@@ -396,3 +396,20 @@ optional entries are added).
   caller that checkpoints an ordinary analysis composes its own fingerprint
   (`parameter_plan_semantic`, `core_numerics_semantic(bound)`, its data
   identity, e.g. `file_identity`).
+
+### Public parameter decoding (additive API, no likelihood change)
+
+Companion packages (`darksirens-lss`, `darksirens-surveys`, the DESI
+consumer) decoded coordinate vectors with copies of core's private
+`runtime_binding._decode_theta`, so any change to it would silently diverge
+from them. `ds.decode_parameters(analysis, theta, *, z_depth=...)` is now the
+public form: it takes a `ds.model` analysis or a `BoundAnalysis` and returns
+the immutable record `runtime_binding.DecodedParameters(cosmology,
+population, catalog, angular)`, with the plan's fixed values, the
+`fixed_survey` constants and the `n0_units` conversion applied, and `z_depth`
+defaulting to the depth `bind_analysis` uses. The private decoder now returns
+the same record (it unpacks as the old 4-tuple) and the bound likelihood
+still calls it, so there is one implementation: on a clean `main`
+comparison the default likelihood's optimized HLO and logL are bitwise
+unchanged. The package-root surface gains `decode_parameters`; see
+"Parameter decoding" in `CONTRACT.md` for the stability promise.

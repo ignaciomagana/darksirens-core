@@ -121,6 +121,22 @@ target = ds.InferenceTarget(
 result = ds.infer(target)
 ```
 
+A companion that builds its own likelihood on an ordinary plan decodes the
+coordinate vector with `ds.decode_parameters`, the decoder the bound
+likelihood itself uses:
+
+```python
+decoded = ds.decode_parameters(analysis, theta)  # or a BoundAnalysis
+decoded.cosmology       # CosmologyParameters(H0, Om0, w0, wa)
+decoded.population      # every population parameter, fixed ones included
+decoded.catalog         # CatalogParameters(n0, delta, sigma_kde, z_depth), or None
+decoded.angular         # the angular-model coordinates
+```
+
+It applies the plan's fixed values and the `n0_units` conversion, works
+eagerly and under `jax.jit`, `jax.vmap` and `jax.grad`, and refuses a `theta`
+of the wrong length. It is public API: changes go through `CONTRACT.md`.
+
 For field/LSS-style redshift information, `darksirens.likelihood.host_density`
 provides the explicit `RedshiftModel` protocol and target builder. Companion
 packages own their field/count/tracer state; core owns the GW weighting,

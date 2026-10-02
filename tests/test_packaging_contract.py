@@ -28,6 +28,7 @@ FROZEN_ROOT_API = {
     "load_injections",
     "load_catalog",
     "model",
+    "decode_parameters",
     "infer",
 }
 

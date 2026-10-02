@@ -71,6 +71,7 @@ jobs:
               "load_injections",
               "load_catalog",
               "model",
+              "decode_parameters",
               "infer",
           }
           assert set(ds.__all__) == expected, (set(ds.__all__), expected)
