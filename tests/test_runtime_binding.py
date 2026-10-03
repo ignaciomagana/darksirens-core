@@ -1,9 +1,12 @@
+import contextlib
 from dataclasses import replace
 import json
 import warnings
 
 import numpy as np
 import pytest
+
+from _historical_settings import historical_evaluation
 
 from darksirens import Cosmology, Population, model
 from darksirens.catalog.geometry import ang2pix_ring
@@ -146,7 +149,18 @@ def test_spectral_binding_matches_direct_fixed_theta_exactly():
     assert np.isfinite(float(actual))
 
 
-def test_incomplete_catalog_binding_matches_direct_and_preserves_global_pixels():
+@pytest.mark.parametrize("settings", ["historical", "defaults"])
+def test_incomplete_catalog_binding_matches_direct_and_preserves_global_pixels(settings):
+    # The bound (jitted) and direct (eager) programs are bitwise equal under the
+    # historical settings; under the 2026-10-02 defaults XLA may fuse the
+    # gathered missing-host density differently in the two programs (1 ulp,
+    # measured 1.8e-15 on the GitHub runners), so they are compared to 1e-13.
+    context = historical_evaluation() if settings == "historical" else contextlib.nullcontext()
+    with context:
+        _check_incomplete_binding_matches_direct(exact=settings == "historical")
+
+
+def _check_incomplete_binding_matches_direct(*, exact):
     events, injections = _stores()
     catalog_store = _catalog()
     analysis = model(
@@ -193,7 +207,10 @@ def test_incomplete_catalog_binding_matches_direct_and_preserves_global_pixels()
         pop_model=analysis.population.model_name,
     )
     actual = bound(theta)
-    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    if exact:
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    else:
+        np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-13, atol=0.0)
     assert np.isfinite(float(actual))
 
 
