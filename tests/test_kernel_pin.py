@@ -54,6 +54,8 @@ from darksirens.inference.run_fingerprint import (
 from darksirens.population import get_fixed_population_params, pop_model_prior_parser
 from darksirens.runtime_binding import _decode_theta, bind_analysis
 
+from _historical_settings import catalog_settings
+
 
 FIT = ("m1det", "q", "dL", "chieff")
 MODEL = "powerlaw+peak"
@@ -488,17 +490,29 @@ def test_a_binding_serves_a_pin_only_under_a_plan_that_admits_it():
     assert dataclasses.replace(pinned, kernel_pin=None).kernel_pin is None
 
 
+@pytest.mark.parametrize("layout", ("galaxy_list", "padded"))
 @pytest.mark.parametrize("plan", ("H0", "pop"))
-def test_the_pinned_program_has_no_per_call_catalog_quadrature(plan):
-    # The point of the pin: the 24-node quadrature over every catalog row
+def test_the_pinned_program_has_no_per_call_catalog_quadrature(plan, layout):
+    # The point of the pin: the 24-node quadrature over every catalog galaxy
     # leaves the per-call program, on the PE and on the selection side, and
     # only the probe rows are rebuilt. Values alone cannot show this (a
-    # binding that pinned one side only would agree to rounding).
-    auto, pinned, unpinned = _bound_pair(plan)
+    # binding that pinned one side only would agree to rounding). Under the
+    # default galaxy-list layout the unpinned quadrature runs on the
+    # (N_galaxies, 24) list; under the historical "padded" layout (set
+    # explicitly) on the (N_rows, N_max, 24) padded catalog.
+    if layout == "galaxy_list":
+        auto, pinned, unpinned = _bound_pair(plan)
+    else:
+        with catalog_settings(kernel_layout="padded"):
+            auto, off = _pair(PLANS[plan], z_depth=0.30)
+            pinned, unpinned = _bind(auto), _bind(off)
+    assert (pinned.catalog.galaxy_index is not None) == (layout == "galaxy_list")
     n_rows, n_max = (int(n) for n in pinned.catalog.zgals.shape)
     n_probe = len(pinned.kernel_pin.probe_rows)
     assert n_probe != n_rows
-    full, probe = f"[{n_rows},{n_max},24]", f"[{n_probe},{n_max},24]"
+    n_gal = int(np.sum(np.asarray(pinned.catalog.ngals)))
+    full = f"[{n_gal},24]" if layout == "galaxy_list" else f"[{n_rows},{n_max},24]"
+    probe = f"[{n_probe},{n_max},24]"
 
     def shapes(bound):
         eqns, _ = _program(bound, _theta(auto, 90.0 if "H0" in auto.parameters.labels else None))
@@ -766,7 +780,8 @@ def test_a_binding_accepts_the_catalog_its_pin_was_built_from():
     pinned, _, _ = _wide_pair()
     cat = pinned.catalog
     # The same values in new arrays (host copies, then back on the device).
-    copy = GalaxyCatalog(*(None if leaf is None else jnp.asarray(np.array(leaf)) for leaf in cat))
+    # Every array leaf, the default's galaxy list and kernel window included.
+    copy = jax.tree_util.tree_map(lambda leaf: jnp.asarray(np.array(leaf)), cat)
     assert copy.zgals is not cat.zgals
     same = dataclasses.replace(pinned, catalog=copy)
     assert same.kernel_pin is pinned.kernel_pin
@@ -816,7 +831,7 @@ def test_the_digest_is_read_on_the_host_and_does_not_depend_on_the_layout(monkey
             cosmo, params, catalog, H0_ref=pin.H0_ref, probe_rows=pin.probe_rows
         )
 
-    host = GalaxyCatalog(*(None if leaf is None else np.asarray(leaf) for leaf in pinned.catalog))
+    host = jax.tree_util.tree_map(np.asarray, pinned.catalog)
     assert digest(host) == pin.catalog_digest
     # A device array is read in row blocks; the bytes, and the digest, are the same.
     monkeypatch.setattr(_redshift, "_host_resident", lambda value: False)

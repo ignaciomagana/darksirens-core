@@ -1,7 +1,12 @@
-"""Opt-in memory layouts of the incomplete-catalog (dark-siren) likelihood.
+"""Memory layouts of the incomplete-catalog (dark-siren) likelihood.
 
 Two settings (:mod:`darksirens.catalog.settings`) change where the dark-siren
-catalog terms live in memory, not what they compute:
+catalog terms live in memory, not what they compute.  Both are on by default
+since 2026-10-02 (``kernel_layout="galaxy_list"``, ``missing_density="auto"``);
+the historical program is ``kernel_layout="padded"`` and
+``missing_density="grid"``, which these tests set explicitly as the reference
+each layout is compared with (with ``kernel_window="off"``, so the layouts are
+compared alone):
 
 - ``kernel_layout="galaxy_list"``: the per-galaxy 24-node kernel normaliser is
   evaluated on the flat list of real galaxies (in fixed-size chunks) instead
@@ -12,7 +17,7 @@ catalog terms live in memory, not what they compute:
   grids rebuilt on every proposal.
 
 These tests pin: the settings and their fingerprint entry (absent at the
-defaults); the one-pass ``ndtri`` bit for bit against the library; the
+historical values, recorded at the defaults); the one-pass ``ndtri`` bit for bit against the library; the
 galaxy list and its traced check; the kernel state and the gathered missing
 density against the padded grids; and the conditional and field likelihoods,
 values and gradients, against the default program, with the kernel pin on and
@@ -83,6 +88,8 @@ from darksirens.selection.footprint import (
     selection_completion_curves_with_row_fraction,
 )
 
+from _historical_settings import HISTORICAL_CATALOG, catalog_settings
+
 jax.config.update("jax_enable_x64", True)
 
 FIT = ("m1det", "q", "dL", "chieff")
@@ -95,14 +102,9 @@ COSMO = CosmologyParameters(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0)
 
 @contextlib.contextmanager
 def _settings(**kwargs):
-    before = catalog_evaluation_settings()
-    configure_catalog_evaluation(**kwargs)
-    try:
+    """The historical program (padded, grid, no kernel window) with ``kwargs`` on top."""
+    with catalog_settings(**{**HISTORICAL_CATALOG, **kwargs}):
         yield
-    finally:
-        configure_catalog_evaluation(
-            kernel_layout=before.kernel_layout, missing_density=before.missing_density
-        )
 
 
 def _same_bits(a, b):
@@ -140,24 +142,37 @@ def _galaxies(n_rows=40, n_max=9, seed=20261001, empty=(1, 7, 30)):
 # Settings and fingerprint
 
 
-def test_defaults_are_the_historical_layouts_and_stay_out_of_the_fingerprint():
-    defaults = CatalogEvaluationSettings(kernel_layout="padded", missing_density="grid")
-    assert defaults.to_dict() == {}
-    assert "catalog_evaluation" not in core_numerics_semantic()
+def test_historical_layouts_stay_out_of_the_fingerprint_and_the_defaults_are_recorded():
+    historical = CatalogEvaluationSettings(
+        kernel_layout="padded", missing_density="grid", kernel_window="off"
+    )
+    assert historical.to_dict() == {}
+    # The defaults since 2026-10-02 are recorded, so a checkpoint written
+    # under the historical layouts is not resumed under them.
+    defaults = catalog_evaluation_settings()
+    assert (defaults.kernel_layout, defaults.missing_density) == ("galaxy_list", "auto")
+    assert core_numerics_semantic()["catalog_evaluation"] == {
+        "kernel_layout": "galaxy_list", "missing_density": "auto", "kernel_window": "auto"
+    }
+    with _settings():
+        assert "catalog_evaluation" not in core_numerics_semantic()
     with _settings(kernel_layout="galaxy_list"):
         assert core_numerics_semantic()["catalog_evaluation"] == {
             "kernel_layout": "galaxy_list"
         }
     with _settings(missing_density="gather"):
         assert core_numerics_semantic()["catalog_evaluation"] == {"missing_density": "gather"}
-    assert "catalog_evaluation" not in core_numerics_semantic()
+    with _settings(missing_density="auto"):
+        assert core_numerics_semantic()["catalog_evaluation"] == {"missing_density": "auto"}
+    assert catalog_evaluation_settings() == defaults
 
 
 @pytest.mark.parametrize("kwargs", [dict(kernel_layout="flat"), dict(missing_density="lazy")])
 def test_settings_are_checked(kwargs):
+    before = catalog_evaluation_settings()
     with pytest.raises(ValueError, match="must be one of"):
         configure_catalog_evaluation(**kwargs)
-    assert catalog_evaluation_settings().to_dict() == {}
+    assert catalog_evaluation_settings() == before
 
 
 # ---------------------------------------------------------------------------
@@ -354,11 +369,16 @@ def test_gathered_prior_state_evaluates_as_the_grid_state():
             return state, eval_incomplete_catalog_prior_state_vmap(z, row, state, cat)
         return jax.jit(evaluate)
 
-    grid_state, grid = evaluator()(catalog)
+    with _settings():
+        grid_state, grid = evaluator()(catalog)
     with _settings(missing_density="gather"):
         state, values = evaluator()(catalog)
         assert isinstance(state.dN_miss, GatheredCompletionCurves)
         _, both = evaluator()(with_galaxy_index(catalog))
+    # The default ("auto") gathers here, as "gather" does, bit for bit.
+    auto_state, auto = evaluator()(catalog)
+    assert isinstance(auto_state.dN_miss, GatheredCompletionCurves)
+    assert _same_bits(auto, values)
     assert isinstance(grid_state.dN_miss, jax.Array)
     np.testing.assert_allclose(values, grid, rtol=1e-13, atol=0.0)
     np.testing.assert_allclose(both, grid, rtol=1e-13, atol=0.0)
@@ -477,7 +497,8 @@ def _default(survey, z_depth, n0_units, grads):
     if key not in _DEFAULT:
         analysis = _analysis(survey, z_depth, n0_units)
         thetas = _thetas(analysis, n=4)
-        bound, values, grads = _evaluate(analysis, thetas, grads)
+        with _settings():
+            bound, values, grads = _evaluate(analysis, thetas, grads)
         assert bound.catalog.galaxy_index is None
         _DEFAULT[key] = (analysis, thetas, values, grads)
     return _DEFAULT[key]
@@ -523,7 +544,8 @@ def test_opt_in_layouts_compose_with_float32_weights(survey, z_depth):
         f = jax.jit(jax.vmap(lambda f, t: f(t), in_axes=(None, 0)))
         return bound, np.asarray(f(bound.as_pytree_callable(), jnp.asarray(thetas)))
 
-    _, ref = values()
+    with _settings():
+        _, ref = values()
     with _settings(kernel_layout="galaxy_list", missing_density="gather"):
         bound, got = values()
         assert bound.catalog.galaxy_index is not None
@@ -531,11 +553,24 @@ def test_opt_in_layouts_compose_with_float32_weights(survey, z_depth):
     np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-9)
 
 
-def test_default_binding_attaches_no_galaxy_list_and_keeps_grids():
+def test_historical_binding_attaches_no_galaxy_list_and_keeps_grids():
     analysis = _analysis("sampled", 0.3)
-    bound = bind_analysis(analysis, events=STORES[0], injections=STORES[1])
+    with _settings():
+        bound = bind_analysis(analysis, events=STORES[0], injections=STORES[1])
+        assert catalog_evaluation_settings().to_dict() == {}
     assert bound.catalog.galaxy_index is None
-    assert catalog_evaluation_settings().to_dict() == {}
+
+
+def test_default_binding_attaches_the_galaxy_list_and_gives_the_historical_likelihood():
+    # The defaults since 2026-10-02 (galaxy list, gathered missing density;
+    # the kernel window off here so the layouts are compared alone) against
+    # the historical program set explicitly.
+    analysis, thetas, ref, _ = _default("sampled", 0.3, "physical", False)
+    with catalog_settings(kernel_window="off"):
+        bound, values, _ = _evaluate(analysis, thetas, grads=False)
+    assert bound.catalog.galaxy_index is not None
+    np.testing.assert_array_equal(np.isfinite(values), np.isfinite(ref))
+    np.testing.assert_allclose(values, ref, rtol=1e-13, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

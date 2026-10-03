@@ -28,6 +28,7 @@ import pytest
 
 from darksirens import Cosmology, Population, model
 from darksirens.catalog.io import CatalogStore
+from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import GalaxyCatalog
 from darksirens.cosmology.distances import ddL_of_z, dL_of_z, dV_of_z
 from darksirens.gw.types import GWStore, SelectionStore
@@ -49,6 +50,8 @@ from darksirens.population.utils import (
     normalization_grid_settings,
 )
 from darksirens.runtime_binding import bind_analysis
+
+from _historical_settings import historical_evaluation
 
 FIT = ("m1det", "q", "dL", "chieff")
 MODEL = "powerlaw+peak"
@@ -418,8 +421,13 @@ def _walk(jaxpr, visit):
 
 @pytest.mark.parametrize("kind", ["spectral", "dark"])
 @pytest.mark.parametrize("scale", ["node_max", "analytic"])
-def test_per_sample_work_is_float32_and_every_reduction_float64(kind, scale):
-    with _pairing_scale(scale):
+@pytest.mark.parametrize("evaluation", ["default", "historical"])
+def test_per_sample_work_is_float32_and_every_reduction_float64(kind, scale, evaluation):
+    # "default" is the evaluation since 2026-10-02 (per-point pairing
+    # normaliser, galaxy list, gathered missing density, kernel window);
+    # "historical" sets the values every run used before it explicitly.
+    stack = historical_evaluation() if evaluation == "historical" else contextlib.nullcontext()
+    with _pairing_scale(scale), stack:
         _check_per_sample_dtypes(kind)
 
 
@@ -452,6 +460,15 @@ def _check_per_sample_dtypes(kind):
 
     _walk(closed.jaxpr, visit)
     assert f32_ops > 100
+    if kind == "dark" and catalog_evaluation_settings().gathers_missing_density():
+        # The gathered missing density forms its completeness ratio
+        # C = observed / z_factor at the two bracketing grid nodes of each
+        # sample in float64, the arithmetic of the grid it stands for, and
+        # casts the result (so float32 gather equals float32 grid bit for
+        # bit): one float64 division per node, for the PE samples and the
+        # injections, and nothing else.
+        assert [name for name, _ in f64_heavy] == ["div"] * 4, f64_heavy
+        f64_heavy = []
     assert not f64_heavy, f64_heavy[:10]
     # Every reduction that removes a sample axis (log-sum-exp maxima and sums,
     # the variance sums) is float64.

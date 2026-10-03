@@ -246,32 +246,63 @@ user typed them rather than as a silent `-inf`:
   standard `(0, 1)` defaults).
 - The opt-in `DARKSIRENS_GW_PAIRING_M1_GRID` normaliser grid is sized to the
   bound model's mass support at bind time and refused if it cannot cover it.
-- `configure_normalization_grids(pairing_norm="per_point")` (env
-  `DARKSIRENS_GW_PAIRING_NORM=per_point`) is an opt-in speed option for the
-  pairing normaliser of `PowerLawPairing` and `GWTC5FiducialBPL2PeaksPairing`:
-  the secondary-mass taper is integrated once per likelihood point instead of
-  once per PE sample and injection. Above the taper shoulder it is the
-  default's own quadrature rule evaluated once (equal to rounding); inside the
-  taper window it reads a small per-point table that is closer to a converged
-  reference than the default's per-sample rule. Other pairings keep the
-  default. It is recorded in the run fingerprint, composes with
-  `compute_dtype="float32"`, and cannot be combined with the m1 grid. The
-  default (`"per_sample"`) is unchanged.
-- `darksirens.catalog.settings.configure_catalog_evaluation(kernel_window=1e-10)` (env
-  `DARKSIRENS_CATALOG_KERNEL_WINDOW=1e-10`, set before binding) is an opt-in
-  speed option for catalogs with many galaxies per sky pixel: each GW sample's
-  catalog kernel is summed over a fixed-length window of its pixel's
-  redshift-sorted galaxies instead of all of them. The window is sized at bind
-  time (at the fixed `sigma_kde`, or at its prior's upper edge when it is
-  sampled) so that, at every redshift, the part of the sum it leaves out is at
-  most the tolerance times the pixel's largest single-galaxy peak term; a
-  traced check makes the likelihood `-inf` (never a truncated value) if the
-  window's premises fail at a proposal. It applies to incomplete, complete and
-  field-weighted catalog analyses, with the kernel pin, the galaxy list,
-  `missing_density="gather"` and `compute_dtype="float32"`; catalog rows must
-  be sorted by redshift (the `load_catalog` default). It is recorded in the run
-  fingerprint; the default (off) is unchanged bit for bit. See
-  `darksirens.catalog.redshift.kernel_window` for the bound.
+- **Speed defaults (since 2026-10-02).** Four evaluation settings default to
+  the faster evaluation. Each keeps its historical value, which reproduces a
+  run made before the change bit for bit (optimized program and likelihood)
+  and resumes its checkpoint:
+
+  | setting (env) | default | historical value |
+  |---|---|---|
+  | `configure_normalization_grids(pairing_norm=...)` (`DARKSIRENS_GW_PAIRING_NORM`) | `"auto"` | `"per_sample"` |
+  | `configure_catalog_evaluation(kernel_layout=...)` (`DARKSIRENS_CATALOG_KERNEL_LAYOUT`) | `"galaxy_list"` | `"padded"` |
+  | `configure_catalog_evaluation(missing_density=...)` (`DARKSIRENS_CATALOG_MISSING_DENSITY`) | `"auto"` | `"grid"` |
+  | `configure_catalog_evaluation(kernel_window=...)` (`DARKSIRENS_CATALOG_KERNEL_WINDOW`) | `"auto"` | `"off"` |
+
+  (`configure_catalog_evaluation` is in `darksirens.catalog.settings`, and
+  `configure_normalization_grids` in `darksirens.population.utils`; set them,
+  or the environment variables, before binding.) `"auto"` means "the faster
+  evaluation wherever it applies, the historical one otherwise", without
+  raising; the explicit faster value keeps refusing what it cannot serve.
+  - `pairing_norm="per_point"` integrates the pairing normaliser's
+    secondary-mass taper once per likelihood point instead of once per PE
+    sample and injection, for `PowerLawPairing` and
+    `GWTC5FiducialBPL2PeaksPairing`. Above the taper shoulder it is the
+    per-sample quadrature rule evaluated once (equal to rounding); inside the
+    taper window it reads a small per-point table that is closer to a
+    converged reference than the per-sample rule. `"auto"` takes it wherever
+    it applies, and keeps the per-sample rule for other pairings and when the
+    opt-in pairing m1 grid is set (an explicit `"per_point"` refuses the m1
+    grid).
+  - `kernel_layout="galaxy_list"` evaluates the per-galaxy kernel normaliser
+    on the real galaxies only, not on the padded catalog; the values are the
+    same bit for bit. It refuses nothing, so it has no `"auto"`.
+  - `missing_density="gather"` evaluates the missing-host density at each
+    sample's two bracketing redshift nodes instead of materialising
+    `(N_rows, 1000)` grids per proposal, with the same arithmetic. `"auto"`
+    gathers wherever `"gather"` would, and keeps the grid with a missing-host
+    extension, which `"gather"` refuses.
+  - `kernel_window=eps` sums each GW sample's catalog kernel over a
+    fixed-length window of its pixel's redshift-sorted galaxies instead of
+    all of them. The window is sized at bind time (at the fixed `sigma_kde`,
+    or at its prior's upper edge when it is sampled) so that, at every
+    redshift, the part of the sum it leaves out is at most `eps` times the
+    pixel's largest single-galaxy peak term; a traced check makes the
+    likelihood `-inf` (never a truncated value) if the window's premises fail
+    at a proposal. It applies to incomplete, complete and field-weighted
+    catalog analyses, with the kernel pin and `compute_dtype="float32"`. See
+    `darksirens.catalog.redshift.kernel_window` for the bound. `"auto"` is
+    `eps = 1e-10` on every catalog view whose rows are sorted by redshift
+    (the `load_catalog` default) and no window on one that is not, where an
+    explicit tolerance refuses; the marked host kernel drops a window
+    attached under `"auto"` and refuses an explicit one.
+
+  Against the historical values the defaults move the float64 log-likelihood
+  by at most 1.4e-7 (relative 2.3e-13) on the real 259-event spectral
+  likelihood and 4.0e-8 on the mock dark-siren cases, all of it from the
+  per-point pairing normaliser. The defaults are recorded in the run
+  fingerprint and the historical values are not, so resuming a checkpoint
+  written before 2026-10-02 under the new defaults is refused as a settings
+  change; the refusal names the settings that resume it (see `MIGRATION.md`).
 
 ## Ownership boundary
 

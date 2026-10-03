@@ -40,7 +40,7 @@ from darksirens.catalog.field import (
 )
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.mixture import stick_breaking_log_weights
-from darksirens.catalog.settings import configure_catalog_evaluation
+from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import CatalogMixtureParameters, CatalogParameters, GalaxyCatalog, physical_n0
 from darksirens.cosmology._grid import zgrid
 from darksirens.gw import make_gw_event
@@ -54,6 +54,8 @@ from darksirens.selection.catalog import (
     selection_to_mapping,
 )
 from darksirens.selection.footprint import selection_completion_curves_with_row_fraction
+
+from _historical_settings import HISTORICAL_CATALOG, catalog_settings
 
 from _catalog_model_fixtures import (
     COSMOLOGY,
@@ -437,25 +439,28 @@ def test_a_pin_from_another_catalog_is_refused():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("layout", ("missing_density", "kernel_layout"))
-def test_memory_layouts_give_the_default_likelihood(layout):
+@pytest.mark.parametrize("layout", ("missing_density", "kernel_layout", "defaults"))
+def test_memory_layouts_give_the_historical_likelihood(layout):
+    # Each layout, and the 2026-10-02 defaults (both layouts, the kernel
+    # window off here), against the historical program set explicitly.
+    arms = {
+        "missing_density": dict(missing_density="gather"),
+        "kernel_layout": dict(kernel_layout="galaxy_list"),
+        "defaults": dict(kernel_layout="galaxy_list", missing_density="auto"),
+    }
     for kwargs in (dict(catalog=[A_DEPTH, B_DEPTH]),
                    dict(catalog=[A, B_DEPTH], completeness="selection", selection=[SEL_A, SEL_B],
                         row_fraction=[None, FRACTION_B])):
         analysis = _model(**kwargs)
-        ref = _bind(analysis)
         thetas = _points(analysis, n=2)
-        if layout == "missing_density":
-            configure_catalog_evaluation(missing_density="gather")
-        else:
-            configure_catalog_evaluation(kernel_layout="galaxy_list")
-        try:
-            alt = _bind(analysis)
-            got = [float(alt(t)) for t in thetas]
-        finally:
-            configure_catalog_evaluation(missing_density="grid", kernel_layout="padded")
-        for g, t in zip(got, thetas):
-            _close(g, ref(t), 1e-12, layout)
+        with catalog_settings(**HISTORICAL_CATALOG):
+            ref = _bind(analysis)
+            want = [float(ref(t)) for t in thetas]
+            with catalog_settings(**arms[layout]):
+                alt = _bind(analysis)
+                got = [float(alt(t)) for t in thetas]
+        for g, w in zip(got, want):
+            _close(g, w, 1e-12, layout)
 
 
 @pytest.mark.slow
@@ -632,13 +637,19 @@ def test_extension_refusals():
                                     events=EVENTS, injections=INJECTIONS, extension=None)
     with pytest.raises(TypeError, match="must define"):
         _target(analysis, object())
-    configure_catalog_evaluation(missing_density="gather")
-    try:
-        target = _target(analysis, _TableExtension([jnp.ones((48, zgrid.size)), jnp.ones((192, zgrid.size))]))
+    tables = [jnp.ones((48, zgrid.size)), jnp.ones((192, zgrid.size))]
+    theta = _points(analysis, n=1)[0]
+    with catalog_settings(missing_density="gather"):
+        target = _target(analysis, _TableExtension(tables))
         with pytest.raises(ValueError, match="not available with a missing-host extension"):
-            target.log_likelihood(_points(analysis, n=1)[0])
-    finally:
-        configure_catalog_evaluation(missing_density="grid")
+            target.log_likelihood(theta)
+    # The "auto" default keeps the grid with an extension instead of refusing:
+    # the same value as missing_density="grid" set explicitly, bit for bit.
+    assert catalog_evaluation_settings().missing_density == "auto"
+    got = float(_target(analysis, _TableExtension(tables)).log_likelihood(theta))
+    with catalog_settings(missing_density="grid"):
+        want = float(_target(analysis, _TableExtension(tables)).log_likelihood(theta))
+    assert np.isfinite(want) and got == want
 
 
 @pytest.mark.slow
@@ -649,11 +660,8 @@ def test_a_failed_catalog_check_makes_the_mixture_likelihood_minus_inf():
     failure must make the whole likelihood -inf."""
     dense = catalog_store(41, n_max=200, z_hi=0.45, empty=(0, 1))
     pair = _model([A, dense], survey_priors={"sigma_kde_c2": (0.0, 0.004)})
-    configure_catalog_evaluation(kernel_window=1e-10)
-    try:
+    with catalog_settings(kernel_window=1e-10):
         windowed = _bind(pair)
-    finally:
-        configure_catalog_evaluation(kernel_window="off")
     view = windowed.model_operands.components[1].compact
     assert view.kernel_window.size < view.zgals.shape[1]
     theta = _points(pair, n=1)[0]

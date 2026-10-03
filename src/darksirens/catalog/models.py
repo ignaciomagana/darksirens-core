@@ -190,7 +190,7 @@ def build_incomplete_catalog_prior_state(
 
     if (
         observed_cache is not None
-        and catalog_evaluation_settings().missing_density == "gather"
+        and catalog_evaluation_settings().gathers_missing_density()
     ):
         curves = gathered_completion_curves(cosmo, params, catalog, observed_cache)
     else:

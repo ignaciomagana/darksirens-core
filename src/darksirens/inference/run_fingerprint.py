@@ -399,8 +399,13 @@ def core_numerics_semantic(likelihood=None) -> dict:
     ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
     runtime by ``configure_normalization_grids`` and the catalog evaluation
     layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
-    enters only when it is not the default, so existing fingerprints are
-    unchanged.
+    (and the pairing settings ``pairing_scale``/``pairing_norm``) enters only
+    when it is not its historical value, so a fingerprint made before the
+    defaults changed matches when those values are set explicitly; the
+    defaults since 2026-10-02 (``pairing_norm="auto"``,
+    ``kernel_layout="galaxy_list"``, ``missing_density="auto"``,
+    ``kernel_window="auto"``) are recorded, so a checkpoint written before
+    that is not resumed under them (see :mod:`darksirens.catalog.settings`).
     Values are read from the resolved module state, not from ``os.environ``,
     so they are what the likelihood actually uses.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
@@ -826,6 +831,66 @@ def _semantic_diff(stored, current, prefix="", out=None, limit=20):
     return out
 
 
+#: Settings whose default changed, with the historical value a checkpoint
+#: written before the change was fingerprinted under (its fingerprint carries
+#: no entry for them) and how to set it.
+_HISTORICAL_SETTING_FIXES = {
+    ("normalization_grids", "pairing_scale"): (
+        "2026-10-01",
+        'configure_normalization_grids(pairing_scale="node_max") '
+        "(env DARKSIRENS_GW_PAIRING_SCALE=node_max)",
+    ),
+    ("normalization_grids", "pairing_norm"): (
+        "2026-10-02",
+        'configure_normalization_grids(pairing_norm="per_sample") '
+        "(env DARKSIRENS_GW_PAIRING_NORM=per_sample)",
+    ),
+    ("catalog_evaluation", "kernel_layout"): (
+        "2026-10-02",
+        'configure_catalog_evaluation(kernel_layout="padded") '
+        "(env DARKSIRENS_CATALOG_KERNEL_LAYOUT=padded)",
+    ),
+    ("catalog_evaluation", "missing_density"): (
+        "2026-10-02",
+        'configure_catalog_evaluation(missing_density="grid") '
+        "(env DARKSIRENS_CATALOG_MISSING_DENSITY=grid)",
+    ),
+    ("catalog_evaluation", "kernel_window"): (
+        "2026-10-02",
+        'configure_catalog_evaluation(kernel_window="off") '
+        "(env DARKSIRENS_CATALOG_KERNEL_WINDOW=off)",
+    ),
+}
+
+
+def _historical_setting_hints(stored, current, out=None):
+    """How to resume a checkpoint fingerprinted before a default changed.
+
+    One line per setting (:data:`_HISTORICAL_SETTING_FIXES`) that the
+    checkpointed run's fingerprint leaves out (the historical value) and this
+    run records (a newer default, or an explicit value).
+    """
+
+    if out is None:
+        out = []
+    if not (isinstance(stored, dict) and isinstance(current, dict)):
+        return out
+    for block in ("normalization_grids", "catalog_evaluation"):
+        if block in current and isinstance(current[block], dict):
+            old_block = stored.get(block)
+            old_block = old_block if isinstance(old_block, dict) else {}
+            for (name, key), (date, fix) in _HISTORICAL_SETTING_FIXES.items():
+                if name == block and key in current[block] and key not in old_block:
+                    out.append(
+                        f"{block}.{key}: the checkpointed run used the historical value "
+                        f"(the default before {date}); set {fix} to resume it"
+                    )
+    for key, value in current.items():
+        if key not in ("normalization_grids", "catalog_evaluation"):
+            _historical_setting_hints(stored.get(key), value, out)
+    return out
+
+
 def check_resume_fingerprint(run_dir: str, current: dict, *, force: bool = False):
     """Require the stored run fingerprint to match ``current`` exactly."""
 
@@ -895,6 +960,14 @@ def check_resume_fingerprint(run_dir: str, current: dict, *, force: bool = False
     more = len(diffs) - 20
     if more > 0:
         shown += f"\n  ... and {more} more"
+    hints = _historical_setting_hints(
+        stored.get("semantic") or {}, current.get("semantic") or {}
+    )
+    if hints:
+        shown += (
+            "\nA default changed since the checkpoint was written:\n"
+            + "\n".join(f"  - {hint}" for hint in hints)
+        )
     msg = (
         header
         + "its configuration does not match this run's:\n"

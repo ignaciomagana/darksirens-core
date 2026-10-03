@@ -24,6 +24,8 @@ from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.cosmology.volume import log_comoving_volume_prior
 
+from _historical_settings import catalog_settings
+
 
 _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
@@ -62,7 +64,10 @@ def _catalog():
 def test_incomplete_prior_is_normalized_and_empty_row_is_pure_missing():
     cat = _catalog()
     cache = build_observed_density_cache(cat)
-    state = build_incomplete_catalog_prior_state(_cosmo(), _params(), cat, cache)
+    # The empty-row check reads the missing-host density as the (N_rows, N_z)
+    # grid, the historical missing_density="grid" (the default gathers it).
+    with catalog_settings(missing_density="grid"):
+        state = build_incomplete_catalog_prior_state(_cosmo(), _params(), cat, cache)
     z = zgrid
     for row in range(3):
         lp = np.asarray(eval_incomplete_catalog_prior_state_vmap(

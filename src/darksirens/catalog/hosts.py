@@ -401,11 +401,16 @@ def build_marked_catalog_kernel_state(
 ):
     """Build the marked observed-host kernel and row host amplitudes."""
 
-    if getattr(catalog, "kernel_window", None) is not None:
-        raise ValueError(
-            "the marked host kernel does not take the opt-in kernel window: build it "
-            "from a catalog without one (catalog._replace(kernel_window=None))"
-        )
+    window = getattr(catalog, "kernel_window", None)
+    if window is not None:
+        if getattr(window, "strict", True):
+            raise ValueError(
+                "the marked host kernel does not take the kernel window: build it "
+                "from a catalog without one (catalog._replace(kernel_window=None))"
+            )
+        # A window attached under the kernel_window="auto" default: the
+        # marked kernel sums every galaxy, the historical evaluation.
+        catalog = catalog._replace(kernel_window=None)
     model._check_names(marks.names)
     if marks.values.shape[:2] != catalog.zgals.shape:
         raise ValueError(

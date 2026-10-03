@@ -288,12 +288,14 @@ def field_mixture_log_likelihood(
         raise ValueError("MissingHostExtension.n_members must be >= 0")
     if n_members and return_diagnostics:
         raise ValueError("return_diagnostics is not available with a member ensemble")
-    gather = catalog_evaluation_settings().missing_density == "gather"
-    if gather and extension is not None:
+    evaluation = catalog_evaluation_settings()
+    if evaluation.missing_density == "gather" and extension is not None:
         raise ValueError(
             "missing_density='gather' is not available with a missing-host extension, "
             "which modulates the (N_rows, N_z) missing-host grid"
         )
+    # The "auto" default keeps the grid where "gather" refuses (an extension).
+    gather = evaluation.gathers_missing_density(applicable=extension is None)
     compute_dtype = _resolve_compute_dtype(
         compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
     )

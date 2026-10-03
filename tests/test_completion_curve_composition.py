@@ -26,6 +26,8 @@ from darksirens.selection.catalog import (
     selection_completion_curves,
 )
 
+from _historical_settings import catalog_settings
+
 _trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 COSMO = CosmologyParameters(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0)
@@ -83,7 +85,10 @@ def test_existing_count_completion_path_is_exactly_the_generic_composition():
 
     for z_depth in (None, 0.25):
         params = _params(z_depth)
-        direct = build_incomplete_catalog_prior_state(COSMO, params, cat, cache)
+        # The grid composition is the historical missing_density="grid"; the
+        # default gathers it (tests/test_catalog_dark_memory.py compares the two).
+        with catalog_settings(missing_density="grid"):
+            direct = build_incomplete_catalog_prior_state(COSMO, params, cat, cache)
         curves = completion_curves(COSMO, params, cat, cache)
         composed = build_incomplete_catalog_prior_state_from_curves(
             COSMO, params, cat, curves

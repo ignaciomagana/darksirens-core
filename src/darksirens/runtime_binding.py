@@ -32,6 +32,7 @@ from darksirens.catalog.redshift import (
     PinnedCatalogKernel,
     build_pinned_catalog_kernel,
     check_pinned_catalog_kernel,
+    kernel_window_applies,
     with_galaxy_index,
     with_kernel_window,
 )
@@ -907,11 +908,22 @@ def _kernel_window_sigma_kde(analysis, k=None) -> float:
 
 
 def _with_kernel_window(analysis, catalog, k=None):
-    """``catalog`` with the opt-in kernel window when it is configured."""
-    tolerance = catalog_evaluation_settings().kernel_window
+    """``catalog`` with the kernel window when it is configured.
+
+    An explicit tolerance attaches it or refuses (unsorted rows); the
+    ``"auto"`` default attaches it where
+    :func:`~darksirens.catalog.redshift.kernel_window_applies` holds and
+    leaves the view unwindowed (the full-row sum) otherwise.
+    """
+    settings = catalog_evaluation_settings()
+    tolerance = settings.kernel_window_tolerance()
     if tolerance is None:
         return catalog
-    return with_kernel_window(catalog, tolerance, _kernel_window_sigma_kde(analysis, k))
+    sigma_kde = _kernel_window_sigma_kde(analysis, k)
+    strict = settings.kernel_window_strict()
+    if not strict and not kernel_window_applies(catalog, sigma_kde):
+        return catalog
+    return with_kernel_window(catalog, tolerance, sigma_kde, strict=strict)
 
 
 def _mixture_pin_premise(analysis, k):

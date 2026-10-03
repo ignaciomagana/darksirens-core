@@ -1,11 +1,15 @@
-"""Opt-in redshift window of the per-sample catalog kernel sum.
+"""Redshift window of the per-sample catalog kernel sum.
 
 ``kernel_window=eps`` (:mod:`darksirens.catalog.settings`) sums each GW
 sample's catalog kernel over a fixed-length window of its row's
 redshift-sorted galaxies, sized at bind time so that what it leaves out is at
 most ``eps`` times the row's largest single-galaxy peak term
-(:func:`darksirens.catalog.redshift.kernel_window`).  These tests pin: the
-setting and its fingerprint entry (absent by default); the window's sizing
+(:func:`darksirens.catalog.redshift.kernel_window`).  Since 2026-10-02 the
+default is ``kernel_window="auto"``: ``1e-10`` on every view it can serve and
+no window (the full-row sum) on one it cannot (unsorted rows), and the marked
+host kernel drops such a window where it refuses an explicit one.  These
+tests pin: the setting, its ``"auto"`` fallbacks and its fingerprint entry
+(absent when off, the historical value); the window's sizing
 (every interval of length ``2 K_r`` holds at most ``W`` galaxies, and every
 sample's slots hold every galaxy within ``K_r``); the bound itself against
 the full sum on adversarial rows (clustered, broad and narrow widths, a far
@@ -13,13 +17,14 @@ outlier, ragged and empty rows, a survey depth, a large row); the traced
 verdict and its poison (a stale window, a wider ``sigma_kde``, unsorted rows);
 and the bound likelihoods (conditional with the kernel pin on and off, the
 complete catalog, the field-weighted mixture of one and two catalogs, float32
-weights, the galaxy list and gathered density) against the default program,
-values and gradients.
+weights, the galaxy list and gathered density) against the full-row sum
+(``kernel_window="off"``, set explicitly), values and gradients.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import pickle
 
 import jax
@@ -49,6 +54,7 @@ from darksirens.catalog.redshift import (
     with_kernel_window,
 )
 from darksirens.catalog.settings import (
+    KERNEL_WINDOW_AUTO_TOLERANCE,
     CatalogEvaluationSettings,
     catalog_evaluation_settings,
     configure_catalog_evaluation,
@@ -149,29 +155,40 @@ def _probe_points(catalog, n_random=6000, seed=3):
 # Setting and fingerprint
 
 
-def test_window_is_off_by_default_and_stays_out_of_the_fingerprint():
+def test_window_is_auto_by_default_and_off_stays_out_of_the_fingerprint():
     assert CatalogEvaluationSettings(kernel_layout="padded", missing_density="grid",
                                      kernel_window=None).to_dict() == {}
-    assert catalog_evaluation_settings().kernel_window is None
-    assert "catalog_evaluation" not in core_numerics_semantic()
-    with _settings(kernel_window=1e-10):
-        assert catalog_evaluation_settings().to_dict() == {"kernel_window": 1e-10}
-        assert core_numerics_semantic()["catalog_evaluation"] == {"kernel_window": 1e-10}
-        with _settings(kernel_window="off"):
-            assert catalog_evaluation_settings().kernel_window is None
-    assert "catalog_evaluation" not in core_numerics_semantic()
+    settings = catalog_evaluation_settings()
+    assert settings.kernel_window == "auto"
+    assert settings.kernel_window_tolerance() == KERNEL_WINDOW_AUTO_TOLERANCE == 1e-10
+    assert not settings.kernel_window_strict()
+    # The default is recorded (a pre-change checkpoint is not resumed under
+    # it); "off", the historical value, is not.
+    assert core_numerics_semantic()["catalog_evaluation"]["kernel_window"] == "auto"
+    with _settings(kernel_window="off"):
+        assert catalog_evaluation_settings().kernel_window is None
+        assert catalog_evaluation_settings().kernel_window_tolerance() is None
+        assert "kernel_window" not in core_numerics_semantic().get("catalog_evaluation", {})
+        with _settings(kernel_window=1e-10):
+            assert catalog_evaluation_settings().to_dict()["kernel_window"] == 1e-10
+            assert catalog_evaluation_settings().kernel_window_strict()
+            assert core_numerics_semantic()["catalog_evaluation"]["kernel_window"] == 1e-10
+        assert catalog_evaluation_settings().kernel_window is None
+    assert catalog_evaluation_settings().kernel_window == "auto"
 
 
 @pytest.mark.parametrize("value", [0.0, 1.0, -1e-3, float("nan"), "fast", True])
 def test_window_tolerance_is_checked(value):
     with pytest.raises(ValueError, match="kernel_window must be"):
         configure_catalog_evaluation(kernel_window=value)
-    assert catalog_evaluation_settings().kernel_window is None
+    assert catalog_evaluation_settings().kernel_window == "auto"
 
 
 def test_window_tolerance_reads_strings():
     assert CatalogEvaluationSettings(kernel_window="1e-8").kernel_window == 1e-8
     assert CatalogEvaluationSettings(kernel_window="off").kernel_window is None
+    assert CatalogEvaluationSettings(kernel_window="auto").kernel_window == "auto"
+    assert CatalogEvaluationSettings(kernel_window=" AUTO ").kernel_window == "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +368,33 @@ def test_marked_hosts_refuse_the_window():
             COSMO, CatalogParameters(), with_kernel_window(CATALOG, EPS, 0.0), None, None, 0.0)
 
 
+def test_marked_hosts_drop_a_window_attached_under_auto():
+    # A window attached under the "auto" default (strict=False) is dropped by
+    # the marked host kernel, which then sums every galaxy: the state it
+    # builds is the one built from the catalog without a window, bit for bit.
+    from darksirens.catalog.hosts import (
+        CenteredHostMarks,
+        LogLinearHostModel,
+        build_marked_catalog_kernel_state,
+    )
+
+    host_model = LogLinearHostModel(("logmstar",))
+    rng = np.random.default_rng(4)
+    marks = CenteredHostMarks(("logmstar",), jnp.asarray(rng.normal(0.0, 0.3, CATALOG.zgals.shape + (1,))))
+    params = CatalogParameters(delta=0.3, sigma_kde=0.0)
+    auto = with_kernel_window(CATALOG, EPS, 0.0, strict=False)
+    assert not auto.kernel_window.strict and auto.kernel_window.size < CATALOG.zgals.shape[1]
+
+    @_cosmo.threads_distance_table()
+    def state(catalog, distance_table=None):
+        return build_marked_catalog_kernel_state(
+            COSMO, params, catalog, host_model, marks, jnp.asarray([0.7]))
+
+    got, want = state(auto), state(CATALOG)
+    for a, b in zip(jax.tree_util.tree_leaves(got), jax.tree_util.tree_leaves(want)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
 # ---------------------------------------------------------------------------
 # Bound likelihoods against the default program
 
@@ -471,16 +515,26 @@ def _windows(bound):
     return [c.compact.kernel_window for c in bound.model_operands.components]
 
 
+def _off():
+    """The full-row sum (the historical kernel_window="off"), set explicitly."""
+    return _settings(kernel_window="off")
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("case", list(CASES))
 def test_windowed_likelihood_matches_the_default(case):
     analysis = _analysis(case)
     thetas = _thetas(analysis)
     grads = case == "sampled"
-    bound, ref, ref_grads = _evaluate(analysis, thetas, grads)
+    with _off():
+        bound, ref, ref_grads = _evaluate(analysis, thetas, grads)
     assert all(w is None for w in _windows(bound))
     with _settings(kernel_window=EPS):
         bound, got, got_grads = _evaluate(analysis, thetas, grads)
+    # The "auto" default attaches the same window and evaluates the same values.
+    auto_bound, auto, _ = _evaluate(analysis, thetas)
+    assert [w.size for w in _windows(auto_bound)] == [w.size for w in _windows(bound)]
+    np.testing.assert_array_equal(auto, got)
     windows = _windows(bound)
     assert all(w is not None and w.size < CATALOG.zgals.shape[1] for w in windows)
     assert (bound.kernel_pin is not None) == (case == "fixed_pin")
@@ -502,7 +556,8 @@ def test_windowed_two_catalog_mixture_matches_the_default(per_catalog):
     if per_catalog:
         assert LABELS[0] + "_c2" in analysis.parameters.labels
     thetas = _thetas(analysis, n=3)
-    _, ref, _ = _evaluate(analysis, thetas)
+    with _off():
+        _, ref, _ = _evaluate(analysis, thetas)
     with _settings(kernel_window=EPS):
         bound, got, _ = _evaluate(analysis, thetas)
     assert all(w is not None for w in _windows(bound))
@@ -517,8 +572,9 @@ def test_windowed_two_catalog_mixture_matches_the_default(per_catalog):
 def test_window_composes_with_float32_weights_galaxy_list_and_gather():
     analysis = _analysis("sampled")
     thetas = _thetas(analysis)
-    _, ref32, _ = _evaluate(analysis, thetas, compute_dtype="float32")
-    _, ref, _ = _evaluate(analysis, thetas)
+    with _off():
+        _, ref32, _ = _evaluate(analysis, thetas, compute_dtype="float32")
+        _, ref, _ = _evaluate(analysis, thetas)
     with _settings(kernel_window=EPS):
         _, got32, _ = _evaluate(analysis, thetas, compute_dtype="float32")
         with _settings(kernel_layout="galaxy_list", missing_density="gather"):
@@ -539,7 +595,8 @@ def test_out_of_prior_width_is_refused_not_mis_evaluated():
     analysis = _analysis("sampled")
     theta = _thetas(analysis, n=1)[0]
     theta[list(analysis.parameters.labels).index("sigma_kde")] = 0.01
-    _, ref, _ = _evaluate(analysis, theta[None])
+    with _off():
+        _, ref, _ = _evaluate(analysis, theta[None])
     with _settings(kernel_window=EPS):
         _, got, _ = _evaluate(analysis, theta[None])
     assert np.isfinite(ref[0]) and got[0] == -np.inf
@@ -556,24 +613,67 @@ def test_window_survives_pickling_a_binding():
     assert float(again(theta)) == float(bound(theta))
 
 
-def test_default_binding_attaches_no_window():
-    bound = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
+def test_historical_binding_attaches_no_window():
+    with _settings(kernel_layout="padded", missing_density="grid", kernel_window="off"):
+        bound = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
+        assert catalog_evaluation_settings().to_dict() == {}
+        assert "catalog_evaluation" not in core_numerics_semantic(bound)
     assert bound.catalog.kernel_window is None
-    assert catalog_evaluation_settings().to_dict() == {}
-    assert "catalog_evaluation" not in core_numerics_semantic(bound)
+
+
+def test_default_binding_attaches_the_auto_window():
+    bound = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
+    window = bound.catalog.kernel_window
+    assert window is not None and not window.strict
+    assert window.tolerance == KERNEL_WINDOW_AUTO_TOLERANCE
+    # Recorded as the tolerance it was bound with, as an explicit 1e-10 is.
+    assert core_numerics_semantic(bound)["catalog_evaluation"]["kernel_window"] == 1e-10
+
+
+def _unsorted_store():
+    """The fixture catalog with one row's first two galaxies swapped."""
+    store = _store()
+    z = np.asarray(store.catalog.zgals).copy()
+    row = int(np.flatnonzero(np.asarray(store.catalog.ngals) >= 2)[0])
+    z[row, [0, 1]] = z[row, [1, 0]] + np.array([0.0, 1e-3])
+    return dataclasses.replace(store, catalog=store.catalog._replace(zgals=z))
+
+
+@pytest.mark.parametrize("case", ["sampled", "complete", "field"])
+def test_auto_falls_back_to_the_full_sum_on_unsorted_rows(case):
+    # An explicit tolerance refuses unsorted rows at bind time; the "auto"
+    # default binds them without a window (the full-row sum), which then
+    # evaluates exactly what kernel_window="off" does.
+    kwargs = {k: v for k, v in CASES[case].items() if k != "depth"}
+    analysis = model(
+        cosmology=Cosmology(H0=(20.0, 140.0)),
+        population=Population(MODEL, fixed={label: FIDUCIALS[label] for label in LABELS[3:]}),
+        catalog=_unsorted_store(), **kwargs,
+    )
+    thetas = _thetas(analysis, n=3)
+    with _settings(kernel_window=EPS):
+        with pytest.raises(ValueError, match="sorted by redshift"):
+            bind_analysis(analysis, events=STORES[0], injections=STORES[1])
+    bound, got, _ = _evaluate(analysis, thetas)
+    assert all(w is None for w in _windows(bound))
+    assert "kernel_window" not in core_numerics_semantic(bound)["catalog_evaluation"]
+    with _off():
+        _, want, _ = _evaluate(analysis, thetas)
+    np.testing.assert_array_equal(got, want)
 
 
 def test_fingerprint_records_the_window_a_binding_was_bound_with():
     with _settings(kernel_window=EPS):
         bound = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
     assert bound.catalog.kernel_window.tolerance == EPS
-    # Recorded from the binding, after the setting is back to off ...
-    assert core_numerics_semantic(bound)["catalog_evaluation"] == {"kernel_window": EPS}
-    plain = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
+    # Recorded from the binding, after the setting is back to its default ...
+    assert core_numerics_semantic(bound)["catalog_evaluation"]["kernel_window"] == EPS
+    with _off():
+        plain = bind_analysis(_analysis("sampled"), events=STORES[0], injections=STORES[1])
     # ... and not for a binding without one, whatever the setting is now.
     with _settings(kernel_window=1e-6):
-        assert "catalog_evaluation" not in core_numerics_semantic(plain)
-        assert core_numerics_semantic()["catalog_evaluation"] == {"kernel_window": 1e-6}
+        assert "kernel_window" not in core_numerics_semantic(plain)["catalog_evaluation"]
+        assert core_numerics_semantic()["catalog_evaluation"]["kernel_window"] == 1e-6
 
 
 def test_window_and_galaxy_list_attach_independently():

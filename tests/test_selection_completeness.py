@@ -32,7 +32,6 @@ from darksirens.catalog.models import (
     build_incomplete_catalog_prior_state_from_curves,
     eval_incomplete_catalog_prior_state_vmap,
 )
-from darksirens.catalog.settings import configure_catalog_evaluation
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, physical_n0
 from darksirens.gw import make_gw_event
 from darksirens.inference.run_fingerprint import parameter_plan_semantic
@@ -45,6 +44,8 @@ from darksirens.selection.catalog import (
     selection_to_mapping,
 )
 from darksirens.selection.footprint import selection_completion_curves_with_row_fraction
+
+from _historical_settings import catalog_settings
 
 from _catalog_model_fixtures import (
     COSMOLOGY,
@@ -348,15 +349,19 @@ def test_gathered_missing_density_agrees_with_the_grid():
     fraction = np.random.default_rng(9).uniform(0.0, 1.0, NPIX)
     for kwargs in ({}, dict(row_fraction=fraction)):
         analysis = _analysis(GAUSSIAN, store=STORE_DEPTH, **kwargs)
-        grid = _bind(analysis)
-        configure_catalog_evaluation(missing_density="gather")
-        try:
+        thetas = _points(analysis, n=3, log10n0=-2.0)
+        # The setting is read when the likelihood traces: evaluate inside.
+        with catalog_settings(missing_density="grid"):
+            grid = _bind(analysis)
+            want = [float(grid(theta)) for theta in thetas]
+        with catalog_settings(missing_density="gather"):
             gathered = _bind(analysis)
-            values = [float(gathered(theta)) for theta in _points(analysis, n=3, log10n0=-2.0)]
-        finally:
-            configure_catalog_evaluation(missing_density="grid")
-        for value, theta in zip(values, _points(analysis, n=3, log10n0=-2.0)):
-            _close(value, grid(theta), 1e-12)
+            values = [float(gathered(theta)) for theta in thetas]
+        # The "auto" default gathers here, as "gather" does.
+        default = _bind(analysis)
+        assert [float(default(theta)) for theta in thetas] == values
+        for value, w in zip(values, want):
+            _close(value, w, 1e-12)
 
 
 def test_float32_weights_stay_close():
