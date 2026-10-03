@@ -39,7 +39,6 @@ from darksirens.catalog.models import (
     build_complete_catalog_prior_state,
     eval_complete_catalog_prior_state_vmap,
 )
-from darksirens.catalog.settings import configure_catalog_evaluation
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog, physical_n0
 from darksirens.cosmology._grid import zgrid
 from darksirens.gw import make_gw_event
@@ -54,6 +53,7 @@ from darksirens.selection.catalog import (
 )
 from darksirens.selection.footprint import selection_completion_curves_with_row_fraction
 
+from _historical_settings import HISTORICAL_CATALOG, catalog_settings
 from _catalog_model_fixtures import (
     COSMOLOGY,
     FIXED_POPULATION,
@@ -536,20 +536,19 @@ def test_kernel_pin_agrees_with_the_per_call_quadrature():
 def test_memory_layouts_give_the_default_likelihood(layout):
     analysis = _model([A_DEPTH, B, C], completeness=["selection", "incomplete", "complete"],
                       selection=[SEL_A, None, None], row_fraction=[FRACTION_A, None, None])
-    ref = _bind(analysis)
+    # The reference is the historical program; each arm turns on one layout.
+    with catalog_settings(**HISTORICAL_CATALOG):
+        ref = _bind(analysis)
     thetas = _points(analysis)
-    if layout == "missing_density":
-        configure_catalog_evaluation(missing_density="gather")
-    else:
-        configure_catalog_evaluation(kernel_layout="galaxy_list")
-    try:
+    arm = dict(HISTORICAL_CATALOG)
+    arm.update(missing_density="gather" if layout == "missing_density" else "grid",
+               kernel_layout="galaxy_list" if layout == "kernel_layout" else "padded")
+    with catalog_settings(**arm):
         alt = _bind(analysis)
         if layout == "kernel_layout":
             assert alt.model_operands.components[2].compact.galaxy_index is None
             assert alt.model_operands.components[1].compact.galaxy_index is not None
         got = [float(alt(t)) for t in thetas]
-    finally:
-        configure_catalog_evaluation(missing_density="grid", kernel_layout="padded")
     for g, t in zip(got, thetas):
         _close(g, ref(t), 1e-12, layout)
 
@@ -622,12 +621,11 @@ def test_kernel_window_composes_and_poisons_a_complete_catalog():
                       survey_priors={"sigma_kde": (0.0, 0.004), "sigma_kde_c2": (0.0, 0.004),
                                      "sigma_kde_c3": (0.0, 0.004)})
     thetas = _points(analysis)
-    ref = _bind(analysis)
-    configure_catalog_evaluation(kernel_window=1e-10)
-    try:
+    # The reference has no window (the default since 2026-10-02 windows too).
+    with catalog_settings(kernel_window="off"):
+        ref = _bind(analysis)
+    with catalog_settings(kernel_window=1e-10):
         windowed = _bind(analysis)
-    finally:
-        configure_catalog_evaluation(kernel_window="off")
     assert all(c.compact.kernel_window is not None for c in windowed.model_operands.components)
     complete_view = windowed.model_operands.components[2].compact
     assert complete_view.kernel_window.size < complete_view.zgals.shape[1]
@@ -641,11 +639,8 @@ def test_kernel_window_composes_and_poisons_a_complete_catalog():
     # to every term, the mixture's logsumexp dropped the poisoned branch and
     # returned a finite value from the others.
     pair = _model([A, dense], survey_priors={"sigma_kde_c2": (0.0, 0.004)})
-    configure_catalog_evaluation(kernel_window=1e-10)
-    try:
+    with catalog_settings(kernel_window=1e-10):
         windowed = _bind(pair)
-    finally:
-        configure_catalog_evaluation(kernel_window="off")
     theta = _points(pair, n=1)[0]
     assert np.isfinite(float(windowed(theta)))
     theta[list(pair.parameters.labels).index("sigma_kde_c2")] = 0.05
