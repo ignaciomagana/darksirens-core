@@ -320,6 +320,22 @@ def field_mixture_log_likelihood(
             obs, obs_poison = None, None
         pieces.append(_CatalogPieces(kernels, pin_ok, curves, obs, obs_poison))
 
+    # A failed pin probe, galaxy list or kernel window poisons its catalog's
+    # normaliser with NaN. With two or more catalogs the mixture's logsumexp
+    # would drop that branch as a non-finite term and return a finite value
+    # from the others, so the poison of every branch is also added to every
+    # term (0 when nothing failed; NaN makes every term non-finite and the
+    # likelihood -inf). Static: only when some catalog carries such a check,
+    # so a mixture without one keeps its program.
+    may_poison = n >= 2 and any(
+        piece.pin_ok is not None
+        or getattr(piece.kernels, "layout_ok", None) is not None
+        or getattr(piece.kernels, "window_ok", None) is not None
+        or component.full_pin is not None
+        or getattr(component.full, "galaxy_index", None) is not None
+        for piece, component in zip(pieces, components)
+    )
+
     def evaluate(member):
         views = []
         for k, (params, component, piece) in enumerate(zip(params_k, components, pieces)):
@@ -344,12 +360,15 @@ def field_mixture_log_likelihood(
             else:
                 log_Z = poison
             views.append(_view(state, log_Z))
-        return _reduce(views, member)
+        branch_poison = None
+        if may_poison:
+            branch_poison = sum(poison_of(view.log_Z) for view in views)
+        return _reduce(views, member, branch_poison)
 
     def _column(pix, k):
         return pix if n == 1 else pix[:, k]
 
-    def _reduce(views, member):
+    def _reduce(views, member, branch_poison=None):
         def prior(z, pix, _catalog):
             terms = [
                 eval_incomplete_catalog_prior_state_vmap(
@@ -359,6 +378,8 @@ def field_mixture_log_likelihood(
             ]
             if n == 1:
                 return terms[0]
+            if branch_poison is not None:
+                terms = [term + branch_poison for term in terms]
             if branch_pops is not None:
                 return [log_weights[k] + terms[k] for k in range(n)]
             return mixture_logsumexp([log_weights[k] + terms[k] for k in range(n)])
@@ -378,6 +399,8 @@ def field_mixture_log_likelihood(
                 terms = [fns[k](z, _column(pix, k)) for k in range(n)]
                 if n == 1:
                     return terms[0]
+                if branch_poison is not None:
+                    terms = [term + branch_poison.astype(dtype) for term in terms]
                 if branch_pops is not None:
                     return [lw[k] + terms[k] for k in range(n)]
                 return mixture_logsumexp([lw[k] + terms[k] for k in range(n)])

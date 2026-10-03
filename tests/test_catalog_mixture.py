@@ -639,3 +639,25 @@ def test_extension_refusals():
             target.log_likelihood(_points(analysis, n=1)[0])
     finally:
         configure_catalog_evaluation(missing_density="grid")
+
+
+@pytest.mark.slow
+def test_a_failed_catalog_check_makes_the_mixture_likelihood_minus_inf():
+    """A catalog whose kernel-window verdict fails poisons its normaliser.
+    With two catalogs the mixture's logsumexp used to drop that branch as a
+    non-finite term and return a finite value from the other catalog; the
+    failure must make the whole likelihood -inf."""
+    dense = catalog_store(41, n_max=200, z_hi=0.45, empty=(0, 1))
+    pair = _model([A, dense], survey_priors={"sigma_kde_c2": (0.0, 0.004)})
+    configure_catalog_evaluation(kernel_window=1e-10)
+    try:
+        windowed = _bind(pair)
+    finally:
+        configure_catalog_evaluation(kernel_window="off")
+    view = windowed.model_operands.components[1].compact
+    assert view.kernel_window.size < view.zgals.shape[1]
+    theta = _points(pair, n=1)[0]
+    assert np.isfinite(float(windowed(theta)))
+    wide = theta.copy()
+    wide[list(pair.parameters.labels).index("sigma_kde_c2")] = 0.05
+    assert float(windowed(wide)) == -np.inf
