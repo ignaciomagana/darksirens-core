@@ -53,10 +53,15 @@ SELECTION_NUISANCES = {
 #: catalog's survey-global total, which a multi-catalog mixture requires.
 CATALOG_SKY_WEIGHTINGS = ("conditional", "field")
 #: Settings of ``model(..., field_normalizer=...)`` for a field-weighted
-#: analysis: ``"auto"`` (the default) is ``"moments"`` for
-#: ``completeness="selection"`` and ``"direct"`` otherwise
-#: (:mod:`darksirens.catalog.mixture`).
+#: analysis, one value or one per catalog: ``"auto"`` (the default) is
+#: ``"moments"`` for a catalog with ``completeness="selection"`` and
+#: ``"direct"`` otherwise (:mod:`darksirens.catalog.mixture`).
 FIELD_NORMALIZER_SETTINGS = ("auto", "direct", "moments")
+#: Completeness of one catalog of a field-weighted analysis (``model(...,
+#: catalog_sky_weighting="field", completeness=...)``, one value or one per
+#: catalog): the per-row count ratio, the magnitude-selection curve, or a
+#: complete catalog (every host is in it).
+FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
@@ -128,18 +133,22 @@ class FieldCatalogMixtureRedshift:
     """Field-weighted host density of one or more catalogs (``catalog_sky_weighting="field"``).
 
     ``components`` are the catalogs in order (catalog ``k + 1`` of the
-    labels' ``_c{k+1}`` suffix), ``completeness`` is ``"incomplete"`` (the
-    per-row count ratio) or ``"selection"`` for all of them, ``n0_units`` the
-    unit of every ``log10n0``, and ``normalizer`` the resolved form of each
-    catalog's survey-global normaliser (``"direct"`` or ``"moments"``, see
+    labels' ``_c{k+1}`` suffix). ``completeness`` is one of
+    :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the per-row count
+    ratio; ``"selection"``; ``"complete"``) when every catalog has the same
+    one, else a tuple with one entry per catalog. ``n0_units`` is the unit of
+    every ``log10n0``. ``normalizer`` is the resolved form of the catalogs'
+    survey-global normalisers (``"direct"`` or ``"moments"``, see
     :mod:`darksirens.catalog.mixture`; it is not evaluated for one catalog,
-    where it cancels).
+    where it cancels), likewise one value when they agree and a tuple
+    otherwise. :attr:`catalog_completeness` and :attr:`catalog_normalizers`
+    give both per catalog.
     """
 
     components: tuple
-    completeness: str = "incomplete"
+    completeness: str | tuple = "incomplete"
     n0_units: str = "physical"
-    normalizer: str = "direct"
+    normalizer: str | tuple = "direct"
 
     @property
     def n_catalogs(self) -> int:
@@ -148,6 +157,29 @@ class FieldCatalogMixtureRedshift:
     @property
     def catalogs(self) -> tuple:
         return tuple(component.catalog for component in self.components)
+
+    @property
+    def catalog_completeness(self) -> tuple:
+        """The completeness of each catalog, in order."""
+        return _broadcast_setting(self.completeness, self.n_catalogs)
+
+    @property
+    def catalog_normalizers(self) -> tuple:
+        """The resolved normaliser form of each catalog, in order."""
+        return _broadcast_setting(self.normalizer, self.n_catalogs)
+
+
+def _broadcast_setting(value, n) -> tuple:
+    """A per-catalog setting as a length-``n`` tuple (a string is every catalog's)."""
+    if isinstance(value, str):
+        return (value,) * n
+    return tuple(value)
+
+
+def _collapse_setting(values):
+    """The one shared value of a per-catalog setting, or the tuple when they differ."""
+    values = tuple(values)
+    return values[0] if len(set(values)) == 1 else values
 
 
 def catalog_label_suffix(index: int) -> str:
@@ -488,44 +520,76 @@ def _per_catalog(value, n, what, single_types):
 def _resolve_mixture(
     catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer
 ):
-    """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``."""
+    """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
+
+    ``completeness`` and ``field_normalizer`` are one value for every catalog
+    or a list with one entry per catalog; a list whose entries agree gives the
+    same redshift (and plan) as the one value.
+    """
     from darksirens.catalog.io import CatalogStore
 
     if not catalogs or not all(isinstance(c, CatalogStore) for c in catalogs):
         raise TypeError(
             "catalog must be a CatalogStore returned by ds.load_catalog, or a list of them"
         )
-    if completeness not in (None, "incomplete", "selection"):
-        raise ValueError(
-            "catalog_sky_weighting='field' supports completeness='incomplete' (the "
-            f"per-row count ratio) or 'selection', got completeness={completeness!r}"
-        )
-    completeness = completeness or "incomplete"
+    n = len(catalogs)
+    per_catalog = isinstance(completeness, (list, tuple))
+    if per_catalog:
+        entries = tuple(completeness)
+        if len(entries) != n:
+            raise ValueError(
+                f"completeness has {len(entries)} entries for {n} catalogs: give one "
+                "value for every catalog, or one entry per catalog"
+            )
+    else:
+        entries = (completeness,) * n
+    for k, entry in enumerate(entries):
+        if entry is not None and entry not in FIELD_COMPLETENESS_SETTINGS:
+            where = f" for catalog {k + 1}" if per_catalog else ""
+            raise ValueError(
+                "catalog_sky_weighting='field' supports completeness='incomplete' (the "
+                "per-row count ratio), 'selection' or 'complete'"
+                f"{where}, got completeness={entry!r}"
+            )
+    resolved = tuple(entry or "incomplete" for entry in entries)
     if n0_units is not None and n0_units not in N0_UNITS_SETTINGS:
         raise ValueError(f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}")
-    if field_normalizer is None:
-        field_normalizer = "auto"
-    if field_normalizer not in FIELD_NORMALIZER_SETTINGS:
-        raise ValueError(
-            f"field_normalizer must be one of {FIELD_NORMALIZER_SETTINGS}, got "
-            f"{field_normalizer!r}"
+    per_catalog_normalizer = isinstance(field_normalizer, (list, tuple))
+    if per_catalog_normalizer:
+        settings = tuple(field_normalizer)
+        if len(settings) != n:
+            raise ValueError(
+                f"field_normalizer has {len(settings)} entries for {n} catalogs: give "
+                "one value for every catalog, or one entry per catalog"
+            )
+    else:
+        settings = (field_normalizer,) * n
+    normalizers = []
+    for k, (setting, comp) in enumerate(zip(settings, resolved)):
+        where = f" (catalog {k + 1} runs completeness={comp!r})" if (
+            per_catalog or per_catalog_normalizer
+        ) else ""
+        if setting is None:
+            setting = "auto"
+        if setting not in FIELD_NORMALIZER_SETTINGS:
+            raise ValueError(
+                f"field_normalizer must be one of {FIELD_NORMALIZER_SETTINGS}, got "
+                f"{setting!r}"
+            )
+        if setting == "moments" and comp != "selection":
+            raise ValueError(
+                "field_normalizer='moments' is exact only for completeness='selection' "
+                "(the count ratio's clip at 1 does not factor, and a complete "
+                f"catalog's normaliser is its galaxy count){where}; use 'direct' or 'auto'"
+            )
+        normalizers.append(
+            ("moments" if comp == "selection" else "direct") if setting == "auto" else setting
         )
-    if field_normalizer == "moments" and completeness != "selection":
-        raise ValueError(
-            "field_normalizer='moments' is exact only for completeness='selection' "
-            "(the count ratio's clip at 1 does not factor); use 'direct' or 'auto'"
-        )
-    normalizer = (
-        ("moments" if completeness == "selection" else "direct")
-        if field_normalizer == "auto"
-        else field_normalizer
-    )
-    n = len(catalogs)
     selections = _per_catalog(selection, n, "selection", _single_selection_types())
     import numpy as np
 
     fractions = _per_catalog(row_fraction, n, "row_fraction", (np.ndarray,))
-    if completeness != "selection" and (
+    if "selection" not in resolved and (
         any(s is not None for s in selections) or any(f is not None for f in fractions)
     ):
         raise ValueError(
@@ -533,8 +597,6 @@ def _resolve_mixture(
             f"completeness={completeness!r}"
         )
     if n >= 2:
-        import numpy as np
-
         for k, store in enumerate(catalogs):
             rows = int(np.shape(store.catalog.zgals)[0])
             ids = store.catalog.unique_pixels
@@ -550,10 +612,18 @@ def _resolve_mixture(
                     "empty rows included"
                 )
     components = []
-    for k, (store, sel, frac) in enumerate(zip(catalogs, selections, fractions)):
-        if completeness == "selection" and sel is None:
+    for k, (store, sel, frac, comp) in enumerate(
+        zip(catalogs, selections, fractions, resolved)
+    ):
+        if comp == "selection" and sel is None:
             raise ValueError(
                 f"completeness='selection' requires a selection model for catalog {k + 1}"
+            )
+        if comp != "selection" and (sel is not None or frac is not None):
+            raise ValueError(
+                f"catalog {k + 1} runs completeness={comp!r}: selection and "
+                "row_fraction apply only to completeness='selection'; give None "
+                "for its entry"
             )
         fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
         components.append(
@@ -566,9 +636,9 @@ def _resolve_mixture(
         )
     return FieldCatalogMixtureRedshift(
         components=tuple(components),
-        completeness=completeness,
+        completeness=_collapse_setting(resolved),
         n0_units=n0_units or "physical",
-        normalizer=normalizer,
+        normalizer=_collapse_setting(normalizers),
     )
 
 
@@ -582,12 +652,18 @@ def _survey_block(redshift, catalog_priors):
     """
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         components = redshift.components
+        # A complete catalog has no missing-host density, so no log10n0.
+        priors = tuple(
+            _COMPLETE_CATALOG_PRIORS if comp == "complete" else catalog_priors
+            for comp in redshift.catalog_completeness
+        )
     else:
         components = (redshift,)
+        priors = (catalog_priors,)
     block = []
     for k, component in enumerate(components):
         suffix = catalog_label_suffix(k)
-        for name, lo, hi in catalog_priors:
+        for name, lo, hi in priors[k]:
             block.append((name + suffix, lo, hi, _UNIFORM, False))
         selection = getattr(component, "selection", None)
         if selection is not None:
@@ -1080,7 +1156,9 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     model's runtime payload and, when set, the row fraction's sha256; for a
     field-weighted analysis the weighting, completeness, number of catalogs,
     normaliser, each catalog's kernel-pin activity and its selection payload
-    and row-fraction digest.
+    and row-fraction digest. The completeness and the normaliser are one
+    string when every catalog shares it (the record of every analysis before
+    per-catalog completeness) and a list with one entry per catalog otherwise.
     """
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         from darksirens.selection.catalog import selection_to_mapping
@@ -1279,27 +1357,42 @@ def model(
     Z_k`` over the catalogs, the field numerator ``n_k`` of
     :mod:`darksirens.catalog.field` at the sample's row ``p_k`` of catalog k
     divided by catalog k's full-sky total ``Z_k``, for PE and selection
-    samples alike. ``completeness`` is ``"incomplete"`` (count ratio) or
-    ``"selection"`` for every catalog; ``selection`` and ``row_fraction`` are
-    then lists with one entry per catalog (a ``row_fraction`` entry may be
-    ``None``). Each catalog has its own survey block, labelled ``log10n0``,
+    samples alike. ``completeness`` is one value for every catalog or a list
+    with one entry per catalog (for example ``["incomplete", "selection"]``):
+    ``"incomplete"`` (``None``; the per-row count ratio), ``"selection"`` (the
+    magnitude-selection curve) or ``"complete"`` (the catalog holds every
+    host: ``n_k = N_obs,p p_cat(z | p)``, no missing hosts and no survey
+    depth, and ``Z_k = sum_p N_obs,p``, the frozen reference's field
+    convention of the complete catalog). ``selection`` and ``row_fraction``
+    are lists with one entry per catalog, ``None`` for a catalog that does not
+    run ``"selection"`` (a ``row_fraction`` entry may be ``None`` for one that
+    does). Each catalog has its own survey block, labelled ``log10n0``,
     ``delta``, ``sigma_kde`` (and selection nuisances named in
-    ``survey_priors``) for the first and with the suffix ``_c{k}`` for
-    catalog ``k >= 2`` (``log10n0_c2``, ...); ``fixed_survey`` and
-    ``survey_priors`` take these labels. The weights are the stick-breaking
+    ``survey_priors``; a complete catalog has no ``log10n0``) for the first
+    and with the suffix ``_c{k}`` for catalog ``k >= 2`` (``log10n0_c2``,
+    ...); ``fixed_survey`` and ``survey_priors`` take these labels. The weights are the stick-breaking
     coordinates ``fcat_2 .. fcat_K`` with ``fcat_m ~ Beta(1, K - m + 1)``
     (uniform on the simplex; ``w_1 = prod (1 - fcat_m)``, at ``K = 2`` ``w =
     (1 - fcat_2, fcat_2)``), placed after the survey blocks; ``fixed_survey``
     may fix them. With one catalog ``Z_1`` cancels and is not evaluated, and
     the likelihood equals the field host-density seam's. ``field_normalizer``
-    picks how ``Z_k`` is computed: ``"auto"`` (default) is ``"moments"`` for
-    the selection completeness, exact and cheap, and ``"direct"`` (the
-    full-sky row sums) for the count ratio, the only exact form there. The
-    kernel pin applies per catalog (to its compact rows and, with a survey
-    depth, its full sky) when ``Om0``, ``w0``, ``wa`` and its own ``delta``,
-    ``sigma_kde`` are fixed. The plan records the weighting, completeness,
-    number of catalogs, normaliser, per-catalog pin activity and selection
-    payloads in ``ParameterPlan.catalog_model``.
+    picks how ``Z_k`` is computed, one value or one per catalog: ``"auto"``
+    (default) is chosen per catalog, ``"moments"`` for the selection
+    completeness, exact and cheap, and ``"direct"`` (the full-sky row sums)
+    for the count ratio, the only exact form there, and for a complete
+    catalog (its galaxy count). The kernel pin applies per catalog (to its
+    compact rows and, with a survey depth, its full sky) when ``Om0``,
+    ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed. The plan
+    records the weighting, completeness, number of catalogs, normaliser,
+    per-catalog pin activity and selection payloads in
+    ``ParameterPlan.catalog_model``; the completeness and the normaliser are
+    recorded as one value when every catalog shares it (so a single value, or
+    a list of equal entries, gives the plan and fingerprint of one value) and
+    as a list otherwise. ``compute_dtype="float32"`` is not available with a
+    complete catalog, as for a conditional complete-catalog analysis, and a
+    missing-host extension
+    (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`) is not
+    called for one, which has no missing hosts.
 
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
@@ -1358,8 +1451,9 @@ def model(
             raise ValueError("bright sirens do not take a galaxy catalog")
         if empty_policy is not None:
             raise ValueError(
-                "empty_policy applies only to completeness='complete', which "
-                "catalog_sky_weighting='field' does not support"
+                "empty_policy applies only to completeness='complete' with "
+                "catalog_sky_weighting='conditional': a field-weighted complete "
+                "catalog gives a galaxy-free row no hosts"
             )
         redshift = _resolve_mixture(
             tuple(catalog) if several else (catalog,),
@@ -1375,6 +1469,14 @@ def model(
             raise ValueError(
                 "field_normalizer applies only to catalog_sky_weighting='field'"
             )
+        if isinstance(completeness, (list, tuple)):
+            if len(completeness) != 1:
+                raise ValueError(
+                    "a per-catalog completeness list applies to "
+                    "catalog_sky_weighting='field' (one entry per catalog); the "
+                    "conditional weighting takes one catalog and one completeness"
+                )
+            (completeness,) = completeness
         if several:
             if len(catalog) != 1:
                 raise ValueError(
@@ -1619,6 +1721,7 @@ __all__ = [
     "Analysis",
     "CATALOG_SKY_WEIGHTINGS",
     "CatalogComponent",
+    "FIELD_COMPLETENESS_SETTINGS",
     "FIELD_NORMALIZER_SETTINGS",
     "FieldCatalogMixtureRedshift",
     "COMPLETENESS_SETTINGS",

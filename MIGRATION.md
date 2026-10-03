@@ -470,6 +470,24 @@ accepted state constructor, factored out unchanged). Every default plan,
 fingerprint and bound program is unchanged (optimized HLO and logL bit for
 bit against a clean `main`).
 
+### Per-catalog completeness in the field mixture (opt-in, default unchanged)
+
+`ds.model(catalog=[A, B], catalog_sky_weighting="field",
+completeness=["incomplete", "selection"], selection=[None, fit_B])` gives
+each catalog its own completeness: the per-row count ratio, the
+magnitude-selection curve or `"complete"`. The frozen reference's kernel takes
+one `SurveyParams` per catalog with its own `c_mode`, so a count-ratio plus
+selection mixture is its `darksiren_log_likelihood(..., mixture_surveys=...)`
+with per-catalog `c_mode` (its CLI broadcasts one `--c_mode`); the two agree
+to 4e-14 on the probe and on split mock T. `"complete"` is the reference's
+field-weighted `universe_model="dark_sirens_complete"` (`n_k = N_obs,p
+p_cat`, `Z_k = sum_p N_obs,p`, no survey depth), which the reference allows
+only for every catalog at once; core also mixes it with incomplete catalogs.
+`field_normalizer` takes one value or one per catalog, and `"auto"` is chosen
+per catalog. One value, or a list of equal entries, gives the plan,
+fingerprint and bound program of today (optimized HLO and logL bit for bit
+against a clean `main`).
+
 ### Per-catalog population blocks (opt-in, default unchanged)
 
 `ds.model(catalog=[A, B, ...], catalog_sky_weighting="field",

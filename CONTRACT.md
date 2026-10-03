@@ -201,20 +201,30 @@ below).
   `sum_k w_k n_k(z | p_k) / Z_k` with `n_k` the field numerator at its row
   `p_k` of catalog k, for PE samples and injections alike. With one catalog
   `Z_1` cancels and is not evaluated (the value is the field host-density
-  seam's, to rounding). `completeness` is `"incomplete"` or `"selection"`
-  for every catalog (`"complete"` is refused); `selection` and
-  `row_fraction` are then lists with one entry per catalog. Catalog 1's survey
-  labels are `log10n0`, `delta`, `sigma_kde` (plus selection nuisances named
-  in `survey_priors`), catalog `k >= 2`'s carry the suffix `_c{k}`, and the
+  seam's, to rounding). `completeness` is one value for every catalog or a
+  list with one entry per catalog: `"incomplete"` (the count ratio),
+  `"selection"` or `"complete"` (`n_k = N_obs,p p_cat(z | p)`, no missing
+  hosts and no survey depth, `Z_k = sum_p N_obs,p`: the reference's field
+  convention of `universe_model="dark_sirens_complete"`); a list of equal
+  entries is the one value (same plan and fingerprint). `selection` and
+  `row_fraction` are lists with one entry per catalog, `None` for a catalog
+  that does not run `"selection"`. Catalog 1's survey labels are
+  `log10n0`, `delta`, `sigma_kde` (plus selection nuisances named in
+  `survey_priors`; a complete catalog has no `log10n0`), catalog `k >= 2`'s
+  carry the suffix `_c{k}`, and the
   weights are the stick-breaking coordinates `fcat_2 .. fcat_K` after the
   survey blocks, `fcat_m ~ Beta(1, K - m + 1)` on [0, 1] (uniform on the
   simplex; `w = (1 - fcat_2, fcat_2)` at `K = 2`), the frozen reference's
   labels, priors and order; `fixed_survey` and `survey_priors` take these
-  labels (`fixed_survey` may fix a weight). `field_normalizer="auto"` (the
-  default) evaluates `Z_k` in the `"moments"` form for the selection
-  completeness (one curve, exact) and in the `"direct"` form (every full-sky
-  row's curves, row blocked) for the count ratio, the only exact form there;
-  `"moments"` with the count ratio is refused. The kernel pin applies per
+  labels (`fixed_survey` may fix a weight). `field_normalizer` is one value
+  or one per catalog; `"auto"` (the default) is chosen per catalog: the
+  `"moments"` form of `Z_k` for the selection completeness (one curve,
+  exact) and the `"direct"` form (every full-sky row's curves, row blocked)
+  for the count ratio, the only exact form there, and for a complete catalog
+  (its galaxy count); `"moments"` with the count ratio or a complete catalog
+  is refused. `compute_dtype="float32"` is refused with a complete catalog
+  (as for the conditional complete catalog), and a missing-host extension
+  is not called for one. The kernel pin applies per
   catalog, to its compact view and (with a survey depth) its full sky, when
   `Om0`, `w0`, `wa` and its own `delta`, `sigma_kde` are fixed; each pin's
   catalog digest is checked against its view when the binding is made. A
@@ -230,7 +240,10 @@ below).
   selection payloads and row-fraction digests. On the frozen reference's
   `darksiren_log_likelihood(..., catalog_sky_weighting="field",
   n_catalogs=K)` the likelihood agrees to 3e-14
-  (`tools/probe_catalog_mixture.py`; on split mock T, 72 points, 3e-14).
+  (`tools/probe_catalog_mixture.py`; on split mock T, 72 points, 3e-14),
+  including mixtures of count-ratio and selection catalogs (the reference's
+  per-catalog `SurveyParams.c_mode`) and every-catalog-complete mixtures; it
+  cannot express a mixture of complete and incomplete catalogs.
 - `model(..., per_catalog_population={k: [parameter, ...]})` (opt-in, a
   field-weighted mixture of `K >= 2` catalogs only): catalog `k` (`2 <= k <=
   K`) carries its own copy of the named population parameters (labels or

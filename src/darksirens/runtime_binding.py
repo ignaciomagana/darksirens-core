@@ -325,11 +325,19 @@ def _decode_mixture(analysis, theta, free, H0) -> CatalogMixtureParameters:
         return free[label]
 
     components = []
-    for k, component in enumerate(redshift.components):
+    for k, (component, completeness) in enumerate(
+        zip(redshift.components, redshift.catalog_completeness)
+    ):
         suffix = catalog_label_suffix(k)
         components.append(
             CatalogParameters(
-                n0=physical_n0(value("log10n0" + suffix), H0, redshift.n0_units),
+                # A complete catalog has no log10n0 (the conditional complete
+                # catalog's decode: n0 = 1, never read).
+                n0=(
+                    1.0
+                    if completeness == "complete"
+                    else physical_n0(value("log10n0" + suffix), H0, redshift.n0_units)
+                ),
                 delta=value("delta" + suffix),
                 sigma_kde=value("sigma_kde" + suffix),
                 z_depth=component.catalog.z_depth,
@@ -854,6 +862,14 @@ def _require_compute_dtype_support(analysis: Analysis, compute_dtype, *, spin_bl
         shared_gamma=population.shared_gamma,
     )
     require_angular_support(analysis.angular_model)
+    if isinstance(analysis.redshift, FieldCatalogMixtureRedshift) and (
+        "complete" in analysis.redshift.catalog_completeness
+    ):
+        raise ValueError(
+            f"compute_dtype={compute_dtype!r} is not implemented for a "
+            "field-weighted analysis with a complete catalog (as for a "
+            "complete-catalog analysis)"
+        )
     if spin_block:
         raise ValueError(
             f"compute_dtype={compute_dtype!r} is not implemented for a "
@@ -927,13 +943,19 @@ def _with_kernel_window(analysis, catalog, k=None):
 
 
 def _mixture_pin_premise(analysis, k):
-    """Catalog ``k``'s fixed cosmology and catalog parameters (the pin premise)."""
+    """Catalog ``k``'s fixed cosmology and catalog parameters (the pin premise).
+
+    A complete catalog's kernel has no survey depth, so neither has its premise.
+    """
     decoded = _decode_theta(
         analysis,
         jnp.full((len(analysis.parameters.labels),), 0.5, dtype=jnp.float64),
         z_depth=None,
     )
-    return decoded.cosmology, decoded.catalog.components[k]
+    params = decoded.catalog.components[k]
+    if analysis.redshift.catalog_completeness[k] == "complete":
+        params = params._replace(z_depth=None)
+    return decoded.cosmology, params
 
 
 def _bind_mixture(analysis, events, injections):
@@ -955,9 +977,12 @@ def _bind_mixture(analysis, events, injections):
         redshift, analysis.parameters.labels, analysis.parameters.kernel_pin
     )
     galaxy_list = catalog_evaluation_settings().kernel_layout == "galaxy_list"
-    count_ratio = redshift.completeness == "incomplete"
     pe_rows, sel_rows, components = [], [], []
-    for k, component in enumerate(redshift.components):
+    for k, (component, completeness, normalizer) in enumerate(
+        zip(redshift.components, redshift.catalog_completeness, redshift.catalog_normalizers)
+    ):
+        count_ratio = completeness == "incomplete"
+        complete = completeness == "complete"
         store = component.catalog
         global_pe = ang2pix_ring(store.nside, events.columns["ra"], events.columns["dec"])
         global_sel = ang2pix_ring(
@@ -971,10 +996,11 @@ def _bind_mixture(analysis, events, injections):
             # The normaliser Z_k reads every row of the catalog's sky; row r of
             # the full view is store row r. The selection completeness in the
             # moments form without a survey depth reads only the row count and
-            # the real-galaxy counts, so its full view carries no galaxy slots.
-            light = (
+            # the real-galaxy counts, so its full view carries no galaxy slots;
+            # nor does a complete catalog's, whose Z_k is its galaxy count.
+            light = complete or (
                 not count_ratio
-                and redshift.normalizer == "moments"
+                and normalizer == "moments"
                 and store.z_depth is None
             )
             source = store.catalog._replace(unique_pixels=None)
@@ -983,7 +1009,9 @@ def _bind_mixture(analysis, events, injections):
                 empty = np.zeros((rows, 0), dtype=np.float64)
                 source = source._replace(zgals=empty, dzgals=empty, wgals=empty)
             full = _jax_catalog(source)
-        if galaxy_list:
+        if galaxy_list and not complete:
+            # A complete catalog has no row normaliser to spend the list's
+            # check on and reads the padded catalog, as the conditional one.
             compact = with_galaxy_index(compact)
             if full is not None and not light:
                 full = with_galaxy_index(full)
@@ -1005,7 +1033,7 @@ def _bind_mixture(analysis, events, injections):
         if pinned[k]:
             cosmology, params = _mixture_pin_premise(analysis, k)
             compact_pin = build_pinned_field_kernel(cosmology, params, compact)
-            if full is not None and store.z_depth is not None:
+            if full is not None and store.z_depth is not None and not complete:
                 full_pin = build_pinned_field_kernel(cosmology, params, full)
         compact_fraction = full_fraction = None
         if component.row_fraction is not None:

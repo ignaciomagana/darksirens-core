@@ -19,6 +19,14 @@ HEALPix resolutions (nside 2 and 4), so each sample has a row in each.
 The population is one explicit vector in both arms with the merger-rate slope
 gamma pinned (``GAMMA``).
 
+A cell's completeness is one value for every catalog or one per catalog
+(``ds.model(..., completeness=[...])``). The legacy kernel takes one
+``SurveyParams`` per catalog, each with its own ``c_mode``, so a mixture of
+count-ratio and selection catalogs is compared directly. A complete catalog is
+legacy's ``universe_model="dark_sirens_complete"``, a run-level choice: the
+complete cells have every catalog complete (legacy cannot mix complete and
+incomplete catalogs).
+
 Legacy stores the count-ratio normaliser's observed density in float32
 (``field_dN_obs_s``); core keeps it in float64. ``--legacy-f64-obs`` (legacy
 arm) replaces legacy's table by the float64 one, which isolates that storage
@@ -52,9 +60,11 @@ SCHECHTER = (
 )
 
 #: (name, K, completeness, z_depth, row_fraction, fixed kernel params, points).
-#: A point: per catalog (log10n0, delta, sigma_kde[, Mstar_hat, alpha]), then
-#: (H0, fcat_2, ...). With fixed kernel params (delta, sigma_kde) the
-#: candidate pins each catalog's kernel and the legacy arm does not.
+#: ``completeness`` is one value or a tuple with one per catalog. A point: per
+#: catalog (log10n0, delta, sigma_kde[, Mstar_hat, alpha]) or, for a complete
+#: catalog, (delta, sigma_kde); then (H0, fcat_2, ...). With fixed kernel
+#: params (delta, sigma_kde) the candidate pins each catalog's kernel and the
+#: legacy arm does not. A row fraction applies to the selection catalogs.
 CELLS = (
     ("k1_count", 1, "incomplete", None, False, None,
      (((-2.0, 0.0, 0.0),), (67.74,)),
@@ -80,19 +90,57 @@ CELLS = (
      (((-2.2, 0.6, 0.002, -20.2, -0.9), (-2.8, -0.5, 0.004, -21.3, -1.2)), (77.0, 0.45))),
     ("k3_count", 3, "incomplete", None, False, None,
      (((-2.0, 0.0, 0.0), (-2.5, 0.0, 0.0), (-2.2, 0.3, 0.0)), (67.74, 0.3, 0.4))),
+    # Per-catalog completeness: count ratio and selection in one mixture.
+    ("mixed_count_selection", 2, ("incomplete", "selection"), None, False, None,
+     (((-2.0, 0.0, 0.0), (-2.5, 0.0, 0.0, -21.0, -0.8)), (67.74, 0.3)),
+     (((-2.4, 0.5, 0.004), (-1.9, 0.2, 0.0, -20.7, -1.1)), (60.0, 0.75)),
+     (((-1.7, -0.4, 0.01), (-2.9, 0.9, 0.006, -21.3, -1.2)), (81.0, 0.05))),
+    ("mixed_selection_count_depth_fp", 2, ("selection", "incomplete"), 0.22, True, None,
+     (((-2.0, 0.0, 0.0, -20.6, -1.05), (-2.5, 0.0, 0.0)), (67.74, 0.3)),
+     (((-2.2, 0.6, 0.002, -20.2, -0.9), (-2.8, -0.5, 0.004)), (77.0, 0.45))),
+    ("mixed_count_selection_depth_pinned", 2, ("incomplete", "selection"), 0.22, False,
+     (0.4, 0.003),
+     (((-2.0,), (-2.5, -21.0, -0.8)), (67.74, 0.3)),
+     (((-2.4,), (-1.8, -20.7, -1.1)), (55.0, 0.7))),
+    ("mixed_k3", 3, ("selection", "incomplete", "selection"), None, False, None,
+     (((-2.0, 0.0, 0.0, -20.6, -1.05), (-2.5, 0.0, 0.0), (-2.2, 0.3, 0.0, -21.0, -0.8)),
+      (67.74, 0.3, 0.4)),
+     (((-2.3, 0.4, 0.005, -20.9, -1.3), (-1.9, 0.2, 0.0), (-2.6, -0.2, 0.003, -20.8, -0.9)),
+      (72.0, 0.6, 0.2))),
+    # Complete catalogs (legacy: every catalog complete).
+    ("k1_complete", 1, "complete", None, False, None,
+     (((0.0, 0.0),), (67.74,)),
+     (((0.5, 0.004),), (58.0,))),
+    ("k2_complete", 2, "complete", None, False, None,
+     (((0.0, 0.0), (0.0, 0.0)), (67.74, 0.3)),
+     (((0.5, 0.004), (-0.3, 0.0)), (58.0, 0.8)),
+     (((-0.4, 0.01), (0.9, 0.006)), (81.0, 0.05))),
+    # A complete catalog has no survey depth: the store's z_depth is not read.
+    ("k2_complete_depth", 2, "complete", 0.22, False, None,
+     (((0.0, 0.0), (0.0, 0.0)), (67.74, 0.3)),
+     (((0.5, 0.004), (-0.3, 0.002)), (62.0, 0.6))),
 )
+
+
+def _modes(completeness, K):
+    """The completeness of each catalog of a cell."""
+    if isinstance(completeness, str):
+        return (completeness,) * K
+    return tuple(completeness)
 
 
 def _cell_points(cell):
     return cell[6:]
 
 
-def _catalog(seed, nside, z_depth):
+def _catalog(seed, nside, z_depth, empty=True):
     rng = np.random.default_rng(seed)
     npix = 12 * nside * nside
     n_max = 5
     ngals = rng.integers(1, n_max + 1, npix).astype(np.int32)
-    ngals[rng.choice(npix, size=max(2, npix // 12), replace=False)] = 0
+    rows = rng.choice(npix, size=max(2, npix // 12), replace=False)
+    if empty:
+        ngals[rows] = 0
     zgals = np.full((npix, n_max), 100.0)
     dzgals = np.ones((npix, n_max))
     wgals = np.zeros((npix, n_max))
@@ -131,9 +179,15 @@ def _samples():
     return pe, sel
 
 
-def _cell_catalogs(K, z_depth):
+#: Cells whose catalogs have no empty row: one complete catalog gives an
+#: event whose samples all fall on empty rows a -inf likelihood in both arms.
+NO_EMPTY_ROWS = ("k1_complete",)
+
+
+def _cell_catalogs(K, z_depth, name=""):
     nsides = (2, 4, 2)[:K]
-    return [_catalog(100 + k, nsides[k], z_depth) for k in range(K)]
+    empty = name not in NO_EMPTY_ROWS
+    return [_catalog(100 + k, nsides[k], z_depth, empty) for k in range(K)]
 
 
 def _population(get_fixed_population_params):
@@ -174,7 +228,7 @@ def _candidate():
     rows = {}
     for cell in CELLS:
         name, K, completeness, z_depth, with_fp, fixed_kernel = cell[:6]
-        cats = _cell_catalogs(K, z_depth)
+        cats = _cell_catalogs(K, z_depth, name)
         stores = [
             CatalogStore(
                 path=f"probe-catalog-{k}", nside=c["nside"], z_depth=z_depth,
@@ -187,16 +241,22 @@ def _candidate():
         ]
         kwargs = {}
         suffixes = [""] + [f"_c{k + 1}" for k in range(1, K)]
-        if completeness == "selection":
-            kwargs["selection"] = [SchechterMagnitudeSelection(**SCHECHTER[k]) for k in range(K)]
+        modes = _modes(completeness, K)
+        if "selection" in modes:
+            kwargs["selection"] = [
+                SchechterMagnitudeSelection(**SCHECHTER[k % 2]) if m == "selection" else None
+                for k, m in enumerate(modes)
+            ]
             kwargs["survey_priors"] = {
                 label: bounds
-                for s in suffixes
+                for s, m in zip(suffixes, modes)
+                if m == "selection"
                 for label, bounds in ((f"Mstar_hat{s}", (-23.0, -18.0)), (f"alpha{s}", (-1.9, 0.0)))
             }
             if with_fp:
                 kwargs["row_fraction"] = [
-                    _row_fraction(200 + k, 12 * cats[k]["nside"] ** 2) for k in range(K)
+                    _row_fraction(200 + k, 12 * cats[k]["nside"] ** 2) if m == "selection" else None
+                    for k, m in enumerate(modes)
                 ]
         if fixed_kernel is not None:
             kwargs["fixed_survey"] = {
@@ -207,7 +267,7 @@ def _candidate():
             population=ds.Population(POP_MODEL, fixed=dict(zip(labels, population))),
             catalog=stores,
             catalog_sky_weighting="field",
-            completeness=completeness,
+            completeness=completeness if isinstance(completeness, str) else list(completeness),
             **kwargs,
         )
         if fixed_kernel is not None:
@@ -219,7 +279,8 @@ def _candidate():
             theta = [H0]
             for k in range(K):
                 survey = list(per_catalog[k])
-                theta += survey[:1] if fixed_kernel is not None else survey
+                # A point lists the sampled survey coordinates in plan order.
+                theta += survey
             theta += list(sticks)
             values.append(float(bound(np.asarray(theta, dtype=np.float64))))
         rows[name] = values
@@ -258,7 +319,11 @@ def _legacy(f64_obs):
     rows = {}
     for cell in CELLS:
         name, K, completeness, z_depth, with_fp, fixed_kernel = cell[:6]
-        cats = _cell_catalogs(K, z_depth)
+        cats = _cell_catalogs(K, z_depth, name)
+        modes = _modes(completeness, K)
+        if "complete" in modes and set(modes) != {"complete"}:
+            raise ValueError(f"{name}: legacy cannot mix complete and incomplete catalogs")
+        universe_model = "dark_sirens_complete" if "complete" in modes else "dark_sirens"
 
         def event(cols):
             pix = [
@@ -289,7 +354,7 @@ def _legacy(f64_obs):
             if z_depth is not None:
                 depth = build_field_depth_inputs(c["zgals"], c["dzgals"], c["wgals"], c["ngals"])
                 extra.update(field_depth_z=depth.z, field_depth_dz=depth.dz, field_depth_c=depth.c)
-            if with_fp:
+            if with_fp and modes[k] == "selection":
                 f = _row_fraction(200 + k, 12 * c["nside"] ** 2)
                 occ = np.asarray(field.occupied_pixels)
                 empty = np.setdiff1d(np.arange(f.size), occ)
@@ -309,12 +374,15 @@ def _legacy(f64_obs):
             surveys = []
             for k in range(K):
                 entries = list(per_catalog[k])
-                if fixed_kernel is not None:
-                    entries = entries[:1] + list(fixed_kernel)
+                if modes[k] == "complete":
+                    # No log10n0: n0 is never read by the complete model.
+                    entries = [0.0] + (list(fixed_kernel) if fixed_kernel is not None else entries)
+                elif fixed_kernel is not None:
+                    entries = entries[:1] + list(fixed_kernel) + entries[1:]
                 log10n0, delta, sigma_kde = entries[:3]
                 extra = {}
-                if completeness == "selection":
-                    fields = dict(SCHECHTER[k])
+                if modes[k] == "selection":
+                    fields = dict(SCHECHTER[k % 2])
                     fields["Mstar_hat"], fields["alpha"] = entries[3], entries[4]
                     extra = dict(c_mode=C_MODE_SELECTION_STRUCT,
                                  selection_family=SELECTION_FAMILY_SCHECHTER_STRUCT, **fields)
@@ -334,7 +402,7 @@ def _legacy(f64_obs):
                 )
             values.append(float(darksiren_log_likelihood(
                 cosmo, surveys[0], jnp.asarray(population), gw_pe, em[0], gw_sel, em[0],
-                N_EVENTS, NSAMP, N_DRAW, POP_MODEL, "dark_sirens",
+                N_EVENTS, NSAMP, N_DRAW, POP_MODEL, universe_model,
                 max_likelihood_variance=MAX_VARIANCE,
                 catalog_sky_weighting="field",
                 **mix,
