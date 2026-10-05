@@ -29,7 +29,9 @@ FROZEN_ROOT_API = {
     "load_catalog",
     "model",
     "decode_parameters",
+    "log_likelihood",
     "infer",
+    "save_result",
 }
 
 PINNED_RUNTIME = (

@@ -128,20 +128,60 @@ def decode_parameters(analysis, theta, *, z_depth=_BINDING_DEPTH):
     return _decode_parameters(analysis, theta, z_depth=z_depth)
 
 
-def infer(
+def log_likelihood(
     analysis,
     *,
-    events=None,
-    injections=None,
-    sampler="tinyns",
+    events,
+    injections,
     selection_neff_guard="auto",
     max_likelihood_variance=None,
     sel_batch_size=None,
     pe_event_block=None,
     compute_dtype=None,
+):
+    """Bind an ordinary analysis to its stores: a callable ``theta -> log L``.
+
+    The likelihood ``infer`` samples, bound the same way with the same
+    likelihood options; ``theta`` has one value per
+    ``analysis.parameters.labels`` entry. ``selection_neff_guard="auto"`` is
+    the hard guard here (no sampler to resolve against). See
+    :func:`darksirens.inference.public.log_likelihood`.
+    """
+    configure_jax_runtime()
+    from .inference.public import log_likelihood as _log_likelihood
+
+    return _log_likelihood(
+        analysis,
+        events=events,
+        injections=injections,
+        selection_neff_guard=selection_neff_guard,
+        max_likelihood_variance=max_likelihood_variance,
+        sel_batch_size=sel_batch_size,
+        pe_event_block=pe_event_block,
+        compute_dtype=compute_dtype,
+    )
+
+
+def infer(
+    analysis,
+    *,
+    events=None,
+    injections=None,
+    sampler=None,
+    selection_neff_guard="auto",
+    max_likelihood_variance=None,
+    sel_batch_size=None,
+    pe_event_block=None,
+    compute_dtype=None,
+    guard_report=True,
     **sampler_options,
 ):
-    """Run an ordinary analysis or specialized target through core samplers."""
+    """Run an ordinary analysis or specialized target through core samplers.
+
+    ``sampler=None`` is Dynesty (the ``darksirens[dynesty]`` extra); pass
+    ``'tinyns'`` or ``'numpyro'`` for the others. See
+    :func:`darksirens.inference.public.infer`.
+    """
     configure_jax_runtime()
     from .inference.public import infer as _infer
 
@@ -155,8 +195,19 @@ def infer(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
+        guard_report=guard_report,
         **sampler_options,
     )
+
+
+def save_result(path, result, *, labels=None):
+    """Write an ``infer`` result to one HDF5 file, published atomically.
+
+    See :func:`darksirens.io.results.save_result` for the file layout.
+    """
+    from .io.results import save_result as _save_result
+
+    return _save_result(path, result, labels=labels)
 
 
 __all__ = [
@@ -172,5 +223,7 @@ __all__ = [
     "load_catalog",
     "model",
     "decode_parameters",
+    "log_likelihood",
     "infer",
+    "save_result",
 ]

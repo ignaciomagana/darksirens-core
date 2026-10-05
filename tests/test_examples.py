@@ -4,13 +4,13 @@ A byte-compile of ``examples/`` cannot notice a renamed or removed public
 symbol, so these checks do two things. Every example is parsed and each
 ``ds.<name>`` it touches must be a package-root export, which fails on a
 rename with no sampler installed. Each example is then executed end to end in
-its smallest honest mode: ``custom_target.py`` as written, and
+its smallest honest mode: ``custom_target.py`` as written,
 ``ordinary_catalog.py`` on tiny standardized PE / selection / catalog stores
 written here (2 events x 16 samples, 256 detected injections, a 12-pixel
-catalog with 3 galaxies per pixel) with the default TinyNS sampler. The
-ordinary example's command line does not expose sampler settings, so that run
-wraps ``ds.infer`` to pass a small live-point count; with the default 1000 live
-points the same run takes about seven minutes on one CPU.
+catalog with 3 galaxies per pixel) with the default sampler (Dynesty, the
+``dynesty`` extra), and ``likelihood_grid.py`` on the same PE and selection
+stores. The ordinary example's command line does not expose sampler settings,
+so that run wraps ``ds.infer`` to pass a small live-point count.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ EXAMPLE_FILES = sorted(EXAMPLES.glob("*.py"))
 def test_examples_directory_is_not_empty():
     assert {path.name for path in EXAMPLE_FILES} >= {
         "custom_target.py",
+        "likelihood_grid.py",
         "ordinary_catalog.py",
     }
 
@@ -133,7 +134,7 @@ def _write_ordinary_fixtures(directory: Path):
     return events, injections, catalog
 
 
-def _run_example(name, *args):
+def _run_example_stdout(name, *args):
     # Run against the same darksirens this test imported (source tree or wheel).
     src = os.path.dirname(os.path.dirname(os.path.abspath(ds.__file__)))
     env = dict(os.environ)
@@ -149,13 +150,18 @@ def _run_example(name, *args):
         timeout=900,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
-    lines = [line for line in proc.stdout.splitlines() if line.startswith("logZ = ")]
-    assert lines, proc.stdout[-3000:]
+    return proc.stdout
+
+
+def _run_example(name, *args):
+    stdout = _run_example_stdout(name, *args)
+    lines = [line for line in stdout.splitlines() if line.startswith("logZ = ")]
+    assert lines, stdout[-3000:]
     return float(lines[-1].split("=", 1)[1])
 
 
 def test_custom_target_example_executes():
-    pytest.importorskip("tinyns")
+    pytest.importorskip("dynesty")
     logz = _run_example("custom_target.py")
     # 1-D Gaussian of width 0.2 in a uniform [-1, 1] prior: log(0.2 sqrt(2 pi) / 2).
     assert np.isfinite(logz)
@@ -163,18 +169,41 @@ def test_custom_target_example_executes():
 
 
 def test_ordinary_catalog_example_executes_on_tiny_stores(tmp_path, monkeypatch, capsys):
-    pytest.importorskip("tinyns")
-    pytest.importorskip("h5py")
+    pytest.importorskip("dynesty")
+    h5py = pytest.importorskip("h5py")
+    from darksirens.io.results import result_is_complete
+
     events, injections, catalog = _write_ordinary_fixtures(tmp_path)
+    out = tmp_path / "result.h5"
     # Same public call the example makes, only with fewer live points. Setting
     # the attribute fails if ``infer`` is ever removed from the package root.
     monkeypatch.setattr(ds, "infer", functools.partial(ds.infer, nlive=50, dlogz=0.5))
     monkeypatch.setattr(
         sys,
         "argv",
-        ["ordinary_catalog.py", str(events), str(injections), str(catalog)],
+        ["ordinary_catalog.py", str(events), str(injections), str(catalog), "--out", str(out)],
     )
     runpy.run_path(str(EXAMPLES / "ordinary_catalog.py"), run_name="__main__")
-    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("logZ = ")]
+    stdout = capsys.readouterr().out
+    lines = [line for line in stdout.splitlines() if line.startswith("logZ = ")]
     assert lines
-    assert np.isfinite(float(lines[-1].split("=", 1)[1]))
+    logz = float(lines[-1].split("=", 1)[1])
+    assert np.isfinite(logz)
+    assert "guarded prior draws: " in stdout
+
+    assert result_is_complete(out)
+    with h5py.File(out, "r") as f:
+        labels = [label.decode() for label in f["labels"][()]]
+        assert labels[0] == "H0"
+        assert f["samples"].shape[1] == len(labels)
+        assert f.attrs["logZ"] == logz
+        assert "guard_report" in f.attrs["result_json"]
+
+
+def test_likelihood_grid_example_executes_on_tiny_stores(tmp_path):
+    pytest.importorskip("h5py")
+    events, injections, _ = _write_ordinary_fixtures(tmp_path)
+    stdout = _run_example_stdout("likelihood_grid.py", events, injections, "--points", "5")
+    rows = [line for line in stdout.splitlines() if line.startswith("H0 = ")]
+    assert len(rows) == 5, stdout[-3000:]
+    assert "finite points: " in stdout
