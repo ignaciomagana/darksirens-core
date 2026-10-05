@@ -308,6 +308,108 @@ user typed them rather than as a silent `-inf`:
   written before 2026-10-02 under the new defaults is refused as a settings
   change; the refusal names the settings that resume it (see `MIGRATION.md`).
 
+## Modelling assumptions
+
+### Photometric redshifts: the smooth prior on true redshift
+
+**The kernel.** Every catalog analysis (complete, incomplete, field-weighted
+mixture, marked hosts) places each galaxy `i` in redshift with the unit-mass
+kernel of `darksirens.catalog.redshift`:
+
+```text
+p(z | galaxy i) = N(z; z_i, sigma_i) g(z) / Z_i,    g(z) = dV_c/dz (1 + z)^delta,
+sigma_i = max(sqrt(dz_i^2 + sigma_kde^2), 1e-4),    Z_i = integral of N(z; z_i, sigma_i) g(z) dz,
+```
+
+with `z_i` and `dz_i` the catalog's stored redshift and its uncertainty. Read
+as Bayes' theorem for the galaxy's true redshift `z`, this is a Gaussian
+redshift likelihood (width taken at the stored redshift) times a prior
+`g(z)`: the smooth comoving volume, the same along every line of sight. The
+host density of a sky pixel is the sum of its galaxies' kernels. This is the
+frozen legacy kernel, and core keeps it bit for bit.
+
+**What it neglects.** The true redshifts of the galaxies along a line of sight
+`p` are clustered, `pi_p(z) = g(z) [1 + delta_p(z)]`, with structure on
+redshift scales of 0.01 or less. Expanding the prior across the kernel, a
+prior `pi` displaces the kernel's mean from the stored redshift by
+
+```text
+Delta z ~ sigma^2 d ln(pi)/dz.
+```
+
+With `pi = g` every galaxy moves behind its stored redshift by
+`sigma^2 d ln(dV_c/dz)/dz` (about `2 sigma^2 / z` at low redshift), uniformly
+over the sky; the exact posterior instead pulls each galaxy toward the
+structure it belongs to. The per-galaxy error is
+`sigma^2 [d ln g/dz - d ln pi_p/dz]`, so the bias it causes in `H0` scales as
+`sigma^2`: halving the redshift error quarters it. Its scatter averages down
+over the many galaxies an event sees; its sky-averaged mean does not, and it
+does not shrink with more events, because every event carries it. Its sign
+and size for `H0` depend on how each event's distance posterior samples the
+structures, and have to be measured.
+
+**When the approximation is safe.**
+
+- The structure along each line of sight is smoother than the kernel width
+  `sigma_z (1 + z)`, so `d ln(1 + delta_p)/dz` is small across a kernel (weak
+  clustering, or redshift errors much narrower than the structures).
+- The galaxies have spectroscopic redshifts (`dz` of order `1e-4` to `1e-3`):
+  at `dz = 1e-3` the prior's shift is about 300 times smaller than for a
+  photo-z of `0.015 (1 + z)`. See the guard interaction below before using
+  them.
+- `sigma_kde` adds in quadrature to every `sigma_i`, so a smoothing width
+  enlarges the shift exactly as a wider photo-z would.
+
+**Measured size on clustered mocks.** The `darksirens-examples` quick campaign
+(150 events, a complete catalog with field sky weighting at `nside = 16`, a
+lognormal universe in redshift shells of 0.01 with an AR(1) correlation length
+of 0.02, photo-z errors `sigma_z (1 + z)` with `sigma_z = 0.015`, 41 seeds)
+gives these offsets of the `H0` posterior mean from the truth, in km/s/Mpc
+(mean over seeds and its standard error; a posterior standard deviation is
+about 5.5):
+
+| likelihood | catalog depth | `H0` offset |
+|---|---|---|
+| core kernel, `sigma_z = 0.015` | 0.85 | `-1.65 +- 0.74` |
+| exact kernel (the mock's photo-z likelihood times its true clustered prior) | 0.85 | `-0.39 +- 0.62` |
+| core kernel, same noise draws at `sigma_z = 0.0075` | 0.85 | about `-0.25` |
+| core kernel, `sigma_z = 0.015` | 0.95 | `-1.34 +- 0.96` (P-P KS p = 0.01) |
+| core kernel, same galaxies and draws at `sigma_z = 0.005` | 0.95 | `+0.39 +- 0.61` (KS p = 0.58) |
+| paired difference, 0.005 minus 0.015, same seed | 0.95 | `+1.73 +- 0.64` |
+
+The shift is about a third of a posterior standard deviation per analysis; the
+exact clustered prior removes most of it, and halving the width shrinks it by
+at least the factor four `sigma^2` predicts. Two other ingredients were
+measured on the same seeds and are small: taking the width at the stored
+redshift instead of the true one (`dz = sigma_z (1 + z_obs)`, as real data
+must) contributes `+0.10`, and the `kernel_window` speed setting contributes
+nothing. Every analysis that puts a photometric galaxy on a smooth
+comoving-volume prior makes this approximation; core has no catalog-informed
+alternative today.
+
+**Narrow kernels and the likelihood-variance guard.** The guard that bounds the
+Monte Carlo variance of the total log-likelihood
+(`max_likelihood_variance`, 1 nat squared by default;
+`darksirens.selection.gw`) includes each event's PE reweighting variance.
+When the kernels are narrow, few of an event's PE samples land on a galaxy's
+kernel, that variance grows, and the guard returns `-inf`, first at low `H0`,
+where the nearest events map to the lowest redshifts and a pixel holds few
+galaxies. On the same campaign at depth 0.95:
+
+- `sigma_z = 0.005` loses low-`H0` points on 24 of 41 seeds: on 21 only at
+  `H0 <= 50.5`, where the `sigma_z = 0.015` posterior has at most 0.2% of its
+  mass; on 3 up to `H0 = 66.5`, which truncates the posterior;
+- the narrowest width accepted at `H0 = 40` on every seed is `0.0145`, and on
+  one seed the guard removes `H0 < 56` even at `0.015`;
+- spectroscopic widths (`1e-4`) make the likelihood `-inf` at every `H0` in
+  `[40, 100]` (depth 0.85, all five seeds tried).
+
+The cut does not raise: it shows only as `-inf` values on a likelihood grid or
+as a truncated posterior. Before trusting a narrow-kernel catalog analysis,
+evaluate the likelihood across the `H0` prior; more PE samples per event
+lower the variance, while widening the kernels (`sigma_kde`) brings back the
+smooth-prior shift above.
+
 ## Ownership boundary
 
 Core owns reusable siren inference machinery: cosmology, GW data contracts,
