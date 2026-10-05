@@ -76,7 +76,9 @@ load_injections
 load_catalog
 model
 decode_parameters
+log_likelihood
 infer
+save_result
 ```
 
 Typical ordinary usage is:
@@ -105,7 +107,13 @@ Ordinary users should not need low-level GW event structs, catalog internals,
 parameter decoders or sampler adapters. `decode_parameters` is the one decoder
 on the root surface: it is for companions and diagnostics that need the
 physical parameters behind a coordinate vector (see "Parameter decoding"
-below).
+below). `log_likelihood(analysis, *, events, injections, ...)` returns the
+bound likelihood `infer` samples (a callable `theta -> log L`, a
+`BoundAnalysis`), bound through the same code path with the same five
+likelihood options; `selection_neff_guard="auto"` is the hard guard there.
+`save_result(path, result, *, labels=None)` writes an `infer` result through
+`atomic_result_hdf5` and `write_dead_point_datasets`
+(`darksirens.io.results.save_result` documents the layout).
 
 ### Public option contract
 
@@ -272,6 +280,25 @@ below).
   reach `sigma_kde < 0`, `sigma_M <= 0` or `alpha <= -2`. A parameter cannot
   be both fixed and given a prior; unknown labels raise. The bounds and prior
   kinds are part of the plan, so a run fingerprint changes with them.
+- `infer(..., sampler=None)`: `None` is `"dynesty"` (since 2026-10-05; it was
+  `"tinyns"`). Dynesty is the `dynesty` extra; without it the default raises
+  `ImportError` naming `sampler=` and the extra for any plan with free
+  parameters, after the argument checks and before anything is bound. It
+  never falls back to another backend. A plan with no free parameters needs
+  no sampler and is never refused.
+- `infer(..., guard_report=True|False|n)` (ordinary analyses; ignored for an
+  `InferenceTarget`) evaluates the bound likelihood's diagnostics
+  (`return_diagnostics=True`, in a separately jitted program) at `n` prior
+  draws (32 for `True`) from an RNG of its own seeded from the sampler
+  `seed`, before sampling. `result["guard_report"]` records `n_draws`,
+  `guard_mode`, `max_likelihood_variance`, `guarded`, `guarded_fraction`,
+  `fired` (per guard, `"selection_neff"` or `"pe_mc_variance"`: `count`,
+  `fraction` and the `ranges` `{label: [min, max]}` of the draws where it
+  fired), `probed_ranges` and, when some draw is non-finite with no guard
+  firing, `non_finite_other`. One `UserWarning` is emitted when more than 5%
+  of the draws are guarded. The bound likelihood, its program and the
+  sampler's RNG streams are unchanged; `guard_report` never enters the
+  sampler options or the run fingerprint.
 - `infer(..., selection_neff_guard="auto"|"hard"|"soft",
   max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None,
   compute_dtype=None)` are likelihood options, never sampler options. `auto`
@@ -552,10 +579,12 @@ public function is called.
 ## Packaging contract
 
 The base distribution includes the validated numerical stack plus the pinned
-TinyNS commit used by the legacy campaign, because TinyNS is the public default
-sampler. SciPy is a base dependency because ordinary completeness evaluation
-uses `scipy.special` at runtime.
+TinyNS commit used by the legacy campaign. SciPy is a base dependency because
+ordinary completeness evaluation uses `scipy.special` at runtime.
 
 GP models, Dynesty, NumPyro and gwcat prior support are explicit extras; the
 Dynesty extra also carries Matplotlib because its optional run diagnostics plot.
+Dynesty is the default `infer` sampler, so a typical install is
+`darksirens[dynesty]`; the base install refuses the default sampler with an
+error that names the extra.
 Raw survey/LSS/lensing packages are never package dependencies of core.

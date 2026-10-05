@@ -287,6 +287,7 @@ def test_isotropic_evidence_carries_a_zero_prior_volume_correction(monkeypatch):
         _angular_analysis("isotropic"),
         events=object(),
         injections=object(),
+        sampler="dynesty",
     )
 
     assert result["logZ"] == -12.5
@@ -302,6 +303,7 @@ def test_multipole_evidence_is_corrected_by_the_declared_prior_volume(monkeypatc
         _angular_analysis("multipole"),
         events=object(),
         injections=object(),
+        sampler="dynesty",
     )
 
     expected = angular_log_prior_volume_correction("multipole")
@@ -319,6 +321,7 @@ def test_multipole_lmax_correction_difference_is_the_measured_artifact(monkeypat
             _angular_analysis(name),
             events=object(),
             injections=object(),
+            sampler="dynesty",
         )["log_prior_volume_fraction"]
 
     # Raw evidences of the two models differ by this much on identical data.
@@ -331,6 +334,7 @@ def test_non_finite_evidence_is_reported_without_a_corrected_value(monkeypatch):
         _angular_analysis("isotropic"),
         events=object(),
         injections=object(),
+        sampler="dynesty",
     )
     assert result["log_prior_volume_fraction"] == 0.0
     assert "logZ_corrected" not in result
@@ -351,7 +355,7 @@ def test_inference_target_result_carries_no_prior_volume_keys(monkeypatch):
         run_sampler=lambda *args, **kwargs: {"logZ": -4.0},
     )
 
-    assert infer(target) == {"logZ": -4.0}
+    assert infer(target, sampler="dynesty") == {"logZ": -4.0}
 
 
 def test_selection_neff_guard_auto_resolves_against_the_backend(monkeypatch):
@@ -457,3 +461,169 @@ def test_likelihood_options_are_refused_for_an_inference_target(monkeypatch):
         infer(target, max_likelihood_variance=0.005)
     with pytest.raises(TypeError, match="compute_dtype must be omitted"):
         infer(target, compute_dtype="float32")
+
+
+# ---------------------------------------------------------------------------
+# Default sampler (dynesty since 2026-10-05)
+# ---------------------------------------------------------------------------
+
+
+def _dynesty_installed(monkeypatch, installed):
+    import importlib.util
+
+    import darksirens.inference.public as public
+
+    real = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "dynesty":
+            return object() if installed else None
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(public.importlib.util, "find_spec", find_spec)
+
+
+def test_default_sampler_is_dynesty(monkeypatch):
+    from darksirens.inference.public import DEFAULT_SAMPLER
+
+    assert DEFAULT_SAMPLER == "dynesty"
+    _dynesty_installed(monkeypatch, True)
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    infer(_angular_analysis("isotropic"), events=object(), injections=object())
+    assert calls["opts"].sampler == "dynesty"
+    # The default resolves the guard exactly as an explicit nested sampler does.
+    assert calls["likelihood_options"]["selection_neff_soft_guard"] is False
+
+
+def test_default_sampler_without_dynesty_raises_and_never_falls_back(monkeypatch):
+    _dynesty_installed(monkeypatch, False)
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(ImportError) as excinfo:
+        infer(_angular_analysis("isotropic"), events=object(), injections=object())
+    message = str(excinfo.value)
+    assert "sampler=" in message
+    assert "darksirens[dynesty]" in message
+    # Refused before binding or sampling: nothing ran under another backend.
+    assert calls == {}
+
+    import darksirens as ds
+
+    target = ds.InferenceTarget(lambda theta: -1.0, _target_plan())
+    with pytest.raises(ImportError, match=r"darksirens\[dynesty\]"):
+        infer(target)
+
+
+def test_explicit_sampler_needs_no_dynesty(monkeypatch):
+    _dynesty_installed(monkeypatch, False)
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    infer(_angular_analysis("isotropic"), events=object(), injections=object(), sampler="tinyns")
+    assert calls["opts"].sampler == "tinyns"
+
+
+def test_zero_free_target_with_the_default_needs_no_dynesty(monkeypatch):
+    import darksirens as ds
+
+    _dynesty_installed(monkeypatch, False)
+    plan = ds.ParameterPlan(labels=(), lower=(), upper=(), prior_kinds=(), joint_constraints=())
+    result = infer(ds.InferenceTarget(lambda theta: -1.25, plan))
+    assert result["logZ"] == -1.25
+
+
+def test_argument_errors_come_before_the_default_sampler_check(monkeypatch):
+    _dynesty_installed(monkeypatch, False)
+    with pytest.raises(TypeError, match="require both events and injections"):
+        infer(_angular_analysis("isotropic"))
+    with pytest.raises(ValueError, match="selection_neff_guard must be one of"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              selection_neff_guard="softish")
+
+
+@pytest.mark.parametrize("value", [0, -3, 2.5, "yes", None])
+def test_invalid_guard_report_values_are_refused(monkeypatch, value):
+    _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(ValueError, match="guard_report must be"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="dynesty", guard_report=value)
+
+
+def test_guard_report_never_enters_the_sampler_namespace(monkeypatch):
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    result = infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+                   sampler="dynesty", guard_report=False)
+    assert not hasattr(calls["opts"], "guard_report")
+    assert "guard_report" not in result
+
+
+# ---------------------------------------------------------------------------
+# Public likelihood binder
+# ---------------------------------------------------------------------------
+
+
+def test_log_likelihood_binds_with_the_infer_likelihood_options(monkeypatch):
+    from darksirens.inference.public import log_likelihood
+
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    analysis = _angular_analysis("isotropic")
+    log_likelihood(analysis, events=object(), injections=object())
+    assert calls["likelihood_options"] == {
+        "selection_neff_soft_guard": False,
+        "sel_batch_size": None,
+        "pe_event_block": None,
+    }
+    log_likelihood(
+        analysis,
+        events=object(),
+        injections=object(),
+        selection_neff_guard="soft",
+        max_likelihood_variance=0.5,
+        sel_batch_size=64,
+        pe_event_block=2,
+        compute_dtype="float32",
+    )
+    assert calls["likelihood_options"] == {
+        "selection_neff_soft_guard": True,
+        "sel_batch_size": 64,
+        "pe_event_block": 2,
+        "max_likelihood_variance": 0.5,
+        "compute_dtype": "float32",
+    }
+    with pytest.raises(ValueError, match="selection_neff_guard must be one of"):
+        log_likelihood(analysis, events=object(), injections=object(),
+                       selection_neff_guard="softish")
+
+
+def test_log_likelihood_refuses_an_inference_target():
+    import darksirens as ds
+    from darksirens.inference.public import log_likelihood
+
+    target = ds.InferenceTarget(lambda theta: -1.0, _target_plan())
+    with pytest.raises(TypeError, match="already is a likelihood"):
+        log_likelihood(target, events=object(), injections=object())
+
+
+def test_a_failing_guard_report_never_stops_the_run(monkeypatch):
+    class Bound:
+        n_events = 1
+        max_likelihood_variance = 1.0
+        selection_neff_soft_guard = False
+
+        def diagnostics(self, theta):
+            raise RuntimeError("no diagnostics here")
+
+    calls = {}
+
+    def fake_run(method, likelihood, transform, labels, lower, upper, opts, **kwargs):
+        calls["ran"] = True
+        return {"logZ": 0.0}
+
+    _install_fake_module(
+        monkeypatch,
+        "darksirens.runtime_binding",
+        bind_analysis=lambda analysis, *, events, injections, **_: Bound(),
+    )
+    _install_fake_module(monkeypatch, "darksirens.inference.sampling", run_sampler=fake_run)
+    with pytest.warns(RuntimeWarning, match="guard report skipped"):
+        result = infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+                       sampler="dynesty")
+    assert calls == {"ran": True}
+    assert "guard_report" not in result

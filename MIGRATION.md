@@ -588,3 +588,61 @@ new defaults, so they keep running at the defaults; the population and
 spectral probes evaluate the per-point normaliser, and the mixture and
 selection-completeness probes bind through `bind_analysis` with the galaxy
 list, the gathered density and the window.
+
+
+### Public API gaps found by the examples (default sampler changes; no likelihood change)
+
+The owner approved on 2026-10-05 three changes found by the internal examples
+(`darksirens-examples/GAPS.md`).
+
+**Default sampler (behaviour change).** `ds.infer` without `sampler=` now
+runs Dynesty; it ran TinyNS before, which is not used for production. Dynesty
+stays the optional extra `darksirens[dynesty]`, and TinyNS stays in the base
+install. Without the extra, the default raises an `ImportError` that names
+`sampler=` and the extra. It never falls back to TinyNS. A plan with no free
+parameters needs no sampler and still returns its exact evidence on the base
+install. To get the old default, pass `sampler="tinyns"`. The signature
+default is now `sampler=None`, meaning `"dynesty"`. `selection_neff_guard="auto"`
+resolves to the hard guard for both samplers, so the likelihood is the same.
+A target run that relied on the default and writes a checkpoint now has
+`sampler: "dynesty"` in its run fingerprint, so a TinyNS checkpoint made
+through the old default resumes only with `sampler="tinyns"` (and that
+checkpoint's TinyNS options).
+
+**Two package-root names.** Both are additive.
+- `ds.log_likelihood(analysis, *, events, injections, ...)` returns the
+  likelihood `ds.infer` samples (the `BoundAnalysis` from `bind_analysis`),
+  bound through the same code with the same five likelihood options. With no
+  sampler to resolve against, `selection_neff_guard="auto"` is the hard guard,
+  as for both nested samplers. Its values equal `bind_analysis(...)`'s bit for
+  bit.
+- `ds.save_result(path, result, *, labels=None)` writes a result through
+  `atomic_result_hdf5` and `write_dead_point_datasets`, in the layout
+  `darksirens.io.results.save_result` documents.
+
+The examples-only rule (`tests/test_examples.py`: examples call only
+`ds.__all__` names) covers both: `examples/likelihood_grid.py` evaluates
+`ds.log_likelihood` on an H0 grid, and `examples/ordinary_catalog.py --out`
+writes its result with `ds.save_result`.
+
+**Guard report (additive result key).** When the selection guard makes the
+likelihood `-inf` (or, with the soft guard, penalises it) over part of the
+prior, the sampler leaves that part out of the posterior, and before this
+change nothing reported it. `ds.infer(..., guard_report=True)` (the default)
+evaluates the bound likelihood's diagnostics at 32 prior draws before
+sampling an ordinary analysis. It records in `result["guard_report"]` which
+guard fired and the range of each sampled parameter where it fired, and warns
+once when more than 5% of the draws are guarded. The guard is
+`"selection_neff"` when the injection `N_eff` fails `max(5 N_obs, N_obs^2 /
+max_likelihood_variance)` with no PE variance, and `"pe_mc_variance"` when it
+passes that bound but the summed per-event PE variance took the budget.
+`guard_report=False` skips it; an integer sets the number of draws. The cost
+is one extra compilation and the draws' likelihood evaluations.
+
+**Numerics.** None of this changes a likelihood value. The diagnostics are a
+separately jitted program (`BoundAnalysis.diagnostics`), and the bound
+likelihood's call and program are unchanged; the default path passes the
+likelihood the same keywords as before. The draws use an RNG of their own
+seeded from the sampler `seed`, so the sampler's streams are untouched. The
+legacy parity probes (`tools/probe_*.py`) and the parity tests pass
+unchanged.

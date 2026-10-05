@@ -8,6 +8,8 @@ import without JAX, sampler backends, CLIs, survey code, LSS, or lensing.
 from __future__ import annotations
 
 import contextlib
+import json
+import math
 import os
 from os import PathLike
 from typing import Iterator
@@ -117,6 +119,88 @@ def write_dead_point_datasets(handle, results: dict, dataset_kwargs=None) -> boo
     return True
 
 
+# Result entries stored as datasets rather than in ``result_json``.
+_DATASET_ENTRIES = ("samples", "log_likelihood", "dead_points", "labels")
+
+
+def _json_value(value):
+    """``value`` as JSON-native data; non-finite floats become ``None``."""
+    if isinstance(value, dict):
+        return {str(k): _json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _json_value(value.tolist())
+    if isinstance(value, np.generic):
+        return _json_value(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    return str(value)
+
+
+def _attr_value(value):
+    """A scalar result entry as an HDF5 attribute value, or ``None`` to skip it."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return None
+
+
+def save_result(path: str | PathLike[str], result: dict, *, labels=None) -> None:
+    """Write an inference result to one HDF5 file, published atomically.
+
+    ``result`` is a ``ds.infer`` result; ``labels`` (default: the result's
+    own ``labels`` entry, when it has one) names the sample columns, for
+    example ``analysis.parameters.labels``. The file is written through
+    :func:`atomic_result_hdf5`, so ``path`` appears only once it is complete.
+    Layout:
+
+    - ``samples``: dataset ``(n_samples, n_parameters)``, float64, the
+      equal-weight posterior samples;
+    - ``labels``: dataset ``(n_parameters,)`` of byte strings, when known;
+    - ``log_likelihood``: dataset, when the result carries one;
+    - ``logl_dead``, ``logwt_dead`` and the attributes ``n_dead``, ``n_live``
+      and ``dead_points``: the nested sampler's dead points
+      (:func:`write_dead_point_datasets`), when the result carries them;
+    - one attribute per scalar entry (``logZ``, ``logZerr``,
+      ``logZ_corrected``, ``log_prior_volume_fraction``, ``stop_reason``,
+      ``dlogz_final``, ``ncall``, ``niter``, ...); an entry that is ``None``
+      is left out;
+    - ``result_json``: attribute, every entry except the datasets above as
+      JSON (``guard_report``, sampler diagnostics, the scalars again;
+      non-finite floats as ``null``);
+    - ``result_complete`` and ``result_schema_version``: the completion
+      marker (:func:`result_is_complete`).
+    """
+    if labels is None:
+        labels = result.get("labels")
+    samples = np.asarray(result["samples"], dtype=float)
+    if labels is not None:
+        labels = [str(label) for label in labels]
+        if samples.ndim != 2 or samples.shape[1] != len(labels):
+            raise ValueError(
+                f"{len(labels)} labels for samples of shape {samples.shape}"
+            )
+    with atomic_result_hdf5(path) as handle:
+        handle.create_dataset("samples", data=samples)
+        if labels is not None:
+            handle.create_dataset("labels", data=np.asarray(labels, dtype="S"))
+        if result.get("log_likelihood") is not None:
+            handle.create_dataset(
+                "log_likelihood", data=np.asarray(result["log_likelihood"], dtype=float)
+            )
+        write_dead_point_datasets(handle, result)
+        rest = {k: v for k, v in result.items() if k not in _DATASET_ENTRIES}
+        for key, value in rest.items():
+            value = _attr_value(value)
+            if value is not None and key not in handle.attrs:
+                handle.attrs[key] = value
+        handle.attrs["result_json"] = json.dumps(_json_value(rest), sort_keys=True)
+
+
 __all__ = [
     "DEAD_POINT_SEMANTICS",
     "RESULT_COMPLETE_ATTR",
@@ -124,5 +208,6 @@ __all__ = [
     "RESULT_SCHEMA_VERSION",
     "atomic_result_hdf5",
     "result_is_complete",
+    "save_result",
     "write_dead_point_datasets",
 ]

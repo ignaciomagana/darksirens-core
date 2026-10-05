@@ -534,6 +534,7 @@ class BoundAnalysis:
         # The jitted closure does not pickle; it is rebuilt on unpickling.
         state = dict(self.__dict__)
         state.pop("_log_likelihood", None)
+        state.pop("_diagnostics", None)
         return state
 
     def __setstate__(self, state):
@@ -560,6 +561,32 @@ class BoundAnalysis:
         if self.model_operands is not None:
             return self._log_likelihood(*operands, model_operands=self.model_operands)
         return self._log_likelihood(*operands)
+
+    def diagnostics(self, theta):
+        """The likelihood's pieces at ``theta``, for the guard report.
+
+        Returns the likelihood's diagnostics record (``log_likelihood``,
+        ``event_log_evidence``, ``event_mc_variance``, ``log_mu``, ``n_eff``,
+        ``selection_log_correction``): the same likelihood function evaluated
+        with ``return_diagnostics=True``, in its own jitted program, built on
+        the first call. :meth:`__call__` and its program are untouched.
+        """
+        fn = self.__dict__.get("_diagnostics")
+        if fn is None:
+            fn = _jit_log_likelihood_diagnostics(self)
+            object.__setattr__(self, "_diagnostics", fn)
+        operands = (
+            jnp.asarray(theta),
+            self.gw_pe,
+            self.gw_selection,
+            self.catalog,
+            self.observed_density_cache,
+        )
+        if self.kernel_pin is not None:
+            operands += (self.kernel_pin,)
+        if self.model_operands is not None:
+            return fn(*operands, model_operands=self.model_operands)
+        return fn(*operands)
 
     def as_pytree_callable(self):
         """This binding's log-likelihood as a pytree callable: data as leaves, not constants.
@@ -615,8 +642,14 @@ class BoundAnalysis:
         observed_density_cache,
         kernel_pin=None,
         model_operands=None,
+        return_diagnostics=False,
     ):
-        """Evaluate at ``theta`` with the data operands passed explicitly."""
+        """Evaluate at ``theta`` with the data operands passed explicitly.
+
+        ``return_diagnostics=True`` (the guard report only) returns the
+        likelihood's diagnostics record instead of its value; the default
+        call passes the likelihood exactly the keywords it always did.
+        """
         cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
         )
@@ -642,6 +675,9 @@ class BoundAnalysis:
             # Only spectral and incomplete-catalog bindings carry one (checked
             # in __post_init__); the default call is left exactly as it was.
             ordinary_common["compute_dtype"] = self.compute_dtype
+        if return_diagnostics:
+            bright_common["return_diagnostics"] = True
+            ordinary_common["return_diagnostics"] = True
 
         if isinstance(self.analysis.redshift, SpectralRedshift):
             return spectral_siren_log_likelihood(
@@ -757,6 +793,32 @@ def _jit_log_likelihood(bound: BoundAnalysis):
         )
 
     return log_likelihood
+
+
+def _jit_log_likelihood_diagnostics(bound: BoundAnalysis):
+    """``bound._evaluate(..., return_diagnostics=True)`` under its own ``jax.jit``.
+
+    A separate program from :func:`_jit_log_likelihood`, with the same
+    operands, so the bound likelihood's own program is never changed by it.
+    """
+
+    @threads_distance_table()
+    def log_likelihood_diagnostics(
+        theta,
+        gw_pe,
+        gw_selection,
+        catalog,
+        observed_density_cache,
+        kernel_pin=None,
+        distance_table=None,
+        model_operands=None,
+    ):
+        return bound._evaluate(
+            theta, gw_pe, gw_selection, catalog, observed_density_cache, kernel_pin,
+            model_operands, return_diagnostics=True,
+        )
+
+    return log_likelihood_diagnostics
 
 
 def _require_admissible_kernel_pin(

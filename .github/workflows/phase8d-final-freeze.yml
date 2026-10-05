@@ -2,7 +2,8 @@ name: phase8d-release-contract
 
 # Builds the wheel, installs it into a clean environment and checks the frozen
 # package-root API, the pinned runtime and TinyNS metadata, default dispatch,
-# and that every public example still runs.
+# the default sampler's refusal without its extra, and that every public
+# example still runs (with the dynesty extra, the default sampler).
 #
 # This job used to open with "no scientific source change since accepted 8C"
 # (a diff of src/darksirens against 875a949). That freeze ended when Phases
@@ -72,7 +73,9 @@ jobs:
               "load_catalog",
               "model",
               "decode_parameters",
+              "log_likelihood",
               "infer",
+              "save_result",
           }
           assert set(ds.__all__) == expected, (set(ds.__all__), expected)
 
@@ -98,7 +101,7 @@ jobs:
           print("light root import and public API: PASS")
           PY
 
-      - name: Verify base runtime and default backend are installed
+      - name: Verify base runtime and the TinyNS backend are installed
         run: |
           /tmp/darksirens-phase8d/bin/python - <<'PY'
           import h5py
@@ -166,12 +169,39 @@ jobs:
           print("default zero-dimensional dispatch: PASS")
           PY
 
+      - name: Verify the default sampler refuses cleanly without the dynesty extra
+        run: |
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import importlib.util
+
+          import darksirens as ds
+
+          assert importlib.util.find_spec("dynesty") is None, "dynesty is in the base install"
+          plan = ds.ParameterPlan(
+              labels=("x",),
+              lower=(0.0,),
+              upper=(1.0,),
+              prior_kinds=(("uniform", None, None),),
+              joint_constraints=(),
+          )
+          target = ds.InferenceTarget(log_likelihood=lambda theta: 0.0, parameters=plan)
+          try:
+              ds.infer(target)
+          except ImportError as exc:
+              message = str(exc)
+              assert "sampler=" in message and "darksirens[dynesty]" in message, message
+          else:
+              raise AssertionError("the default sampler ran without dynesty installed")
+          print("default sampler without its extra: PASS")
+          PY
+
       - name: Run the packaging contract and every public example against the wheel
         run: |
           # The default step shell is `bash -e` without pipefail, so without this
           # the pipe into tee would hide a pytest failure and the job would pass.
           set -o pipefail
-          /tmp/darksirens-phase8d/bin/python -m pip install "pytest==8.3.4"
+          # The examples use the default sampler, dynesty: the optional extra.
+          /tmp/darksirens-phase8d/bin/python -m pip install "$(ls dist/darksirens-*.whl)[dynesty]" "pytest==8.3.4"
           /tmp/darksirens-phase8d/bin/python -c "import darksirens; assert 'site-packages' in darksirens.__file__, darksirens.__file__"
           /tmp/darksirens-phase8d/bin/pytest -q -rs \
             tests/test_packaging_contract.py \

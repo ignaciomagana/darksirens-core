@@ -12,18 +12,20 @@ Architectural decisions and exact acceptance records live in
 ## Install
 
 Python 3.11 is the validated interpreter. The base install pins the numerical
-stack used for reconstruction parity and includes TinyNS, the public default
-sampler:
+stack used for reconstruction parity and includes TinyNS. `ds.infer`'s default
+sampler is Dynesty, an optional extra, so a typical install is:
 
 ```bash
-pip install .
+pip install ".[dynesty]"
 ```
 
-Optional integrations are explicit:
+Without the extra, `ds.infer` with the default sampler raises an `ImportError`
+that names the extra; `ds.infer(..., sampler="tinyns")` runs on the base
+install. Optional integrations are explicit:
 
 ```bash
 pip install ".[gp]"       # tinygp/equinox population models
-pip install ".[dynesty]"  # Dynesty backend
+pip install ".[dynesty]"  # Dynesty backend (the default sampler)
 pip install ".[numpyro]"  # NumPyro backend
 pip install ".[gwcat]"    # canonical chi_eff prior support when required by a store
 pip install ".[test]"     # reconstruction test dependencies
@@ -55,9 +57,30 @@ result = ds.infer(
     analysis,
     events=events,
     injections=injections,
-    sampler="tinyns",
-)
+)  # sampler="dynesty" (default), "tinyns" or "numpyro"
+
+ds.save_result("result.h5", result, labels=analysis.parameters.labels)
 ```
+
+`ds.save_result` writes the result to one HDF5 file, published atomically:
+the posterior `samples` with their `labels`, the nested sampler's dead points
+(`logl_dead`, `logwt_dead`), one attribute per scalar entry (`logZ`,
+`logZerr`, `stop_reason`, ...) and every other entry, `guard_report`
+included, as JSON in the `result_json` attribute
+(`darksirens.io.results.save_result` documents the layout).
+
+The likelihood `ds.infer` samples is available on its own, for a grid or a
+profile, bound exactly as `ds.infer` binds it:
+
+```python
+log_likelihood = ds.log_likelihood(analysis, events=events, injections=injections)
+log_likelihood(np.array([70.0]))  # one value per analysis.parameters.labels entry
+```
+
+It takes the same likelihood options as `ds.infer`
+(`selection_neff_guard`, `max_likelihood_variance`, `sel_batch_size`,
+`pe_event_block`, `compute_dtype`); with no sampler to resolve against,
+`selection_neff_guard="auto"` is the hard guard.
 
 To sample only part of the population or of the survey block, fix the rest
 at chosen values; they leave the sampled coordinates and enter the likelihood
@@ -222,13 +245,22 @@ user typed them rather than as a silent `-inf`:
   sparse-selection guard; `auto` uses the soft penalized wall for NumPyro and
   the hard `-inf` wall otherwise. `max_likelihood_variance`, `sel_batch_size`,
   `pe_event_block` and `compute_dtype` are likelihood options on the same call.
+- Where the guard cuts the prior is reported. Before sampling an ordinary
+  analysis, `ds.infer` evaluates the likelihood's diagnostics at 32 prior
+  draws and records in `result["guard_report"]` which guard fired
+  (`"selection_neff"`: too few effective injections; `"pe_mc_variance"`: the
+  per-event PE Monte-Carlo variance used up the `max_likelihood_variance`
+  budget) and the range of each sampled parameter where it fired. It warns
+  once when more than 5% of the draws are guarded. The likelihood itself is
+  unchanged; `guard_report=False` skips the check and an integer sets the
+  number of draws.
 - `ds.infer(..., compute_dtype="float32")` (or `bind_analysis(...,
   compute_dtype="float32")`) is an opt-in speed option: the per-sample PE and
   selection weights are evaluated in float32, while every reduction
   (log-sum-exp, Monte-Carlo variances, `N_eff`, soft guard, final sum) and every
   per-proposal grid stays float64. The default (`None` or `"float64"`) is the
   float64 program, bit for bit. The float32 likelihood is value-only, for the
-  nested samplers (TinyNS, dynesty): differentiating it raises, and
+  nested samplers (dynesty, TinyNS): differentiating it raises, and
   `sampler="numpyro"` refuses it, because float32 population densities
   underflow in the tails, where their gradients are NaN. It covers spectral and
   incomplete-catalog analyses with an isotropic angular model and a chi_eff
