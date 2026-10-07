@@ -57,6 +57,7 @@ likelihood rejects any proposal that produces −∞.
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -265,6 +266,25 @@ class MassComponent(ABC):
         n = norm if norm is not None else self._norm(theta)
         n = _match_dtype(n, p)
         return self._mask_to_support(m, p / jnp.where(n > 0, n, 1.0))
+
+
+class PerPointPairingState(NamedTuple):
+    """Per-likelihood-point part of :meth:`PairingModel._per_point_density`.
+
+    Everything the per-sample lookup reads that depends only on the
+    hyperparameters and the per-sample dtype: the taper edges, the whole-window
+    integral and the flat quintic Hermite table of ``log R``.  Built by
+    :meth:`PairingModel._per_point_state`; ``coef`` is in the per-sample dtype.
+    """
+
+    m_edge: jnp.ndarray
+    m_sh: jnp.ndarray
+    safe_dm: jnp.ndarray
+    beta: jnp.ndarray
+    log_edge: jnp.ndarray
+    g_full: jnp.ndarray
+    coef: jnp.ndarray
+    log_scale: jnp.ndarray
 
 
 class PairingModel(ABC):
@@ -610,7 +630,7 @@ class PairingModel(ABC):
         del theta
         return None
 
-    def _per_point_density(self, p, m1, m_min, dm_min, theta, beta):
+    def _per_point_density(self, p, m1, m_min, dm_min, theta, beta, state=None):
         r"""``p / N(m1)`` with the taper integrated once per likelihood point.
 
         Used by ``pairing_norm="per_point"`` for a model that declares
@@ -669,118 +689,20 @@ class PairingModel(ABC):
         in a backward pass (the reason the per-sample rule factors out a
         scale).  Both regimes are evaluated for every sample (they are
         selects), so each is kept finite on every input.
+
+        The per-likelihood-point part is :meth:`_per_point_state`.  ``state``
+        is that state built for the same arguments in ``m1``'s dtype, which the
+        likelihood builds ONCE per call, outside its PE-block and
+        injection-batch loops (:meth:`prepare`); ``None`` (or a state in
+        another dtype) builds it here.  The two are the same ops on the same
+        values, so the density is bit for bit the same either way.
         """
         kdt = jnp.result_type(m1)
-        adt = jnp.float64
+        if state is None or jnp.result_type(state.coef) != kdt:
+            state = self._per_point_state(m_min, dm_min, theta, beta, kdt)
+        m_edge, m_sh, safe_dm, beta, log_edge, g_full, coef, log_scale = state
         tab = get_pairing_taper_table(np.dtype(kdt).name)
-        m_edge, m_sh = self._taper_shoulder(m_min, dm_min, theta)
-        m_edge = _match_dtype(jnp.asarray(m_edge), m1)
-        m_sh = _match_dtype(jnp.asarray(m_sh), m1)
-        beta = _match_dtype(jnp.asarray(beta), m1)
-        dm = m_sh - m_edge
-        # dm == 0 is in the GWTC-5 prior (delta_m2 in [0, 10]): the window is
-        # empty and every m1 > m_edge takes the plateau branch.  The table is
-        # still built (on a unit window, finite and unused) so that nothing in
-        # the unselected branch is NaN.
-        safe_dm = jnp.where(dm > 0, dm, 1.0)
-        safe_edge = jnp.where(m_edge > 0, m_edge, 1.0)
-
-        def kern(u, width=safe_dm):
-            # Reduced kernel at m2 = m_edge + u dm: (m2/m_edge)**beta K(m2).
-            m2 = m_edge + u * width
-            return self._eval_unnorm(jnp.broadcast_to(safe_edge, jnp.shape(m2)),
-                                     m2 / safe_edge, m_min, dm_min, theta)
-
-        def node_data(s_n, r_n):
-            # log R and its first two lambda-derivatives at nodes s_n, where
-            # dR/dlambda = s kern(s).
-            u_n = _match_dtype(s_n, m1)
-            k_n, kp_n = jax.jvp(kern, (u_n,), (jnp.ones_like(u_n),))
-            k_n, kp_n = k_n.astype(adt), kp_n.astype(adt)
-            y1 = s_n * k_n / r_n
-            return jnp.log(r_n), y1, y1 + s_n * s_n * kp_n / r_n - y1 * y1
-
-        def hermite(lam_n, y, y1, y2):
-            # Quintic Hermite coefficients of each cell, in t = (lambda - lam_i)/h.
-            h = lam_n[1:] - lam_n[:-1]
-            d0, d1 = y1[:-1] * h, y1[1:] * h
-            a0, a1 = y2[:-1] * h * h, y2[1:] * h * h
-            dy = y[1:] - y[:-1]
-            return (y[:-1], d0, 0.5 * a0,
-                    10.0 * dy - 6.0 * d0 - 4.0 * d1 - 1.5 * a0 + 0.5 * a1,
-                    -15.0 * dy + 8.0 * d0 + 7.0 * d1 + 1.5 * a0 - a1,
-                    6.0 * dy - 3.0 * d0 - 3.0 * d1 - 0.5 * a0 + 0.5 * a1)
-
-        # ---- per likelihood point -------------------------------------------
-        # Whole window with the per-sample rule's nodes (m2-space form), on the
-        # raw width like the per-sample rule's own panel.  At dm == 0 (an edge
-        # of the GWTC-5 prior) the one-sided dN/d(dm) is then 0 in units of
-        # m1**(-1-beta) m_edge**beta (window +1, plateau -1); the per-sample
-        # rule's is 0 or -1 per sample, depending on how q_cut * m1 rounds,
-        # and the exact one is -1/2, the taper averaging to 1/2 over the
-        # vanishing window (tests/test_pairing_per_point.py).  Inside the
-        # prior the two agree.
-        t_p, w_p = get_pairing_panel_quadrature()
-        t_p, w_p = _match_dtype(t_p, m1), _match_dtype(w_p, m1)
-        g_full = dm * jnp.sum(w_p * kern(t_p, dm))
-        log_edge = jnp.log(safe_edge)
-        # Reduced cumulative integral R(s) = int_0^s kern(u) du.
-        # Floor segment: the taper sits on its floor K_f there, so the reduced
-        # kernel is K_f (1 + x)**beta with x = s dm/m_edge and R and its
-        # derivatives are closed form.  Evaluating the kernel instead fails at
-        # the low end of the segment, where m_edge + s dm rounds to m_edge
-        # (s dm below one ulp of m_edge) and the kernel is exactly zero.
-        u_mid = 0.5 * float(np.exp(tab.lam_mid))
-        ratio = (safe_dm / safe_edge).astype(adt)
-        k_mid = kern(_match_dtype(jnp.asarray(u_mid), m1)).astype(adt)
-        beta_a = beta.astype(adt)
-        log_kf = (jnp.log(jnp.where(k_mid > 0, k_mid, 1.0))
-                  - beta_a * jnp.log1p(u_mid * ratio))
-        x = jnp.exp(tab.lam_floor) * ratio
-        l1 = jnp.log1p(x)
-        small_x = x < 1e-6
-        l1x = jnp.where(small_x, 1.0 - 0.5 * x + x * x / 3.0, l1 / jnp.where(small_x, 1.0, x))
-        z = (beta_a + 1.0) * l1                       # (1 + x)**(beta+1) = exp(z)
-        small_z = jnp.abs(z) < 1e-6
-        e_z = jnp.where(small_z, 1.0 + 0.5 * z + z * z / 6.0,
-                        jnp.expm1(z) / jnp.where(small_z, 1.0, z))
-        # R = K_f s l1x e_z (the beta = -1 limit is e_z = 1, R = K_f log1p(x)/r).
-        y_f = log_kf + tab.lam_floor + jnp.log(l1x) + jnp.log(e_z)
-        y1_f = jnp.exp(beta_a * l1) / (l1x * e_z)     # s kern / R
-        y2_f = y1_f * (1.0 + beta_a * x / (1.0 + x)) - y1_f * y1_f
-        coef_f = hermite(tab.lam_floor, y_f, y1_f, y2_f)
-        # Band and main: cumulative cell integrals from the first band node.
-        s_u = jnp.exp(tab.lam_upper)
-        a, b = s_u[:-1], s_u[1:]
-        u_cells = a[:, None] + tab.t * (b - a)[:, None]
-        cell = jnp.sum(tab.w * kern(_match_dtype(u_cells, m1)).astype(adt), axis=-1) * (b - a)
-        r0 = s_u[0] * jnp.sum(tab.w * kern(_match_dtype(s_u[0] * tab.t, m1)).astype(adt))
-        r_u = jnp.concatenate([r0[None], r0 + jnp.cumsum(cell)])
-        y_u, y1_u, y2_u = node_data(s_u[:-1], r_u[:-1])
-        # The last node is the shoulder itself, where the taper is identically
-        # one with every derivative zero, so the kernel there is the bare
-        # (m_shoulder/m_edge)**beta.  It is set in closed form rather than
-        # evaluated: at m2 == m_shoulder up to rounding, sfilter_low can see
-        # m2 - m_min - dm round to exactly 0.0 while m2 < m_min + dm, and then
-        # returns its floor (measured: under jit the last-cell log N was
-        # 3.9e-3 off at beta = 0.22, m_min = 4.90, dm_min = 8.77).
-        m_top = m_edge + safe_dm
-        k_top = jnp.exp(beta * jnp.log(m_top / safe_edge)).astype(adt)
-        kp_top = (beta * safe_dm / m_top).astype(adt) * k_top
-        r_top = r_u[-1]
-        y1_top = k_top / r_top
-        y_u = jnp.concatenate([y_u, jnp.log(r_top)[None]])
-        y1_u = jnp.concatenate([y1_u, y1_top[None]])
-        y2_u = jnp.concatenate([y2_u, (y1_top + kp_top / r_top - y1_top * y1_top)[None]])
-        coef_u = hermite(tab.lam_upper, y_u, y1_u, y2_u)
-        # One flat table, coefficient k of cell i at k * n_cells + i: one
-        # gather operand instead of six (measured on CPU: the six-table form
-        # gathers 5x slower).
-        coef = jnp.concatenate([jnp.concatenate([cf, cu]) for cf, cu in zip(coef_f, coef_u)])
-        coef = _match_dtype(coef, m1)
         n_cells = sum(tab.counts)
-        log_scale = jnp.log(safe_dm) + beta * log_edge         # G = dm m_edge**beta R
-
         # ---- per sample -------------------------------------------------------
         safe_m1 = jnp.where(m1 > 0.0, m1, 1.0)
         log_m1 = jnp.log(safe_m1)
@@ -813,7 +735,147 @@ class PairingModel(ABC):
         # with an empty window, m1 == m_edge is the only zero of n_hi).
         return jnp.where(live, dens, 0.0)
 
-    def __call__(self, m1, q, m_min, dm_min, theta):
+    def _per_point_state(self, m_min, dm_min, theta, beta, dtype):
+        """Per-likelihood-point state of :meth:`_per_point_density` (see there).
+
+        Depends only on the hyperparameters, ``beta`` (from
+        :meth:`_kernel_power`) and the per-sample ``dtype``, which the kernel
+        is evaluated in; the table is accumulated in float64.
+        """
+        kdt = np.dtype(dtype)
+        adt = jnp.float64
+        tab = get_pairing_taper_table(np.dtype(kdt).name)
+        m_edge, m_sh = self._taper_shoulder(m_min, dm_min, theta)
+        m_edge = _match_dtype(jnp.asarray(m_edge), kdt)
+        m_sh = _match_dtype(jnp.asarray(m_sh), kdt)
+        beta = _match_dtype(jnp.asarray(beta), kdt)
+        dm = m_sh - m_edge
+        # dm == 0 is in the GWTC-5 prior (delta_m2 in [0, 10]): the window is
+        # empty and every m1 > m_edge takes the plateau branch.  The table is
+        # still built (on a unit window, finite and unused) so that nothing in
+        # the unselected branch is NaN.
+        safe_dm = jnp.where(dm > 0, dm, 1.0)
+        safe_edge = jnp.where(m_edge > 0, m_edge, 1.0)
+
+        def kern(u, width=safe_dm):
+            # Reduced kernel at m2 = m_edge + u dm: (m2/m_edge)**beta K(m2).
+            m2 = m_edge + u * width
+            return self._eval_unnorm(jnp.broadcast_to(safe_edge, jnp.shape(m2)),
+                                     m2 / safe_edge, m_min, dm_min, theta)
+
+        def node_data(s_n, r_n):
+            # log R and its first two lambda-derivatives at nodes s_n, where
+            # dR/dlambda = s kern(s).
+            u_n = _match_dtype(s_n, kdt)
+            k_n, kp_n = jax.jvp(kern, (u_n,), (jnp.ones_like(u_n),))
+            k_n, kp_n = k_n.astype(adt), kp_n.astype(adt)
+            y1 = s_n * k_n / r_n
+            return jnp.log(r_n), y1, y1 + s_n * s_n * kp_n / r_n - y1 * y1
+
+        def hermite(lam_n, y, y1, y2):
+            # Quintic Hermite coefficients of each cell, in t = (lambda - lam_i)/h.
+            h = lam_n[1:] - lam_n[:-1]
+            d0, d1 = y1[:-1] * h, y1[1:] * h
+            a0, a1 = y2[:-1] * h * h, y2[1:] * h * h
+            dy = y[1:] - y[:-1]
+            return (y[:-1], d0, 0.5 * a0,
+                    10.0 * dy - 6.0 * d0 - 4.0 * d1 - 1.5 * a0 + 0.5 * a1,
+                    -15.0 * dy + 8.0 * d0 + 7.0 * d1 + 1.5 * a0 - a1,
+                    6.0 * dy - 3.0 * d0 - 3.0 * d1 - 0.5 * a0 + 0.5 * a1)
+
+        # ---- per likelihood point -------------------------------------------
+        # Whole window with the per-sample rule's nodes (m2-space form), on the
+        # raw width like the per-sample rule's own panel.  At dm == 0 (an edge
+        # of the GWTC-5 prior) the one-sided dN/d(dm) is then 0 in units of
+        # m1**(-1-beta) m_edge**beta (window +1, plateau -1); the per-sample
+        # rule's is 0 or -1 per sample, depending on how q_cut * m1 rounds,
+        # and the exact one is -1/2, the taper averaging to 1/2 over the
+        # vanishing window (tests/test_pairing_per_point.py).  Inside the
+        # prior the two agree.
+        t_p, w_p = get_pairing_panel_quadrature()
+        t_p, w_p = _match_dtype(t_p, kdt), _match_dtype(w_p, kdt)
+        g_full = dm * jnp.sum(w_p * kern(t_p, dm))
+        log_edge = jnp.log(safe_edge)
+        # Reduced cumulative integral R(s) = int_0^s kern(u) du.
+        # Floor segment: the taper sits on its floor K_f there, so the reduced
+        # kernel is K_f (1 + x)**beta with x = s dm/m_edge and R and its
+        # derivatives are closed form.  Evaluating the kernel instead fails at
+        # the low end of the segment, where m_edge + s dm rounds to m_edge
+        # (s dm below one ulp of m_edge) and the kernel is exactly zero.
+        u_mid = 0.5 * float(np.exp(tab.lam_mid))
+        ratio = (safe_dm / safe_edge).astype(adt)
+        k_mid = kern(_match_dtype(jnp.asarray(u_mid), kdt)).astype(adt)
+        beta_a = beta.astype(adt)
+        log_kf = (jnp.log(jnp.where(k_mid > 0, k_mid, 1.0))
+                  - beta_a * jnp.log1p(u_mid * ratio))
+        x = jnp.exp(tab.lam_floor) * ratio
+        l1 = jnp.log1p(x)
+        small_x = x < 1e-6
+        l1x = jnp.where(small_x, 1.0 - 0.5 * x + x * x / 3.0, l1 / jnp.where(small_x, 1.0, x))
+        z = (beta_a + 1.0) * l1                       # (1 + x)**(beta+1) = exp(z)
+        small_z = jnp.abs(z) < 1e-6
+        e_z = jnp.where(small_z, 1.0 + 0.5 * z + z * z / 6.0,
+                        jnp.expm1(z) / jnp.where(small_z, 1.0, z))
+        # R = K_f s l1x e_z (the beta = -1 limit is e_z = 1, R = K_f log1p(x)/r).
+        y_f = log_kf + tab.lam_floor + jnp.log(l1x) + jnp.log(e_z)
+        y1_f = jnp.exp(beta_a * l1) / (l1x * e_z)     # s kern / R
+        y2_f = y1_f * (1.0 + beta_a * x / (1.0 + x)) - y1_f * y1_f
+        coef_f = hermite(tab.lam_floor, y_f, y1_f, y2_f)
+        # Band and main: cumulative cell integrals from the first band node.
+        s_u = jnp.exp(tab.lam_upper)
+        a, b = s_u[:-1], s_u[1:]
+        u_cells = a[:, None] + tab.t * (b - a)[:, None]
+        cell = jnp.sum(tab.w * kern(_match_dtype(u_cells, kdt)).astype(adt), axis=-1) * (b - a)
+        r0 = s_u[0] * jnp.sum(tab.w * kern(_match_dtype(s_u[0] * tab.t, kdt)).astype(adt))
+        r_u = jnp.concatenate([r0[None], r0 + jnp.cumsum(cell)])
+        y_u, y1_u, y2_u = node_data(s_u[:-1], r_u[:-1])
+        # The last node is the shoulder itself, where the taper is identically
+        # one with every derivative zero, so the kernel there is the bare
+        # (m_shoulder/m_edge)**beta.  It is set in closed form rather than
+        # evaluated: at m2 == m_shoulder up to rounding, sfilter_low can see
+        # m2 - m_min - dm round to exactly 0.0 while m2 < m_min + dm, and then
+        # returns its floor (measured: under jit the last-cell log N was
+        # 3.9e-3 off at beta = 0.22, m_min = 4.90, dm_min = 8.77).
+        m_top = m_edge + safe_dm
+        k_top = jnp.exp(beta * jnp.log(m_top / safe_edge)).astype(adt)
+        kp_top = (beta * safe_dm / m_top).astype(adt) * k_top
+        r_top = r_u[-1]
+        y1_top = k_top / r_top
+        y_u = jnp.concatenate([y_u, jnp.log(r_top)[None]])
+        y1_u = jnp.concatenate([y1_u, y1_top[None]])
+        y2_u = jnp.concatenate([y2_u, (y1_top + kp_top / r_top - y1_top * y1_top)[None]])
+        coef_u = hermite(tab.lam_upper, y_u, y1_u, y2_u)
+        # One flat table, coefficient k of cell i at k * n_cells + i: one
+        # gather operand instead of six (measured on CPU: the six-table form
+        # gathers 5x slower).
+        coef = jnp.concatenate([jnp.concatenate([cf, cu]) for cf, cu in zip(coef_f, coef_u)])
+        coef = _match_dtype(coef, kdt)
+        log_scale = jnp.log(safe_dm) + beta * log_edge         # G = dm m_edge**beta R
+        return PerPointPairingState(m_edge, m_sh, safe_dm, beta, log_edge,
+                                    g_full, coef, log_scale)
+
+    def prepare(self, m_min, dm_min, theta, dtype):
+        """Per-likelihood-point state for :meth:`__call__`'s ``prepared``, or ``None``.
+
+        The :meth:`_per_point_state` for samples of ``dtype`` when this call
+        would take the per-point normaliser (``pairing_norm`` resolves to it and
+        the model declares :meth:`_kernel_power`), else ``None``: the per-sample
+        rules have nothing to hoist.
+        """
+        if not normalization_grid_settings().per_point_pairing_norm():
+            return None
+        beta = self._kernel_power(theta)
+        if beta is None:
+            return None
+        return self._per_point_state(m_min, dm_min, theta, beta, dtype)
+
+    def __call__(self, m1, q, m_min, dm_min, theta, prepared=None):
+        """Normalised ``p(q | m1)``.
+
+        ``prepared`` is :meth:`prepare` for the same ``(m_min, dm_min, theta)``,
+        built once per likelihood call; ``None`` (the default) builds what the
+        per-point normaliser needs here, with the same values.
+        """
         p = self._eval_unnorm(m1, q, m_min, dm_min, theta)
         # SUPPORT MASK.  Every normaliser below integrates over (q_cut, 1] --
         # the q-support implied by the m2 = q*m1 >= m_min cut and the m2 <= m1
@@ -842,7 +904,8 @@ class PairingModel(ABC):
         beta_pp = (self._kernel_power(theta)
                    if settings.per_point_pairing_norm() else None)
         if beta_pp is not None:
-            dens = self._per_point_density(p, m1, m_min, dm_min, theta, beta_pp)
+            dens = self._per_point_density(p, m1, m_min, dm_min, theta, beta_pp,
+                                           state=prepared)
             return jnp.where(in_support, dens, 0.0)
         if n_grid is None:
             # PairingModel norm integrates over q for each m1 — sample-dependent,
@@ -1167,7 +1230,36 @@ class MixtureModel:
                 return tm[c.param_specs.index(c.m_min_spec)], dmmin
         return M_LO, 0.01
 
-    def component_densities(self, m1, q, chieff, theta, spin=None):
+    def _pairing_args(self, i, tm_list, tp_list, edge):
+        """``(pairing, m_min, dm_min, theta_p)`` component ``i``'s pairing is called with."""
+        c_m = self.mass_components[i];    tm = tm_list[i]
+        c_p = self.pairing_components[0 if self.shared_pairing else i]
+        tp  = tp_list[0 if self.shared_pairing else i]
+        mmin, dmmin = edge
+        if hasattr(c_m, "m_min_spec"):
+            mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
+        if hasattr(c_m, "dm_min_spec"):
+            dmmin = tm[c_m.param_specs.index(c_m.dm_min_spec)]
+        return c_p, mmin, dmmin, tp
+
+    def prepare(self, theta, dtype):
+        """Per-likelihood-point state for ``prepared``, or ``None`` if there is none.
+
+        One :meth:`PairingModel.prepare` per mass component, from the same
+        parameter slices :meth:`component_densities` hands the pairing, for
+        samples of ``dtype``.  It depends on ``theta`` only, so a likelihood
+        builds it once per call instead of once per PE block and injection
+        batch.
+        """
+        _, tm_list, tp_list, _ = self._split_theta(theta)
+        edge = self._low_mass_edge(tm_list)
+        states = []
+        for i in range(self.k):
+            c_p, mmin, dmmin, tp = self._pairing_args(i, tm_list, tp_list, edge)
+            states.append(c_p.prepare(mmin, dmmin, tp, dtype))
+        return None if all(st is None for st in states) else tuple(states)
+
+    def component_densities(self, m1, q, chieff, theta, spin=None, prepared=None):
         """Return weighted source-density contributions for each component.
 
         The leading axis indexes mass-mixture components; summing over that
@@ -1175,6 +1267,9 @@ class MixtureModel:
         mixture sum lets callers apply component-specific factors, such as a
         per-component redshift evolution, without changing the source-density
         parameter ordering.
+
+        ``prepared`` is :meth:`prepare` for the same ``theta`` (``None``: built
+        here); the density is the same either way.
         """
         w, tm_list, tp_list, ts_list = self._split_theta(theta)
 
@@ -1191,17 +1286,11 @@ class MixtureModel:
         contributions = []
         for i in range(self.k):
             c_m  = self.mass_components[i];    tm = tm_list[i]
-            c_p  = self.pairing_components[0 if self.shared_pairing else i]
-            tp   = tp_list[0 if self.shared_pairing else i]
             c_s  = self.spin_components[0 if self.shared_spin else i]
             ts   = ts_list[0 if self.shared_spin else i]
             s_idx = 0 if self.shared_spin else i
-
-            mmin, dmmin = edge
-            if hasattr(c_m, "m_min_spec"):
-                mmin  = tm[c_m.param_specs.index(c_m.m_min_spec)]
-            if hasattr(c_m, "dm_min_spec"):
-                dmmin = tm[c_m.param_specs.index(c_m.dm_min_spec)]
+            c_p, mmin, dmmin, tp = self._pairing_args(i, tm_list, tp_list, edge)
+            st = None if prepared is None else prepared[i]
 
             if getattr(c_s, "consumes_spin_block", False):
                 # 4-D component-spin model: consumes the event spin block
@@ -1214,7 +1303,7 @@ class MixtureModel:
                 spin_term = c_s(chieff, ts, norm=spin_norms[s_idx])
             contributions.append(w[i] * (
                 c_m(m1, tm, norm=mass_norms[i])
-                * c_p(m1, q, mmin, dmmin, tp)
+                * c_p(m1, q, mmin, dmmin, tp, prepared=st)
                 * spin_term
             ))
 
@@ -1256,10 +1345,11 @@ class MixtureModel:
             )
         return total
 
-    def __call__(self, m1, q, chieff, theta, spin=None):
+    def __call__(self, m1, q, chieff, theta, spin=None, prepared=None):
         """Evaluate the normalised mixture density for source parameters."""
         return jnp.sum(
-            self.component_densities(m1, q, chieff, theta, spin=spin), axis=0
+            self.component_densities(m1, q, chieff, theta, spin=spin,
+                                     prepared=prepared), axis=0
         )
 
 
@@ -1402,7 +1492,17 @@ class PopulationModel:
             "the z factor does not separate from the mixture sum."
         )
 
-    def log_p_massspin(self, m1, q, chieff, theta, spin=None):
+    def prepare(self, theta, dtype):
+        """Per-likelihood-point state for :meth:`log_p_pop`'s ``prepared``, or ``None``.
+
+        :meth:`MixtureModel.prepare` of the mixture slice :meth:`log_p_pop`
+        evaluates, for samples of ``dtype`` (see there).
+        """
+        if self.has_additive_rate_split:
+            return self.mixture.prepare(self.mixture_theta(theta), dtype)
+        return self.mixture.prepare(theta[: self.mixture.n_params], dtype)
+
+    def log_p_massspin(self, m1, q, chieff, theta, spin=None, prepared=None):
         """Log source-parameter (mass, mass-ratio, spin) mixture density.
 
         Sentinel: p = 0  →  log p = −jnp.inf, matching :meth:`log_p_pop`.
@@ -1412,10 +1512,11 @@ class PopulationModel:
                 "log_p_massspin is undefined for per-component redshift "
                 "evolution: use log_p_pop."
             )
-        p = self.mixture(m1, q, chieff, self.mixture_theta(theta), spin=spin)
+        p = self.mixture(m1, q, chieff, self.mixture_theta(theta), spin=spin,
+                         prepared=prepared)
         return jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
 
-    def log_p_pop(self, m1, q, z, chieff, theta, spin=None):
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None, prepared=None):
         """
         Log population probability at (m1, q, z, chieff) under parameters theta.
 
@@ -1426,17 +1527,22 @@ class PopulationModel:
         ``spin`` is the optional (N, d) component-spin block; forwarded to the
         mixture, where only a spin component with ``consumes_spin_block`` ever
         reads it.
+
+        ``prepared`` is :meth:`prepare` for the same ``theta`` and the samples'
+        dtype, built once per likelihood call; ``None`` (the default) builds it
+        here.  The density is the same, bit for bit, either way.
         """
         if self.has_additive_rate_split:
             return (
-                self.log_p_massspin(m1, q, chieff, theta, spin=spin)
+                self.log_p_massspin(m1, q, chieff, theta, spin=spin, prepared=prepared)
                 + self.log_rate_z(z, theta)
             )
 
         n_mix  = self.mixture.n_params
         tm     = theta[:n_mix]
         gamma  = theta[n_mix : n_mix + self.mixture.k]
-        p_comp = self.mixture.component_densities(m1, q, chieff, tm, spin=spin)
+        p_comp = self.mixture.component_densities(m1, q, chieff, tm, spin=spin,
+                                                  prepared=prepared)
 
         gamma_shape = (self.mixture.k,) + (1,) * (jnp.ndim(p_comp) - 1)
         z_factor = jnp.power(1.0 + z, gamma.reshape(gamma_shape) - 1.0)

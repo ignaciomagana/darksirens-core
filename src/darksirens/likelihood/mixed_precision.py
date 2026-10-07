@@ -57,6 +57,8 @@ from darksirens.cosmology import distances as _dist
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.types import GWEvent
 
+from .weights import prepare_population
+
 #: Low-precision dtypes ``compute_dtype`` accepts besides the default.
 SUPPORTED_COMPUTE_DTYPES = ("float32",)
 
@@ -261,6 +263,11 @@ def _value_only_jvp(primals, tangents):
     raise TypeError(VALUE_ONLY_MESSAGE)
 
 
+def _prepared_kwargs(prepared):
+    """``{"prepared": prepared}``, or no keyword at all when there is no state."""
+    return {} if prepared is None else {"prepared": prepared}
+
+
 def make_log_weight(
     *,
     dtype,
@@ -279,10 +286,15 @@ def make_log_weight(
     arithmetic is ``likelihood.weights.log_sample_weight`` plus the
     distance-support mask of the hierarchical likelihoods, term for term; with
     ``dtype=float64`` it reproduces the default weight to rounding.
+
+    The population's per-likelihood-point state
+    (:func:`~darksirens.likelihood.weights.prepare_population`) is built here,
+    once, for ``dtype`` samples, and every call of the returned weight reads it.
     """
     dtype = np.dtype(dtype)
     cosmo_c = _cast_cosmology(cosmology, dtype)
     pop_c = jnp.asarray(pop_params).astype(dtype)
+    prep = _prepared_kwargs(prepare_population(log_p_pop, pop_c, dtype))
     dL_grid_c = jnp.asarray(dL_grid).astype(dtype)
     dL_lo, dL_hi = dL_grid_c[0], dL_grid_c[-1]
 
@@ -299,7 +311,7 @@ def make_log_weight(
         z = z_of_dL(dL_c, dL_grid_c)
         m1src = m1det / (1.0 + z)
         ldw = (
-            log_p_pop(m1src, q, z, chieff, pop_c)
+            log_p_pop(m1src, q, z, chieff, pop_c, **prep)
             + log_prior_z(z, pix)
             - log_jacobian(z, dL_c, cosmo_c)
         ) - jnp.log(prior_wt)
@@ -332,6 +344,9 @@ def make_branch_log_weight(
     dtype = np.dtype(dtype)
     cosmo_c = _cast_cosmology(cosmology, dtype)
     pops_c = tuple(jnp.asarray(p).astype(dtype) for p in branch_pop_params)
+    preps = tuple(
+        _prepared_kwargs(prepare_population(log_p_pop, p, dtype)) for p in pops_c
+    )
     dL_grid_c = jnp.asarray(dL_grid).astype(dtype)
     dL_lo, dL_hi = dL_grid_c[0], dL_grid_c[-1]
 
@@ -349,8 +364,8 @@ def make_branch_log_weight(
         m1src = m1det / (1.0 + z)
         branches = log_prior_branches(z, pix)
         terms = [
-            term + log_p_pop(m1src, q, z, chieff, pop)
-            for term, pop in zip(branches, pops_c)
+            term + log_p_pop(m1src, q, z, chieff, pop, **prep)
+            for term, pop, prep in zip(branches, pops_c, preps)
         ]
         ldw = (
             mixture_logsumexp(terms) - log_jacobian(z, dL_c, cosmo_c)

@@ -666,3 +666,48 @@ galaxies whose outputs are dropped. The schedule is
 `darksirens.catalog.redshift._GALAXY_MAP` (`"auto"`, `"unrolled"` or
 `"loop"`). The tests run the loop on CPU against the padded state, its
 gradients and vmap.
+
+
+### Per-point pairing table built once per likelihood call (speed fix; no likelihood change)
+
+The per-point pairing normaliser (`pairing_norm="auto"`, the default since
+2026-10-02) normalises `p(q | m1)` from a small table of the integrated
+secondary-mass taper. The table depends on the population hyperparameters
+alone, but the population density is evaluated inside the likelihood's
+per-block loops (the PE-event blocks of `pe_event_block` and the injection
+batches of `sel_batch_size`), so the table was rebuilt in every block. On a
+GPU profile of a two-catalog field mixture (442 blocks per call), that
+rebuild was about 48 ms of small kernel launches per call, the whole of the
+15% by which the default was slower than `pairing_norm="per_sample"`.
+On an A100 with a 130-block mock, the hoisted table takes the per-point
+default from 52.4 to 42.4 ms per call (spectral siren) and from 30.4 to
+19.5 ms (two catalogs with their own populations), level with the
+per-sample rule (42.8 and 19.9 ms).
+
+The likelihood now builds the table once per call, before the loops, and
+every block reads it. `PairingModel._per_point_state` builds the table and
+`_per_point_density(..., state=)` reads it. `prepare(theta, dtype)` on
+`PopulationModel`, `MixtureModel`, the GWTC-3 and GWTC-5 fiducial models and
+the pairing returns the table for the same parameter slices the density
+uses. The weight functions in `darksirens.likelihood.weights` and the
+float32 weights take it as `prepared=`. Every argument is optional, and
+without it the density builds its own table as before. Models without the
+per-point normaliser, such as the Gaussian-process populations, are called
+exactly as before.
+
+**Numerics.** No likelihood value changes. The table is built with the same
+operations in the same dtypes (the kernel in the per-sample dtype, the
+accumulation in float64), so the density and the log-likelihood are the same
+bit for bit. The tests check the density for both production pairings in
+float64 and float32 at the prior edges, and the population models. Through
+`bind_analysis` with several PE blocks and injection batches they check the
+log-likelihood and its diagnostics against the program without the hoist
+(`darksirens.likelihood.weights._HOIST_POPULATION_STATE = False`), in float64
+and float32. The cases are a spectral siren with the population sampled or
+fixed, a catalog, and per-catalog population branches. The gradient agrees
+to rounding, not bit for bit: the table's share of the gradient is now
+summed over the blocks before it is carried back through the table, where
+before each block carried its own back. The difference is at most 7.8e-16 of
+the gradient's largest component on the test likelihoods (3.3e-15 on the
+density alone). A table
+built for another dtype is not used; the density then builds its own.

@@ -722,7 +722,13 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 
-    def log_p_pop(self, m1, q, z, chieff, theta):
+    def prepare(self, theta, dtype):
+        """Per-likelihood-point pairing state for ``log_p_pop(..., prepared=)``, or ``None``."""
+        n_m = self.mass_component.n_params
+        tp = theta[n_m : n_m + self.pairing_component.n_params]
+        return self.pairing_component.prepare(tp[1], tp[2], tp, dtype)
+
+    def log_p_pop(self, m1, q, z, chieff, theta, prepared=None):
         idx = 0
         tm = theta[idx : idx + self.mass_component.n_params]
         idx += self.mass_component.n_params
@@ -740,7 +746,7 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         spin_norm = self.spin_component._norm(ts)
         p = (
             self.mass_component(m1, tm, norm=mass_norm)
-            * self.pairing_component(m1, q, m2_low, tp[2], tp)
+            * self.pairing_component(m1, q, m2_low, tp[2], tp, prepared=prepared)
             * self.spin_component(chieff, ts, norm=spin_norm)
         )
         p = jnp.where(valid, p, 0.0)
@@ -976,7 +982,14 @@ class GWTC3PowerLawPeakPopulationModel:
     def prior_bounds(self):
         return pack_specs(*self.param_specs)
 
-    def log_p_pop(self, m1, q, z, chieff, theta, spin=None):
+    def prepare(self, theta, dtype):
+        """Per-likelihood-point pairing state for ``log_p_pop(..., prepared=)``, or ``None``."""
+        n_m = self.mass_component.n_params
+        tm = theta[:n_m]
+        tp = theta[n_m : n_m + self.pairing_component.n_params]
+        return self.pairing_component.prepare(tm[1], tm[6], tp, dtype)
+
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None, prepared=None):
         idx = 0
         tm = theta[idx : idx + self.mass_component.n_params]
         idx += self.mass_component.n_params
@@ -998,7 +1011,7 @@ class GWTC3PowerLawPeakPopulationModel:
             p_spin = self.spin_component(chieff, ts, norm=spin_norm)
         p = (
             self.mass_component(m1, tm, norm=mass_norm)
-            * self.pairing_component(m1, q, m_min, delta_m, tp)
+            * self.pairing_component(m1, q, m_min, delta_m, tp, prepared=prepared)
             * p_spin
         )
         log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
