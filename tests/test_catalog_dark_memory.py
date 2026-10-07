@@ -226,8 +226,13 @@ def _kernel_leaves(state):
 
 
 @pytest.mark.parametrize("z_depth", [None, 0.25])
-@pytest.mark.parametrize("chunks", ["single", "chunked", "row_chunked"])
+@pytest.mark.parametrize("chunks", ["single", "chunked", "row_chunked", "loop"])
 def test_galaxy_list_kernel_state_is_the_padded_state(monkeypatch, z_depth, chunks):
+    if chunks == "loop":
+        # The lax.map schedule (the default off CPU): chunks of 7 galaxies, the
+        # last one padded with placeholder galaxies whose outputs are dropped.
+        monkeypatch.setattr(_redshift, "_GALAXY_MAP", "loop")
+        monkeypatch.setattr(_redshift, "_GALAXY_LOOP_CHUNK", 7)
     if chunks == "chunked":
         # About 200 galaxies: the chunk count capped at five, chained in order.
         monkeypatch.setattr(_redshift, "_GALAXY_CHUNK_MIN", 7)
@@ -255,10 +260,13 @@ def test_galaxy_list_kernel_state_is_the_padded_state(monkeypatch, z_depth, chun
                                        err_msg=name)
 
 
-def test_galaxy_list_gradients_and_vmap_match_the_padded_state(monkeypatch):
-    # The chained chunks under jit, grad and vmap.
+@pytest.mark.parametrize("schedule", ["unrolled", "loop"])
+def test_galaxy_list_gradients_and_vmap_match_the_padded_state(monkeypatch, schedule):
+    # The chained chunks, or the lax.map loop, under jit, grad and vmap.
+    monkeypatch.setattr(_redshift, "_GALAXY_MAP", schedule)
     monkeypatch.setattr(_redshift, "_GALAXY_CHUNK_MIN", 7)
     monkeypatch.setattr(_redshift, "_GALAXY_CHUNKS_MAX", 3)
+    monkeypatch.setattr(_redshift, "_GALAXY_LOOP_CHUNK", 7)
     catalog = _galaxies(n_rows=16, n_max=6, empty=(1, 7))
     listed = with_galaxy_index(catalog)
 
@@ -278,6 +286,15 @@ def test_galaxy_list_gradients_and_vmap_match_the_padded_state(monkeypatch):
     batched = jax.vmap(total, in_axes=(None, 0))
     np.testing.assert_allclose(jax.jit(batched)(listed, xs), jax.jit(batched)(catalog, xs),
                                rtol=1e-14)
+
+
+def test_galaxy_list_schedule_is_validated(monkeypatch):
+    monkeypatch.setattr(_redshift, "_GALAXY_MAP", "threads")
+    monkeypatch.setattr(_redshift, "_GALAXY_CHUNK_MIN", 7)
+    listed = with_galaxy_index(_galaxies())
+    params = CatalogParameters(n0=1.0, delta=0.0, sigma_kde=0.0, z_depth=None)
+    with pytest.raises(ValueError, match="_GALAXY_MAP"):
+        build_catalog_kernel_state(COSMO, params, listed)
 
 
 def test_a_stale_galaxy_list_poisons_the_prior_and_is_refused_by_the_pin():
