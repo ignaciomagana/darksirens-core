@@ -23,7 +23,7 @@ from darksirens.selection.gw import (
 )
 
 from .event import reduce_pe_events
-from .weights import log_sample_weight, log_sample_weight_branches
+from .weights import log_sample_weight, log_sample_weight_branches, prepare_population
 
 
 class SpectralLikelihoodDiagnostics(NamedTuple):
@@ -141,6 +141,14 @@ def spectral_siren_log_likelihood(
         angular_model, angular_params, dL_grid, dL_lo, dL_hi
     )
 
+    compute_dtype = _resolve_compute_dtype(
+        compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
+    )
+    # The population's per-likelihood-point state, built once here instead of
+    # in every PE block and injection batch (the low-precision weight builds
+    # its own, in its dtype).
+    prepared = None if compute_dtype is not None else prepare_population(log_p_pop, pop_params)
+
     def _log_prior_z(z, _pix, _catalog):
         return log_comoving_volume_prior(z, cosmology)
 
@@ -162,12 +170,10 @@ def spectral_siren_log_likelihood(
             _log_prior_z,
             spin=spin,
             dL_grid=dL_grid,
+            prepared=prepared,
         )
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
-    compute_dtype = _resolve_compute_dtype(
-        compute_dtype, pop_model, shared_beta, shared_spin, shared_gamma, angular_model
-    )
     if compute_dtype is not None:
         from .mixed_precision import make_log_weight, volume_log_prior
 
@@ -328,6 +334,12 @@ def _ordinary_hierarchical_likelihood(
     angular_weight = _angular_log_weight_fn(
         angular_model, angular_params, dL_grid, dL_lo, dL_hi
     )
+    # The population's per-likelihood-point state, built once here instead of
+    # in every PE block and injection batch (the low-precision weights build
+    # their own, in their dtype).
+    prepared = None
+    if compute_dtype is None and branch_populations is None:
+        prepared = prepare_population(log_p_pop, pop_params)
 
     def _weight(prior_fn, catalog):
         def fn(m1det, q, dL, chieff, pix, prior_wt, spin=None):
@@ -348,6 +360,7 @@ def _ordinary_hierarchical_likelihood(
                 prior_fn,
                 spin=spin,
                 dL_grid=dL_grid,
+                prepared=prepared,
             )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
         return fn
@@ -357,6 +370,9 @@ def _ordinary_hierarchical_likelihood(
         sel_weight_core = _weight(log_prior_sel, catalog_sel)
     else:
         branch_pops = tuple(jnp.asarray(p) for p in branch_populations)
+        branch_prepared = None
+        if compute_dtype is None:
+            branch_prepared = tuple(prepare_population(log_p_pop, p) for p in branch_pops)
 
         def _branch_weight(prior_fn, catalog):
             def branches(z, pix):
@@ -368,6 +384,7 @@ def _ordinary_hierarchical_likelihood(
                 ldw = log_sample_weight_branches(
                     m1det, q, dL_c, chieff, pix, prior_wt, cosmology,
                     branch_pops, log_p_pop, branches, spin=spin, dL_grid=dL_grid,
+                    prepared=branch_prepared,
                 )
                 return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
             return fn
@@ -714,6 +731,8 @@ def bright_siren_log_likelihood(
     )
     dL_grid = dL_of_z(distance_zgrid, H0, Om0, w0, wa)
     dL_lo, dL_hi = dL_grid[0], dL_grid[-1]
+    # Built once for the selection term and every counterpart's PE term.
+    prepared = prepare_population(log_p_pop, pop_params)
 
     def make_weight(prior_fn, catalog):
         def fn(m1det, q, dL, chieff, pix, prior_wt, spin=None):
@@ -723,6 +742,7 @@ def bright_siren_log_likelihood(
                 m1det, q, dL_c, chieff, pix, prior_wt,
                 cosmology, None, pop_params, catalog,
                 log_p_pop, prior_fn, spin=spin, dL_grid=dL_grid,
+                prepared=prepared,
             )
             return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
         return fn

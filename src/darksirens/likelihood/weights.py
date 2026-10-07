@@ -63,6 +63,49 @@ EMCatalog = Any
 
 M1DET_Q_DL_COORDS = "m1det_q_dL"
 
+#: Build the population's per-likelihood-point state once per call
+#: (:func:`prepare_population`).  Tests switch it off to compare against the
+#: un-hoisted program; the likelihood is the same bit for bit either way.
+_HOIST_POPULATION_STATE = True
+
+
+def prepare_population(log_p_pop_fn, pop_params, dtype=None):
+    """The population's per-likelihood-point state, or ``None``.
+
+    The population density is evaluated inside the likelihood's PE-block and
+    injection-batch loops, and everything in it that depends on the
+    hyperparameters alone is rebuilt in every block unless it is built once
+    outside them.  For the per-point pairing normaliser that is a table of
+    several thousand values (``PairingModel._per_point_state``).  A population
+    model whose ``log_p_pop`` is a method of an object with
+    ``prepare(theta, dtype)`` returns it from there; any other model (a GP
+    population, a bespoke one without the hook) returns ``None`` and is called
+    exactly as before.
+
+    ``dtype`` is the dtype of the per-sample arrays the density will see
+    (default: JAX's default float, the float64 program).  A state built for
+    another dtype is not used: the density then builds its own.  Pass the
+    result to the weight functions below as ``prepared``.
+    """
+    if not _HOIST_POPULATION_STATE:
+        return None
+    prepare = getattr(getattr(log_p_pop_fn, "__self__", None), "prepare", None)
+    if prepare is None:
+        return None
+    if dtype is None:
+        dtype = jnp.result_type(float)
+    return prepare(pop_params, dtype)
+
+
+def _log_p_pop(log_p_pop_fn, m1src, q, z, chieff, pop_params, spin, prepared):
+    """``log_p_pop_fn`` with ``spin`` and ``prepared`` forwarded only when present."""
+    kwargs = {}
+    if spin is not None:
+        kwargs["spin"] = spin
+    if prepared is not None:
+        kwargs["prepared"] = prepared
+    return log_p_pop_fn(m1src, q, z, chieff, pop_params, **kwargs)
+
 
 def log_jacobian_m1src_q_z_to_m1det_q_dL(
     z: jnp.ndarray,
@@ -124,6 +167,7 @@ def log_target_density_m1det_q_dL(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
+    prepared=None,
 ) -> jnp.ndarray:
     """
     Target density evaluated in the canonical sample basis.
@@ -145,6 +189,9 @@ def log_target_density_m1det_q_dL(
     ``ddL_grid`` is the optional precomputed ``ddL_of_z(zgrid, dL_grid, H0,
     Om0, w0, wa)`` array.  When provided, the per-sample ``E(z)`` evaluation
     inside the Jacobian is replaced by a 1-D interpolation.
+
+    ``prepared`` is the optional :func:`prepare_population` state for
+    ``pop_params``, forwarded like ``spin`` only when present.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
@@ -153,10 +200,7 @@ def log_target_density_m1det_q_dL(
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
 
-    if spin is None:
-        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
-    else:
-        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
+    log_p_pop = _log_p_pop(log_p_pop_fn, m1src, q, z, chieff, pop_params, spin, prepared)
     return (
         log_p_pop
         + log_prior_z_fn(z, pix, catalog)
@@ -179,6 +223,7 @@ def log_target_density_base_and_z(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
+    prepared=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Member-INDEPENDENT split of :func:`log_sample_weight`.
 
@@ -215,6 +260,8 @@ def log_target_density_base_and_z(
     ``ddL_grid`` is the optional precomputed ``ddL_of_z(zgrid, dL_grid, H0,
     Om0, w0, wa)`` array.  When provided, the per-sample ``E(z)`` evaluation
     inside the Jacobian is replaced by a 1-D interpolation.
+
+    ``prepared``: as for :func:`log_target_density_m1det_q_dL`.
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
@@ -222,10 +269,7 @@ def log_target_density_base_and_z(
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
-    if spin is None:
-        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params)
-    else:
-        log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_params, spin=spin)
+    log_p_pop = _log_p_pop(log_p_pop_fn, m1src, q, z, chieff, pop_params, spin, prepared)
     base = (
         log_p_pop
         - log_jacobian_m1src_q_z_to_m1det_q_dL(z, dL, H0, Om0, w0, wa, ddL_grid=ddL_grid)
@@ -247,6 +291,7 @@ def log_sample_weight_branches(
     log_prior_branches_fn,
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
+    prepared=None,
 ) -> jnp.ndarray:
     """Per-sample log weight of a mixture whose branches carry their own population.
 
@@ -264,6 +309,9 @@ def log_sample_weight_branches(
     every ``branch_pop_params[k]`` equal it is :func:`log_sample_weight` of
     the collapsed mixture up to the re-association ``logsumexp_k[a_k] + c ->
     logsumexp_k[a_k + c]`` (rounding).
+
+    ``prepared`` is ``None`` or one :func:`prepare_population` state per
+    branch (each possibly ``None``).
     """
     from darksirens.catalog.mixture import mixture_logsumexp
 
@@ -278,12 +326,11 @@ def log_sample_weight_branches(
         raise ValueError(
             f"{len(branches)} redshift branches for {len(branch_pop_params)} populations"
         )
+    if prepared is None:
+        prepared = (None,) * len(branch_pop_params)
     terms = []
-    for log_prior_k, pop_k in zip(branches, branch_pop_params):
-        if spin is None:
-            log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_k)
-        else:
-            log_p_pop = log_p_pop_fn(m1src, q, z, chieff, pop_k, spin=spin)
+    for log_prior_k, pop_k, prep_k in zip(branches, branch_pop_params, prepared):
+        log_p_pop = _log_p_pop(log_p_pop_fn, m1src, q, z, chieff, pop_k, spin, prep_k)
         terms.append(log_prior_k + log_p_pop)
     return (
         mixture_logsumexp(terms)
@@ -308,6 +355,7 @@ def log_sample_weight(
     spin: jnp.ndarray | None = None,
     dL_grid: jnp.ndarray | None = None,
     ddL_grid: jnp.ndarray | None = None,
+    prepared=None,
 ) -> jnp.ndarray:
     """
     Per-sample log importance weight, shared by the PE and selection terms.
@@ -342,6 +390,8 @@ def log_sample_weight(
     catalog : EMCatalog (PE catalog or selection catalog)
     log_p_pop_fn : callable(m1_src, q, z, chieff, pop_params) → log probability
     log_prior_z_fn : callable(z, pix, catalog) → log probability
+    prepared : optional :func:`prepare_population` state for ``pop_params``,
+        built once per likelihood call outside the block loops
 
     Returns
     -------
@@ -363,6 +413,7 @@ def log_sample_weight(
             spin=spin,
             dL_grid=dL_grid,
             ddL_grid=ddL_grid,
+            prepared=prepared,
         )
         - jnp.log(prior_wt)
     )
