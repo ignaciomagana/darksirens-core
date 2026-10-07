@@ -646,3 +646,23 @@ likelihood the same keywords as before. The draws use an RNG of their own
 seeded from the sampler `seed`, so the sampler's streams are untouched. The
 legacy parity probes (`tools/probe_*.py`) and the parity tests pass
 unchanged.
+
+
+### Galaxy-list build on GPU (memory fix; no likelihood change)
+
+The galaxy-list kernel normaliser (`kernel_layout="galaxy_list"`, the default
+since 2026-10-02) ran its galaxies in at most 32 unrolled chunks and relied on
+a data dependence to keep one chunk live at a time. On GPU, XLA kept them live
+together. On a two-catalog field mixture with 151 million galaxies (nside 32,
+no survey depth), building the kernel pin needed 32.6 GB of temporaries,
+against 1.1 GB for the padded layout. It ran out of memory at JAX's default
+75% limit on an 80 GB A100 (reported by the gws-agn analysis).
+
+The chunks now run as a `lax.map` loop over fixed chunks of 2^20 galaxies on
+every backend except CPU. CPU keeps the unrolled chunks, which XLA runs
+multi-threaded. On GPU the same build needs 0.56 GB. Each galaxy executes the
+same arithmetic in any chunk, and the last chunk is padded with placeholder
+galaxies whose outputs are dropped. The schedule is
+`darksirens.catalog.redshift._GALAXY_MAP` (`"auto"`, `"unrolled"` or
+`"loop"`). The tests run the loop on CPU against the padded state, its
+gradients and vmap.

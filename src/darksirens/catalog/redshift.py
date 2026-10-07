@@ -64,12 +64,20 @@ _ROW_CHUNK_AUTO_THRESHOLD: int = 2**25
 _ROW_CHUNK_SIZE: int = 512
 
 # Opt-in galaxy-list layout (``kernel_layout="galaxy_list"``): the per-galaxy
-# normaliser runs over the real galaxies in at most _GALAXY_CHUNKS_MAX chunks of
-# at least _GALAXY_CHUNK_MIN galaxies, evaluated one after another, so its node
-# arrays are (chunk x 24) rather than (N_galaxies x 24).  Each galaxy executes
-# the same arithmetic in any chunk.
+# normaliser runs over the real galaxies chunk by chunk, so its node arrays are
+# (chunk x 24) rather than (N_galaxies x 24).  Each galaxy executes the same
+# arithmetic in any chunk.  _GALAXY_MAP picks how the chunks run:
+#   "unrolled": at most _GALAXY_CHUNKS_MAX chunks of at least _GALAXY_CHUNK_MIN
+#     galaxies, chained top-level computations (multi-threaded on CPU);
+#   "loop": a lax.map over chunks of _GALAXY_LOOP_CHUNK galaxies, whose peak
+#     memory is one chunk's on every backend;
+#   "auto" (default): "unrolled" on CPU, "loop" elsewhere.  On GPU, XLA keeps
+#     the unrolled chunks live together: on 151 million galaxies the build
+#     needed 32.6 GB of temporaries against 1.1 GB for the padded layout.
 _GALAXY_CHUNK_MIN: int = 2**16
 _GALAXY_CHUNKS_MAX: int = 32
+_GALAXY_LOOP_CHUNK: int = 2**20
+_GALAXY_MAP: str = "auto"
 
 
 class CatalogKernelState(NamedTuple):
@@ -457,9 +465,18 @@ def _map_galaxy_chunks(fn, zs, sig):
     order and only
     one chunk's node arrays need be live at a time.  (``lax.optimization_barrier``
     would say this directly, but in jax 0.4.34 it has no batching or
-    differentiation rule.)
+    differentiation rule.)  On GPU that order does not bound the live memory,
+    so :data:`_GALAXY_MAP` runs the chunks as a loop there
+    (:func:`_loop_galaxy_chunks`).
     """
 
+    mode = _GALAXY_MAP
+    if mode == "auto":
+        mode = "unrolled" if jax.default_backend() == "cpu" else "loop"
+    if mode == "loop":
+        return _loop_galaxy_chunks(fn, zs, sig)
+    if mode != "unrolled":
+        raise ValueError(f"_GALAXY_MAP must be 'auto', 'unrolled' or 'loop', not {mode!r}")
     n = int(zs.shape[0])
     n_chunks = min(_GALAXY_CHUNKS_MAX, -(-n // _GALAXY_CHUNK_MIN))
     if n_chunks <= 1:
@@ -474,6 +491,26 @@ def _map_galaxy_chunks(fn, zs, sig):
             z_k, s_k = z_k + after, s_k + after
         outs.append(fn(z_k, s_k))
     return tuple(jnp.concatenate(parts) for parts in zip(*outs))
+
+
+def _loop_galaxy_chunks(fn, zs, sig):
+    """``fn`` over flat per-galaxy arrays as a ``lax.map`` over fixed chunks.
+
+    The last chunk is padded with a finite placeholder galaxy (z 0.5, sigma 1)
+    whose outputs are dropped, so every real galaxy runs the same arithmetic
+    as in one call of ``fn``.
+    """
+
+    n = int(zs.shape[0])
+    chunk = min(_GALAXY_LOOP_CHUNK, n)
+    if n <= chunk:
+        return fn(zs, sig)
+    n_pad = (-n) % chunk
+    if n_pad:
+        zs = jnp.concatenate([zs, jnp.full((n_pad,), 0.5, dtype=zs.dtype)])
+        sig = jnp.concatenate([sig, jnp.ones((n_pad,), dtype=sig.dtype)])
+    out = lax.map(lambda a: fn(*a), (zs.reshape(-1, chunk), sig.reshape(-1, chunk)))
+    return tuple(o.reshape(-1)[:n] for o in out)
 
 
 def _galaxy_list_log_kernel_norms(catalog, sigma_kde, log_g_grid, z_depth):
