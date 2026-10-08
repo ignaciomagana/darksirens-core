@@ -484,10 +484,24 @@ register_model(
     # lambda0/lambda1 are 96% anti-correlated, so the median pair implies a
     # second-peak weight 1 - l0 - l1 = 0.054 against its own marginal median
     # of 0.044 -- both well inside the simplex, and far from the old 1/3.
+    #
+    # mu_chi and sigma_chi are NOT release medians.  The release run models
+    # the spin MAGNITUDE (iid_spin_magnitude_gaussian: mu_chi 0.0633,
+    # sigma_chi 0.3654), while this model's spin component is a truncated
+    # Gaussian in the EFFECTIVE spin.  Carrying the magnitude pair over made
+    # the effective-spin distribution more than three times too wide: on the 259
+    # GWTC-5 BBH events a spectral H0 grid peaks 107 to 110 lower in log
+    # likelihood than at the values below, and the fixed-population H0 moves
+    # by about -1.7 km/s/Mpc.  (0.04, 0.10) is the best point of a
+    # 30-point spectral grid over mu_chi 0 to 0.10 and sigma_chi 0.06 to 0.17
+    # with every other parameter at the medians above; it is a fit made here,
+    # to two decimals, not a published number.  To reproduce results made with
+    # the old pair, pass the full vector as an explicit fixed={...} mapping
+    # with mu_chi 0.0633 and sigma_chi 0.3654.
     fiducial=(
         1.4816, 5.4187, 37.451, 9.9109, 0.7841, 32.3273, 5.7263,
         4.4856, 3.5302, 0.4004, 0.5457, 1.0438, 3.4633,
-        4.8128, 0.0633, 0.3654, 2.5439,
+        4.8128, 0.04, 0.10, 2.5439,
     ),
 )(GWTC5FiducialBPL2PeaksPopulationModel)
 
