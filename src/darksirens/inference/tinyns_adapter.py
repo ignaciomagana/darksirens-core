@@ -178,6 +178,14 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
     import tinyns
     from tinyns import NestedSampler
 
+    from darksirens.inference.tinyns_v1_adapter import is_tinyns_v1, run_tinyns_v1
+
+    if is_tinyns_v1(tinyns):
+        # TinyNS 1.x: a new API with none of the 0.x options below.
+        return run_tinyns_v1(
+            likelihood, prior_transform, ndim, opts, loglike_form=tinyns_loglike
+        )
+
     config = build_tinyns_config(opts)
     require_tinyns_for_config(config, tinyns)
     loglike, loglike_form = tinyns_loglike(likelihood, tinyns)
