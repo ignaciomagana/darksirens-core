@@ -147,6 +147,7 @@ def validate_catalog(
     catalog: GalaxyCatalog,
     *,
     require_sorted: bool = False,
+    z_max: float | None = None,
 ) -> GalaxyCatalog:
     """Validate the standardized ordinary-catalog contract on the host.
 
@@ -158,6 +159,14 @@ def validate_catalog(
     and ``nan * 0`` or ``inf * 0`` is NaN for the whole row.  The arrays are
     read in row blocks, so the check's own memory does not grow with the
     catalog.
+
+    ``z_max``, when given, is the upper edge of the redshift grid the catalog
+    will be evaluated on: a real galaxy stored beyond it raises.  Each
+    galaxy's kernel is truncated to the grid and renormalised, so a galaxy
+    beyond the edge keeps only a tail, and once that tail underflows the
+    galaxy's weight overflows the row's kernel sum and the row loses every
+    host.  A galaxy at or below the edge is accepted whatever its width, and
+    padding is not read.
     """
 
     z = np.asarray(catalog.zgals)
@@ -191,12 +200,22 @@ def validate_catalog(
     check_sorted = require_sorted and z.shape[1] > 1
     bad_z = bad_dz = bad_w = unsorted = False
     n_bad = 0
+    n_beyond, first_beyond, z_beyond = 0, None, -np.inf
     for rows in row_blocks(z.shape[0], z.shape[1]):
         real = cols < ng[rows, None]
         z_rows = z[rows]
         finite = np.isfinite(z_rows)
         bad_z = bad_z or not bool(np.all(finite[real]))
         n_bad += int(finite.size - np.count_nonzero(finite))
+        if z_max is not None:
+            beyond = real & (z_rows > z_max)
+            n_here = int(np.count_nonzero(beyond))
+            if n_here:
+                if first_beyond is None:
+                    row, slot = np.argwhere(beyond)[0]
+                    first_beyond = (int(row) + (rows.start or 0), int(slot))
+                n_beyond += n_here
+                z_beyond = max(z_beyond, float(z_rows[beyond].max()))
         dz_real = dz[rows][real]
         bad_dz = bad_dz or bool(np.any(~np.isfinite(dz_real)) or np.any(dz_real < 0.0))
         w_real = w[rows][real]
@@ -211,6 +230,18 @@ def validate_catalog(
         raise ValueError(
             f"zgals holds {n_bad} non-finite value(s) in its padding (slots at or "
             "beyond ngals); pad redshifts with a finite number such as 100.0"
+        )
+    if n_beyond:
+        row, slot = first_beyond
+        raise ValueError(
+            f"{n_beyond} real {'galaxy lies' if n_beyond == 1 else 'galaxies lie'} "
+            f"beyond the redshift grid, which ends at "
+            f"z = {z_max:.6g} (first: row {row}, slot {slot}, z = "
+            f"{float(z[row, slot]):.6g}; largest z = {z_beyond:.6g}). Such a galaxy "
+            "has no host redshift on the grid and can remove every host of its sky "
+            "row; drop these entries from the catalog (keep the real galaxies in "
+            "the first ngals slots of the row), or set DARKSIRENS_ZMAX above them "
+            "before darksirens is imported"
         )
     if bad_dz:
         raise ValueError("real-galaxy redshift errors must be finite and >= 0")

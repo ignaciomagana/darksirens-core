@@ -51,14 +51,16 @@ def compact_catalog(
     sample_pixels,
     *,
     required_pixels=None,
+    z_max=None,
 ) -> CatalogSampleView:
     """Gather a catalog onto one sample set without dense global-pixel lookup.
 
     Sparse global ids are dictionary/search keys on the host; allocation scales
     with the number of retained rows, never with ``max(global_pixel)``.
+    ``z_max`` is passed to :func:`validate_catalog`.
     """
 
-    validate_catalog(catalog)
+    validate_catalog(catalog, z_max=z_max)
     keep = unique_inference_pixels(sample_pixels, required_pixels=required_pixels)
     rows = _source_rows_for_pixels(catalog, keep)
     compact = GalaxyCatalog(
@@ -81,10 +83,15 @@ def compact_pe_selection_catalog(
     pixels_selection,
     *,
     required_pixels=None,
+    z_max=None,
 ) -> CatalogPairViews:
-    """Build one union catalog shared by PE and selection samples."""
+    """Build one union catalog shared by PE and selection samples.
 
-    validate_catalog(catalog)
+    ``z_max`` is passed to :func:`validate_catalog`: the upper edge of the
+    redshift grid, beyond which a real galaxy of any row is refused.
+    """
+
+    validate_catalog(catalog, z_max=z_max)
     keep = unique_inference_pixels(
         pixels_pe, pixels_selection, required_pixels=required_pixels
     )

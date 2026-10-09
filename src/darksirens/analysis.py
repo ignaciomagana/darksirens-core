@@ -1518,6 +1518,14 @@ def model(
         )
         catalog_priors = _INCOMPLETE_CATALOG_PRIORS
     else:
+        if host_mass != "count" and catalog is None:
+            raise ValueError(
+                "host_mass='weight' requires a galaxy catalog: it sets a sky row's "
+                "host mass from the weights of the row's galaxies, and this "
+                "analysis has no catalog. Pass catalog=... with "
+                "catalog_sky_weighting='field' and completeness='complete', or "
+                "leave host_mass at 'count'"
+            )
         if host_mass != "count":
             raise ValueError(
                 "host_mass='weight' applies only to catalog_sky_weighting='field' "

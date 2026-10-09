@@ -29,6 +29,7 @@ from darksirens.catalog.compact import compact_pe_selection_catalog
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.redshift import (
+    _ZMAX,
     PinnedCatalogKernel,
     build_pinned_catalog_kernel,
     check_pinned_catalog_kernel,
@@ -1075,7 +1076,9 @@ def _bind_mixture(analysis, events, injections):
         global_sel = ang2pix_ring(
             store.nside, injections.columns["ra"], injections.columns["dec"]
         )
-        views = compact_pe_selection_catalog(store.catalog, global_pe, global_sel)
+        views = compact_pe_selection_catalog(
+            store.catalog, global_pe, global_sel, z_max=_ZMAX
+        )
         compact = _jax_catalog(views.catalog)
         compact_weight = full_weight = None
         if weighted:
@@ -1329,8 +1332,10 @@ def bind_analysis(
             injections.columns["ra"],
             injections.columns["dec"],
         )
+        # z_max: a real galaxy beyond the redshift grid, in any row of the
+        # store, is refused here (validate_catalog says why).
         views = compact_pe_selection_catalog(
-            catalog_store.catalog, global_pe, global_sel
+            catalog_store.catalog, global_pe, global_sel, z_max=_ZMAX
         )
         catalog = _jax_catalog(views.catalog)
         # Opt-in (kernel_layout="galaxy_list", darksirens.catalog.settings):

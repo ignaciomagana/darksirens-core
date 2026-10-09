@@ -305,8 +305,9 @@ def test_the_binding_carries_the_row_sums_of_both_views():
         (dict(catalog=A, completeness="selection", selection=SEL,
               catalog_sky_weighting="conditional"),
          "applies only to catalog_sky_weighting='field'"),
+        # No catalog at all: the message says so, not the sky weighting.
         (dict(catalog=None, completeness=None, catalog_sky_weighting="conditional"),
-         "applies only to catalog_sky_weighting='field'"),
+         "requires a galaxy catalog.*this analysis has no catalog"),
     ],
 )
 def test_the_weighted_host_mass_is_refused_where_it_is_not_implemented(kwargs, message):
