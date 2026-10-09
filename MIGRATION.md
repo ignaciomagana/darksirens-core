@@ -879,8 +879,10 @@ galaxy placed at z = 4:
   (`log_kw_eff_rowmax`): the galaxy's weight is the reciprocal of its
   vanishing in-grid mass, and once it exceeds the others by about e^745 they
   underflow to zero.
-- **Below zero.** A galaxy at z = -0.1 or -0.3 with width 0.01 gave `-inf`
-  with both completeness models. Here the normaliser itself fails: its
+- **Below zero.** A galaxy at z = -0.1 with width 0.01 gave `-inf` with
+  both completeness models; at z = -0.3 to -1 it gave `-inf` for a complete
+  catalog and `-inf` or the same finite shift as above with the selection
+  completeness. Here the normaliser itself fails: its
   quadrature nodes are clipped to z = 0, where the galaxy measure vanishes.
   Against a dense quadrature of the same integrand it is right to its usual
   7e-3 down to 6.0 widths below zero, off by 0.03 at 6.25, 0.5 at 6.75 and
