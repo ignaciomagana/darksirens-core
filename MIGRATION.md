@@ -894,7 +894,7 @@ Two things held the extra memory, and both are gone.
 | bytes per slot at bind, CPU | before | after |
 | --- | --- | --- |
 | peak, touched rows a multiple of 512 | 76.0 to 76.9 | 52.1 to 53.0 |
-| peak, touched rows not a multiple of 512 | 106.8 to 107.4 | 52.7 to 53.4 |
+| peak, touched rows not a multiple of 512 | 106.5 to 107.4 | 52.3 to 53.4 |
 | resident after bind | 40.3 to 41.3 | 40.3 to 41.4 |
 
 The remaining 12 bytes per slot above the resident 40 are one chunk's
@@ -902,27 +902,46 @@ temporaries, not a per-slot cost: on CPU a chunk needs about 1,130 bytes for
 each of its 512 x N_max slots (the 24 quadrature nodes of every slot), which
 at nside 64 is 1/96 of the catalog. On GPU the consumer measured the chunk's
 share at 0.1 to 0.2 GiB. The pin alone took 49.7 s before and 33.7 s after at
-50 million galaxies (same node, 32 cores). The per-proposal state, which a
+50 million galaxies, 172 and 119 s at 100 million, 195 and 125 s at 200
+million (each pair on one node, 32 cores). The per-proposal state, which a
 run without the pin builds on every call, peaks 24 bytes per slot lower when
-the rows are not a multiple of 512 (86 to 62 at 50 million galaxies) and is
-unchanged otherwise, in memory and in time.
+the rows are not a multiple of 512 (86 to 62 at 50 million galaxies, 84 to 60
+at 100 million; its outputs are still reassembled once) and is unchanged
+otherwise, in memory and in time.
 
 Not changed: a view of at most 2^25 slots is still built in one pass, whose
 temporaries are the same 1,130 bytes per slot on CPU (37 GB just under the
-threshold); and with `kernel_layout="galaxy_list"` on an incomplete catalog
-the normaliser of the real galaxies is still evaluated whole before the
-chunks (8 bytes per slot, 16 with a survey depth).
+threshold); and with `kernel_layout="galaxy_list"` (the default for an
+incomplete catalog) the normaliser of the real galaxies is still evaluated
+whole before the chunks. With the list attached, the pin build alone peaked
+at 80 bytes per slot above the catalog before and 66 after (rows a multiple
+of 512), 92 and 68 otherwise (50 million galaxies, CPU, no survey depth).
 
 **Numerics.** No likelihood value changes. Every row runs the same
-arithmetic in any chunk. The pin's leaves were compared by digest before and
-after on the 50, 100 and 200 million galaxy catalogs with aligned and
-unaligned rows, and the log-likelihood on those bindings at eight H0 values:
-all identical. The log-likelihood and its H0 derivative were compared as hex
-floats before and after on 20 configurations of the mock (complete, count
-ratio and selection completion; conditional and field weighting; one and two
-catalogs; `host_mass="weight"`; pin on and off; kernel window on and off;
-padded and galaxy-list layouts), with the library's chunk constants and with
-the chunked schedule forced at four chunk sizes: the output files are
-byte-identical. The tests compare the chunked state and the chunked pin with
-the unchunked ones bit for bit at five chunk sizes (tails of four rows and of
-one row, an exact multiple, exactly one chunk, fewer rows than a chunk).
+arithmetic in any chunk. Measured on CPU (AMD EPYC 7542), before and after:
+
+- The pin's leaves, by digest, on the 50, 100 and 200 million galaxy
+  catalogs with 49,152 and 49,000 rows, and on the bindings with 49,152 and
+  48,185 touched rows: identical. The log-likelihood of those bindings at
+  eight H0 values: identical. With a galaxy list attached (50 million
+  galaxies): identical.
+- The log-likelihood at three H0 values and its H0 derivative, as hex
+  floats, on 20 configurations of the mock (complete, count ratio and
+  selection completion; conditional and field weighting; one and two
+  catalogs; `host_mass="weight"`; pin on and off; kernel window on and off;
+  padded and galaxy-list layouts; every eighth PE sample of each event, soft
+  selection guard), with the library's chunk constants and with the chunked
+  schedule forced at 500, 512, 3,072 and 4,096 rows per chunk: the five
+  output files are byte-identical.
+
+The tests compare the chunks sliced in the loop with the schedule they
+replace (kept in the test as the reference), state and pin, bit for bit, at
+three chunk sizes in both layouts with and without a survey depth. They also
+compare the chunked state and pin with the unchunked ones at five chunk sizes
+(tails of four rows and of one row, an exact multiple, exactly one chunk,
+fewer rows than a chunk): bit for bit, except with a galaxy list and a survey
+depth, where the comparison is to 1e-14. There a row's mass below the depth
+can come out one ulp apart when the row function is compiled as a loop body
+instead of one vmap (6.7e-16 relative, measured). The chunked schedule had
+that property before this change, and it does not separate before from
+after.

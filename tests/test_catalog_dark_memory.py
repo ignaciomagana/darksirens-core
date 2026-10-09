@@ -329,6 +329,13 @@ def test_map_rows_in_chunks_is_the_unchunked_map(monkeypatch, chunk):
             assert _same_bits(x, y)
 
 
+def _same_rows(a, b, exact, name):
+    if exact:
+        assert _same_bits(a, b), name
+    else:
+        np.testing.assert_allclose(a, b, rtol=1e-14, atol=0.0, err_msg=name)
+
+
 @pytest.mark.parametrize("z_depth", [None, 0.25])
 @pytest.mark.parametrize("layout", ["padded", "galaxy_list"])
 @pytest.mark.parametrize("chunk", ROW_CHUNKS)
@@ -339,6 +346,14 @@ def test_row_chunked_state_and_pin_are_the_unchunked_ones(monkeypatch, chunk, la
     params = CatalogParameters(n0=1.0, delta=jnp.float64(0.4),
                                sigma_kde=jnp.float64(0.006), z_depth=z_depth)
     ref = COSMO._replace(H0=jnp.float64(KERNEL_PIN_H0_REF))
+    # Bit for bit, except with a galaxy list and a survey depth: there the
+    # row's mass below the depth (a sum over the row) comes out one ulp apart
+    # on some CPUs when the row function is compiled as a loop body instead of
+    # one vmap (6.7e-16 relative on log_depth_mass on an AVX2 machine, which
+    # log_kw inherits). The chunked schedule had this property before the
+    # chunks were sliced in the loop; the test below pins the two schedules
+    # to each other exactly.
+    exact = not (layout == "galaxy_list" and z_depth is not None)
     # Fresh functions: the monkeypatched constants are read when they trace.
     whole = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
     whole_pin = build_pinned_catalog_kernel(COSMO, params, catalog)
@@ -346,10 +361,66 @@ def test_row_chunked_state_and_pin_are_the_unchunked_ones(monkeypatch, chunk, la
     state = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
     pin = build_pinned_catalog_kernel(COSMO, params, catalog)
     for name, value in _kernel_leaves(state).items():
-        assert _same_bits(value, getattr(whole, name)), name
+        _same_rows(value, getattr(whole, name), exact, name)
     assert pin.catalog_digest == whole_pin.catalog_digest
     for name in _redshift._PIN_LEAVES:
-        assert _same_bits(getattr(pin, name), getattr(whole_pin, name)), name
+        _same_rows(getattr(pin, name), getattr(whole_pin, name), exact, name)
+
+
+def _padded_copy_map_rows(row_fn, args):
+    """The row-chunked schedule before the chunks were sliced in the loop.
+
+    Kept as the reference: the arguments are padded with zero rows to a
+    multiple of the chunk (a copy), reshaped and mapped, and the outputs cut.
+    """
+    n_rows = args[0].shape[0]
+    n_max = args[0].shape[1] if args[0].ndim > 1 else 1
+    if n_rows * n_max <= _redshift._ROW_CHUNK_AUTO_THRESHOLD:
+        return jax.vmap(row_fn)(*args)
+    chunk = min(_redshift._ROW_CHUNK_SIZE, n_rows)
+    n_pad = (-n_rows) % chunk
+
+    def prep(a):
+        if n_pad:
+            pad = jnp.zeros((n_pad,) + a.shape[1:], dtype=a.dtype)
+            a = jnp.concatenate([a, pad], axis=0)
+        return a.reshape((n_rows + n_pad) // chunk, chunk, *a.shape[1:])
+
+    out = jax.lax.map(lambda ch: jax.vmap(row_fn)(*ch), tuple(prep(a) for a in args))
+    return tuple(a.reshape(-1, *a.shape[2:])[:n_rows] for a in out)
+
+
+def _whole_state_pin_leaves(cosmo, params, catalog):
+    """The pin's leaves as they were built: those of the whole per-proposal state."""
+    state = build_catalog_kernel_state(cosmo, params, catalog)
+    return (state.log_kw_eff, state.log_kw_eff_rowmax, state.inv_sig_eff,
+            state.row_empty, state.log_depth_mass), state.layout_ok
+
+
+@pytest.mark.parametrize("z_depth", [None, 0.25])
+@pytest.mark.parametrize("layout", ["padded", "galaxy_list"])
+@pytest.mark.parametrize("chunk", (6, 13, 8))
+def test_row_chunks_are_the_padded_copy_schedule_bit_for_bit(monkeypatch, chunk, layout, z_depth):
+    # The memory fix changes no value: the state and the pin of the chunks
+    # sliced in the loop against the schedule they replace, in every layout.
+    catalog = _galaxies()
+    if layout == "galaxy_list":
+        catalog = with_galaxy_index(catalog)
+    params = CatalogParameters(n0=1.0, delta=jnp.float64(0.4),
+                               sigma_kde=jnp.float64(0.006), z_depth=z_depth)
+    ref = COSMO._replace(H0=jnp.float64(KERNEL_PIN_H0_REF))
+    _row_chunked(monkeypatch, chunk)
+    state = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
+    pin = build_pinned_catalog_kernel(COSMO, params, catalog)
+    monkeypatch.setattr(_redshift, "_map_rows", _padded_copy_map_rows)
+    monkeypatch.setattr(_redshift, "_pinned_kernel_leaves", _whole_state_pin_leaves)
+    before = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
+    pin_before = build_pinned_catalog_kernel(COSMO, params, catalog)
+    for name, value in _kernel_leaves(state).items():
+        assert _same_bits(value, getattr(before, name)), name
+    assert pin.catalog_digest == pin_before.catalog_digest
+    for name in _redshift._PIN_LEAVES:
+        assert _same_bits(getattr(pin, name), getattr(pin_before, name)), name
 
 
 @pytest.mark.parametrize("chunk", (6, 8))
