@@ -340,28 +340,45 @@ def _row_kernel_state(
     return log_kw, sig_eff, log_depth_mass
 
 
+def _row_chunks(n_rows: int) -> tuple[int, int]:
+    """Rows per chunk and number of chunks of the row-chunked schedule."""
+
+    chunk = min(_ROW_CHUNK_SIZE, n_rows)
+    return chunk, -(-n_rows // chunk)
+
+
 def _map_rows(row_fn, args: tuple):
-    """Map row-local kernel construction with bounded peak memory."""
+    """Map row-local kernel construction with bounded peak memory.
+
+    Above the automatic threshold the rows run in chunks of
+    ``_ROW_CHUNK_SIZE`` under one ``lax.map``.  Each chunk is sliced from
+    ``args`` inside the loop, so no argument is copied, reshaped or padded.
+    When the row count is not a multiple of the chunk, the last chunk is
+    moved back to end at the last row: the rows it shares with the chunk
+    before it are computed twice and dropped (only the outputs are
+    reassembled).
+    """
 
     n_rows = args[0].shape[0]
     n_max = args[0].shape[1] if args[0].ndim > 1 else 1
     if n_rows * n_max <= _ROW_CHUNK_AUTO_THRESHOLD:
         return vmap(row_fn)(*args)
 
-    chunk = min(_ROW_CHUNK_SIZE, n_rows)
-    n_pad = (-n_rows) % chunk
-
-    def prep(a):
-        if n_pad:
-            pad = jnp.zeros((n_pad,) + a.shape[1:], dtype=a.dtype)
-            a = jnp.concatenate([a, pad], axis=0)
-        return a.reshape((n_rows + n_pad) // chunk, chunk, *a.shape[1:])
-
-    chunked = tuple(prep(a) for a in args)
-    out = lax.map(lambda ch: vmap(row_fn)(*ch), chunked)
+    chunk, n_chunks = _row_chunks(n_rows)
+    n_tail = n_rows % chunk
+    starts = jnp.minimum(jnp.arange(n_chunks) * chunk, n_rows - chunk)
+    out = lax.map(
+        lambda start: vmap(row_fn)(
+            *(lax.dynamic_slice_in_dim(a, start, chunk) for a in args)
+        ),
+        starts,
+    )
 
     def post(a):
-        return a.reshape(-1, *a.shape[2:])[:n_rows]
+        if not n_tail:
+            return a.reshape(-1, *a.shape[2:])
+        full = a[:-1].reshape(-1, *a.shape[2:])
+        return jnp.concatenate([full, a[-1, chunk - n_tail :]])
 
     if isinstance(out, tuple):
         return tuple(post(a) for a in out)
@@ -549,6 +566,52 @@ def _galaxy_list_log_kernel_norms(catalog, sigma_kde, log_g_grid, z_depth):
     return padded[0], (padded[1] if z_depth is not None else None), ok
 
 
+def _kernel_rows(params, catalog, log_g_grid):
+    """The kernel state's row function, its row-aligned arguments, the list's verdict.
+
+    ``row_fn(*row)`` is :func:`_row_kernel_state` of one row of ``args``.  A
+    catalog that carries a galaxy list has its normaliser(s) evaluated here,
+    on the real galaxies, and passed row by row; the verdict of
+    :func:`_galaxy_index_ok` is ``None`` without a list.
+    """
+
+    z, dz, w, ng = catalog.zgals, catalog.dzgals, catalog.wgals, catalog.ngals
+    if getattr(catalog, "galaxy_index", None) is None:
+        return (
+            lambda zs, dzs, ws, ngal: _row_kernel_state(
+                zs,
+                dzs,
+                ws,
+                ngal,
+                params.sigma_kde,
+                log_g_grid,
+                params.z_depth,
+            ),
+            (z, dz, w, ng),
+            None,
+        )
+    log_Z, log_Z_depth, layout_ok = _galaxy_list_log_kernel_norms(
+        catalog, params.sigma_kde, log_g_grid, params.z_depth
+    )
+    if log_Z_depth is None:
+        return (
+            lambda zs, dzs, ws, ngal, lz: _row_kernel_state(
+                zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
+                params.z_depth, log_Z=lz,
+            ),
+            (z, dz, w, ng, log_Z),
+            layout_ok,
+        )
+    return (
+        lambda zs, dzs, ws, ngal, lz, lzd: _row_kernel_state(
+            zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
+            params.z_depth, log_Z=lz, log_Z_depth=lzd,
+        ),
+        (z, dz, w, ng, log_Z, log_Z_depth),
+        layout_ok,
+    )
+
+
 def build_catalog_kernel_state(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -565,41 +628,8 @@ def build_catalog_kernel_state(
     """
 
     log_g_grid = log_galaxy_measure_grid(cosmo, params)
-    z, dz, w, ng = catalog.zgals, catalog.dzgals, catalog.wgals, catalog.ngals
-    layout_ok = None
-    if getattr(catalog, "galaxy_index", None) is None:
-        log_kw, sig_eff, log_depth_mass = _map_rows(
-            lambda zs, dzs, ws, ngal: _row_kernel_state(
-                zs,
-                dzs,
-                ws,
-                ngal,
-                params.sigma_kde,
-                log_g_grid,
-                params.z_depth,
-            ),
-            (z, dz, w, ng),
-        )
-    else:
-        log_Z, log_Z_depth, layout_ok = _galaxy_list_log_kernel_norms(
-            catalog, params.sigma_kde, log_g_grid, params.z_depth
-        )
-        if log_Z_depth is None:
-            log_kw, sig_eff, log_depth_mass = _map_rows(
-                lambda zs, dzs, ws, ngal, lz: _row_kernel_state(
-                    zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
-                    params.z_depth, log_Z=lz,
-                ),
-                (z, dz, w, ng, log_Z),
-            )
-        else:
-            log_kw, sig_eff, log_depth_mass = _map_rows(
-                lambda zs, dzs, ws, ngal, lz, lzd: _row_kernel_state(
-                    zs, dzs, ws, ngal, params.sigma_kde, log_g_grid,
-                    params.z_depth, log_Z=lz, log_Z_depth=lzd,
-                ),
-                (z, dz, w, ng, log_Z, log_Z_depth),
-            )
+    row_fn, args, layout_ok = _kernel_rows(params, catalog, log_g_grid)
+    log_kw, sig_eff, log_depth_mass = _map_rows(row_fn, args)
     row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
     log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1.0e30)
     log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
@@ -928,6 +958,67 @@ def check_pinned_catalog_kernel(
     return digest
 
 
+def _pinned_kernel_leaves(cosmo, params, catalog):
+    """The pin's array leaves at ``cosmo``, and the galaxy list's verdict.
+
+    ``(log_kw_eff, log_kw_eff_rowmax, inv_sig_eff, row_empty,
+    log_depth_mass)`` of :func:`build_catalog_kernel_state`, bit for bit.
+    Above the row-chunk threshold the per-proposal state is not built: its
+    five ``(N_rows, N_max)`` leaves, of which the pin keeps two, would all be
+    live at once.  Each chunk of ``_ROW_CHUNK_SIZE`` rows is sliced from the
+    catalog, taken to the pin's leaves and written into them in place, so the
+    temporaries are one chunk's whatever the catalog's size (a galaxy list's
+    normaliser is still evaluated whole, :func:`_galaxy_list_log_kernel_norms`).
+    When the row count is not a multiple of the chunk, the last chunk is
+    moved back to end at the last row and rewrites the rows it shares with
+    the chunk before it with the same values.  The window's verdict is not
+    computed there: the pin does not keep it.
+    """
+
+    n_rows, n_max = (int(n) for n in catalog.zgals.shape)
+    if n_rows * n_max <= _ROW_CHUNK_AUTO_THRESHOLD:
+        state = build_catalog_kernel_state(cosmo, params, catalog)
+        return (
+            state.log_kw_eff,
+            state.log_kw_eff_rowmax,
+            state.inv_sig_eff,
+            state.row_empty,
+            state.log_depth_mass,
+        ), state.layout_ok
+
+    log_g_grid = log_galaxy_measure_grid(cosmo, params)
+    row_fn, args, layout_ok = _kernel_rows(params, catalog, log_g_grid)
+    chunk, n_chunks = _row_chunks(n_rows)
+
+    def chunk_leaves(start):
+        log_kw, sig_eff, log_depth_mass = vmap(row_fn)(
+            *(lax.dynamic_slice_in_dim(a, start, chunk) for a in args)
+        )
+        row_empty = ~jnp.any(jnp.isfinite(log_kw), axis=-1)
+        log_kw_safe = jnp.where(jnp.isfinite(log_kw), log_kw, -1.0e30)
+        log_kw_eff = _fused_log_kw_eff(log_kw_safe, sig_eff)
+        return (
+            log_kw_eff,
+            _log_kw_eff_rowmax(log_kw_eff),
+            _inv_sig_eff(log_kw_eff, sig_eff),
+            row_empty,
+            log_depth_mass,
+        )
+
+    def write_chunk(k, leaves):
+        start = jnp.minimum(k * chunk, n_rows - chunk)
+        return tuple(
+            lax.dynamic_update_slice_in_dim(leaf, part, start, axis=0)
+            for leaf, part in zip(leaves, chunk_leaves(start))
+        )
+
+    empty = tuple(
+        jnp.zeros((n_rows,) + part.shape[1:], dtype=part.dtype)
+        for part in jax.eval_shape(chunk_leaves, 0)
+    )
+    return lax.fori_loop(0, n_chunks, write_chunk, empty), layout_ok
+
+
 def build_pinned_catalog_kernel(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -939,9 +1030,11 @@ def build_pinned_catalog_kernel(
 
     ``cosmo`` and ``params`` must carry the run's fixed ``Om0``, ``w0``,
     ``wa``, ``delta``, ``sigma_kde`` and ``z_depth``; ``cosmo.H0`` is replaced
-    by the reference.  The state is :func:`build_catalog_kernel_state`
-    itself, the per-proposal builder, run once under one jit with the catalog
-    and the distance table as arguments.  Call it outside any trace, with
+    by the reference.  The state is :func:`build_catalog_kernel_state`'s,
+    the per-proposal builder's, run once under one jit with the catalog and
+    the distance table as arguments; above the row-chunk threshold only the
+    pin's leaves are built, chunk by chunk (:func:`_pinned_kernel_leaves`).
+    Call it outside any trace, with
     concrete catalog arrays: the pin's ``catalog_digest``
     (:func:`catalog_kernel_pin_digest`) is computed here, on the host.
     """
@@ -951,26 +1044,27 @@ def build_pinned_catalog_kernel(
     )
 
     @threads_distance_table()
-    def _state(catalog, distance_table=None):
-        return build_catalog_kernel_state(ref, params, catalog)
+    def _leaves(catalog, distance_table=None):
+        return _pinned_kernel_leaves(ref, params, catalog)
 
     probe_rows = _spread_probe_rows(catalog.ngals, n_probe)
     catalog_digest = catalog_kernel_pin_digest(
         ref, params, catalog, H0_ref=KERNEL_PIN_H0_REF, probe_rows=probe_rows
     )
-    state = _state(catalog)
-    if state.layout_ok is not None and not bool(state.layout_ok):
+    leaves, layout_ok = _leaves(catalog)
+    if layout_ok is not None and not bool(layout_ok):
         raise ValueError(
             "the catalog's galaxy list does not match its ngals: attach it with "
             "with_galaxy_index to the catalog view the pin is built from"
         )
+    log_kw_eff, log_kw_eff_rowmax, inv_sig_eff, row_empty, log_depth_mass = leaves
     return PinnedCatalogKernel(
         H0_ref=ref.H0,
-        log_kw_eff=state.log_kw_eff,
-        log_kw_eff_rowmax=state.log_kw_eff_rowmax,
-        inv_sig_eff=state.inv_sig_eff,
-        row_empty=state.row_empty,
-        log_depth_mass=state.log_depth_mass,
+        log_kw_eff=log_kw_eff,
+        log_kw_eff_rowmax=log_kw_eff_rowmax,
+        inv_sig_eff=inv_sig_eff,
+        row_empty=row_empty,
+        log_depth_mass=log_depth_mass,
         probe_rows=jnp.asarray(probe_rows),
         catalog_digest=catalog_digest,
     )
