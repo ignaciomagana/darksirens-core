@@ -297,6 +297,83 @@ def test_galaxy_list_schedule_is_validated(monkeypatch):
         build_catalog_kernel_state(COSMO, params, listed)
 
 
+# Row chunks of a 40-row catalog: a tail of four rows, a tail of one row, an
+# exact multiple, exactly one chunk, and fewer rows than one chunk.
+ROW_CHUNKS = (6, 13, 8, 40, 64)
+
+
+def _row_chunked(monkeypatch, chunk):
+    monkeypatch.setattr(_redshift, "_ROW_CHUNK_AUTO_THRESHOLD", 16)
+    monkeypatch.setattr(_redshift, "_ROW_CHUNK_SIZE", chunk)
+
+
+@pytest.mark.parametrize("chunk", ROW_CHUNKS)
+def test_map_rows_in_chunks_is_the_unchunked_map(monkeypatch, chunk):
+    rng = np.random.default_rng(5)
+    a = jnp.asarray(rng.normal(size=(40, 9)))
+    b = jnp.asarray(rng.normal(size=(40,)))
+    c = jnp.asarray(rng.normal(size=(40, 9, 2)))
+
+    def one(x, y, t):
+        return jnp.sum(jnp.exp(x) * y) + jnp.sum(t)
+
+    def several(x, y, t):
+        return jnp.cumsum(x) * y, jnp.max(t, axis=0), y * y
+
+    for row_fn in (one, several):
+        whole = jax.jit(lambda *args: _redshift._map_rows(row_fn, args))(a, b, c)
+        with monkeypatch.context() as patch:
+            _row_chunked(patch, chunk)
+            chunked = jax.jit(lambda *args: _redshift._map_rows(row_fn, args))(a, b, c)
+        for x, y in zip(jax.tree_util.tree_leaves(chunked), jax.tree_util.tree_leaves(whole)):
+            assert _same_bits(x, y)
+
+
+@pytest.mark.parametrize("z_depth", [None, 0.25])
+@pytest.mark.parametrize("layout", ["padded", "galaxy_list"])
+@pytest.mark.parametrize("chunk", ROW_CHUNKS)
+def test_row_chunked_state_and_pin_are_the_unchunked_ones(monkeypatch, chunk, layout, z_depth):
+    catalog = _galaxies()
+    if layout == "galaxy_list":
+        catalog = with_galaxy_index(catalog)
+    params = CatalogParameters(n0=1.0, delta=jnp.float64(0.4),
+                               sigma_kde=jnp.float64(0.006), z_depth=z_depth)
+    ref = COSMO._replace(H0=jnp.float64(KERNEL_PIN_H0_REF))
+    # Fresh functions: the monkeypatched constants are read when they trace.
+    whole = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
+    whole_pin = build_pinned_catalog_kernel(COSMO, params, catalog)
+    _row_chunked(monkeypatch, chunk)
+    state = jax.jit(lambda c, p, cat: build_catalog_kernel_state(c, p, cat))(ref, params, catalog)
+    pin = build_pinned_catalog_kernel(COSMO, params, catalog)
+    for name, value in _kernel_leaves(state).items():
+        assert _same_bits(value, getattr(whole, name)), name
+    assert pin.catalog_digest == whole_pin.catalog_digest
+    for name in _redshift._PIN_LEAVES:
+        assert _same_bits(getattr(pin, name), getattr(whole_pin, name)), name
+
+
+@pytest.mark.parametrize("chunk", (6, 8))
+def test_row_chunked_state_gradients_and_vmap_are_the_unchunked_ones(monkeypatch, chunk):
+    catalog = _galaxies()
+
+    def total(cat, x):
+        params = CatalogParameters(n0=1.0, delta=x[1], sigma_kde=x[2], z_depth=0.3)
+        state = build_catalog_kernel_state(COSMO._replace(H0=x[0]), params, cat)
+        live = state.log_kw_eff > -1e29
+        return jnp.sum(jnp.where(live, state.log_kw_eff, 0.0)) + jnp.sum(state.log_depth_mass)
+
+    xs = jnp.asarray([[71.0, 0.8, 0.011], [45.0, -0.6, 0.002], [120.0, 1.9, 0.03]])
+    # Fresh functions on both sides: the constants are read when they trace.
+    g_whole = jax.jit(lambda c, x: jax.grad(total, argnums=1)(c, x))(catalog, xs[0])
+    v_whole = jax.jit(lambda c, x: jax.vmap(total, in_axes=(None, 0))(c, x))(catalog, xs)
+    _row_chunked(monkeypatch, chunk)
+    g = jax.jit(lambda c, x: jax.grad(total, argnums=1)(c, x))(catalog, xs[0])
+    v = jax.jit(lambda c, x: jax.vmap(total, in_axes=(None, 0))(c, x))(catalog, xs)
+    assert np.all(np.isfinite(g))
+    np.testing.assert_allclose(g, g_whole, rtol=1e-12)
+    np.testing.assert_allclose(v, v_whole, rtol=1e-14)
+
+
 def test_a_stale_galaxy_list_poisons_the_prior_and_is_refused_by_the_pin():
     catalog = _galaxies()
     stale = with_galaxy_index(catalog)._replace(
