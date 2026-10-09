@@ -151,6 +151,34 @@ Each catalog may have its own completeness, for example
 `completeness=["incomplete", "selection"]` with `selection=[None,
 agn_selection]`, or `"complete"` for a catalog that holds every host.
 
+Galaxy weights (`wgals`) are normalized inside each sky row. Under the field
+weighting the host mass of a row is by default its galaxy count, so the
+weights only decide which galaxy of a row is the host: a row with one heavy
+galaxy and a row with one light galaxy carry the same mass. For a complete
+catalog, `host_mass="weight"` makes the row's host mass the sum of its galaxy
+weights instead, in the row's density and in the catalog's survey-global
+total:
+
+```python
+analysis = ds.model(
+    cosmology=cosmology,
+    population=population,
+    catalog=catalog,
+    catalog_sky_weighting="field",
+    completeness="complete",
+    host_mass="weight",
+)
+```
+
+Every galaxy then hosts in proportion to its own weight (a stellar mass or a
+luminosity, for example) whatever row it is in. The weights must be finite
+and strictly positive, and their unit does not matter. The default
+`host_mass="count"` changes nothing. The option is refused for an incomplete
+catalog (`completeness="incomplete"` or `"selection"`, for any catalog of a
+mixture), because the hosts missing from the catalog would then have to be
+counted by weight too, and for the conditional weighting, which divides each
+row's host mass out.
+
 The same model/inference stack supports catalog-free spectral sirens,
 complete-catalog analyses, bright/counterpart sirens, reusable angular source
 models and sampled population models. The standardized PE/injection and catalog

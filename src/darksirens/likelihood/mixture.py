@@ -18,6 +18,9 @@ the count ratio and the selection curve give ``n_k = N_obs,p p_cat + dN_miss,p``
 with their own missing-host curves, and a complete catalog gives ``n_k =
 N_obs,p p_cat(z | p)`` (no missing hosts, no survey depth) with ``Z_k = sum_p
 N_obs,p``, the frozen reference's field convention of the complete catalog.
+There ``N_obs,p`` is the row's galaxy count; with ``ds.model(...,
+host_mass="weight")`` (opt-in, complete catalogs only) it is the sum of the
+row's galaxy weights ``W_p``, in ``n_k`` and in ``Z_k`` alike.
 
 With per-catalog population blocks (``ds.model(...,
 per_catalog_population=...)``) each catalog's population enters its own
@@ -91,7 +94,10 @@ class CatalogMixtureComponent(NamedTuple):
     ``full_pin`` the catalog kernel pins of the two views (``None`` when the
     catalog's kernel is not pinned, and the full one only with a survey
     depth); ``compact_row_fraction`` and ``full_row_fraction`` the coverage
-    fractions of the two views' rows (``None`` without one).
+    fractions of the two views' rows (``None`` without one);
+    ``compact_row_weight`` and ``full_row_weight`` the sum of each row's real
+    galaxy weights, ``(N_rows,)``, for ``host_mass="weight"`` (``None``
+    otherwise, and the full one only with two or more catalogs).
     """
 
     compact: Any
@@ -102,6 +108,8 @@ class CatalogMixtureComponent(NamedTuple):
     full_pin: Any = None
     compact_row_fraction: Any = None
     full_row_fraction: Any = None
+    compact_row_weight: Any = None
+    full_row_weight: Any = None
 
 
 class CatalogMixtureOperands(NamedTuple):
@@ -147,14 +155,16 @@ def _complete_params(params):
     return params._replace(z_depth=None)
 
 
-def _complete_view(kernels, pin_ok, catalog, log_Z_total):
+def _complete_view(kernels, pin_ok, catalog, log_Z_total, row_weight=None):
     """The field view of a complete catalog: the row counts and ``log Z`` (+ pin poison).
 
     ``log_Z_total`` is ``log sum_p N_obs,p`` over the full sky (``0`` for one
     catalog, where it cancels); a failed pin probe poisons it with NaN, as on
-    the incomplete catalog's row normaliser.
+    the incomplete catalog's row normaliser. ``row_weight`` (``host_mass=
+    "weight"``) is each row's weight sum, the row's host mass in place of its
+    galaxy count.
     """
-    Nobs = jnp.asarray(catalog.ngals, dtype=zgrid.dtype)
+    Nobs = jnp.asarray(catalog.ngals if row_weight is None else row_weight, dtype=zgrid.dtype)
     log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
     log_Z = jnp.asarray(log_Z_total, dtype=zgrid.dtype)
     if pin_ok is not None:
@@ -297,6 +307,7 @@ def field_mixture_log_likelihood(
     pop_model: str,
     completeness: str = "incomplete",
     normalizer: str = "direct",
+    host_mass: str = "count",
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
@@ -335,7 +346,12 @@ def field_mixture_log_likelihood(
     per catalog. ``normalizer`` is the form of each ``Z_k`` (``"direct"`` or
     ``"moments"``, the latter for ``completeness="selection"`` only), one
     value or one per catalog; a complete catalog's ``Z_k`` is its full-sky
-    galaxy count. ``compute_dtype="float32"`` evaluates
+    galaxy count. ``host_mass="weight"`` (every catalog complete) takes each
+    row's host mass and each ``Z_k`` from the components' row weight sums
+    (``compact_row_weight``, ``full_row_weight``) instead of the galaxy
+    counts; it is refused with any other completeness, and so is a component
+    that carries row weight sums under ``host_mass="count"``.
+    ``compute_dtype="float32"`` evaluates
     the per-sample weights, mixture included, in float32 (the per-proposal
     state and every reduction stay float64). ``extension`` is an optional
     :class:`~darksirens.catalog.mixture.MissingHostExtension` with its
@@ -359,6 +375,27 @@ def field_mixture_log_likelihood(
         if norm == "moments" and comp != "selection":
             raise ValueError(
                 "the moments normalizer is exact only for completeness='selection'"
+            )
+    if host_mass not in ("count", "weight"):
+        raise ValueError(f"unsupported host_mass {host_mass!r}")
+    weighted = host_mass == "weight"
+    if weighted and any(comp != "complete" for comp in completeness):
+        raise ValueError(
+            "host_mass='weight' is implemented only for completeness='complete', got "
+            f"completeness={completeness!r}"
+        )
+    for k, component in enumerate(components):
+        has_compact = component.compact_row_weight is not None
+        has_full = component.full_row_weight is not None
+        if weighted and not (has_compact and (has_full or n < 2)):
+            raise ValueError(
+                f"host_mass='weight' needs the row weight sums of catalog {k + 1}; "
+                "bind the analysis with bind_analysis"
+            )
+        if not weighted and (has_compact or has_full):
+            raise ValueError(
+                f"catalog {k + 1} carries row weight sums, but host_mass='count' does "
+                "not read them; bind the analysis with bind_analysis"
             )
     n_members = 0 if extension is None else int(getattr(extension, "n_members", 0) or 0)
     if n_members < 0:
@@ -400,10 +437,13 @@ def field_mixture_log_likelihood(
             kernels, pin_ok = _kernels(
                 cosmology, _complete_params(params), component.compact, component.compact_pin
             )
-            obs = (
-                jnp.sum(jnp.asarray(component.full.ngals, dtype=zgrid.dtype))
-                if n >= 2 else None
-            )
+            if n < 2:
+                obs = None
+            elif weighted:
+                # host_mass="weight": Z_k = sum_p W_p, the catalog's total weight.
+                obs = jnp.sum(jnp.asarray(component.full_row_weight, dtype=zgrid.dtype))
+            else:
+                obs = jnp.sum(jnp.asarray(component.full.ngals, dtype=zgrid.dtype))
             pieces.append(_CatalogPieces(kernels, pin_ok, None, obs, None))
             continue
         kernels, pin_ok = _kernels(cosmology, params, component.compact, component.compact_pin)
@@ -438,7 +478,10 @@ def field_mixture_log_likelihood(
                     jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if n >= 2 else 0.0
                 )
                 views.append(
-                    _complete_view(piece.kernels, piece.pin_ok, component.compact, log_total)
+                    _complete_view(
+                        piece.kernels, piece.pin_ok, component.compact, log_total,
+                        component.compact_row_weight,
+                    )
                 )
                 continue
             curves = piece.curves
@@ -632,6 +675,7 @@ def make_catalog_mixture_target(
         angular_model=analysis.angular_model,
         completeness=redshift.completeness,
         normalizer=redshift.normalizer,
+        host_mass=redshift.host_mass,
     )
     if bound.compute_dtype is not None:
         options["compute_dtype"] = bound.compute_dtype
