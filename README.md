@@ -129,6 +129,50 @@ analysis = ds.model(
 )
 ```
 
+The completeness can also be given directly as a table in redshift, for a
+catalog whose completeness was measured rather than fitted with a luminosity
+function:
+
+```python
+from darksirens.selection.catalog import TabulatedSelection
+
+analysis = ds.model(
+    cosmology=cosmology,
+    population=population,
+    catalog=catalog,  # z_depth = 0.3
+    completeness="selection",
+    selection=TabulatedSelection(
+        z=[0.0, 0.05, 0.1, 0.2, 0.3],
+        completeness=[1.0, 0.92, 0.61, 0.18, 0.04],
+    ),
+)
+```
+
+The nodes must be strictly increasing and need not be evenly spaced; the
+values lie in [0, 1] and the curve is linear between nodes. It is a function
+of the catalog redshift only: `H0` and the other cosmological parameters do
+not enter it, and it has no parameter to sample. The table is never
+extrapolated. It must start at redshift 0 and reach the catalog's `z_depth`,
+or the top of the model's redshift grid (5 by default) for a catalog without
+one, and `ds.model` raises otherwise. The same table can be passed as the
+payload `{"format_version": "darksirens-catalog-selection-1.0", "family":
+"tabulated", "z": [...], "completeness": [...]}`, so the catalog file is the
+same for analyses with different curves. `row_fraction` multiplies it row by
+row, as for the other families.
+
+A catalog with galaxy weights needs care here. In this mode a row's host
+density is `N_obs p_cat(z) + (1 - C(z)) n0 dV/dz`: the catalogued part is the
+row's galaxy count times a weight-normalized kernel, which is the row's
+weighted density divided by the row's mean weight. For hosts weighted by, say,
+stellar mass, the missing part must be in the same unit. The completeness
+supplied must then be the weight-fraction completeness (the fraction of the
+total weight that is in the catalog at each redshift), and `n0` must be the
+reference weight density divided by the catalog's mean weight, with `n0_units`
+stated. Supplying weights together with a count-based `n0` and a count-based
+completeness biases `H0`; a consumer reported -1.5 km/s/Mpc on a toy (not
+verified here). Core divides by each row's own mean weight, so one `n0` is
+exact only where the rows' mean weights equal the catalog's.
+
 Several catalogs combine in a field-weighted mixture: each sample's host
 density is `sum_k w_k n_k(z | p_k) / Z_k`, with each catalog's host mass
 normalized by its survey-global total and stick-breaking weights `fcat_k`:
