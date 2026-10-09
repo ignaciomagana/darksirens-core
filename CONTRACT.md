@@ -198,6 +198,34 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `catalog.selection` (`CatalogParameters.selection`, `None` otherwise). On
   the frozen reference's `c_mode="selection"` fixture the likelihood agrees
   with it to 3e-14 (`tools/probe_selection_completeness.py`).
+- `selection` may also be a `TabulatedSelection(z, completeness)`
+  (`darksirens.selection.catalog`; payload family `"tabulated"` with the two
+  keys `z` and `completeness`, lists of floats of equal length): the
+  completeness as a table in redshift. `z` are the nodes, strictly increasing
+  and not necessarily uniform; `completeness` the values in [0, 1]; the curve
+  is linear between nodes and clipped to [0, 1] (`c_sel_tabulated`). It
+  enters where `C_sel(z)` does (`selection_curve`), so the row fraction, the
+  finite-depth convention, the missing-host budget, the field weighting and
+  the mixture (one table per catalog) are those of the other families. No
+  cosmological parameter enters it, where the magnitude-selection curves
+  depend on `Om0`, `w0` and `wa` through the distance modulus (and not on
+  `H0`). It has no nuisance: the survey block is `log10n0`, `delta`,
+  `sigma_kde`, and naming a selection nuisance in `survey_priors` is
+  refused. Refused with `ValueError`, from the payload and at `model`:
+  non-finite nodes or values, values outside [0, 1], nodes not strictly
+  increasing, fewer than 2 nodes, unequal lengths. Refused at `model`
+  (`validate_selection_coverage`): a first node above the lowest redshift of
+  the model grid (0), and a last node below the catalog's `z_depth`, or below
+  the top of the model grid for a catalog without one, since the curve is
+  then read on the whole grid as the magnitude-selection curves are. The
+  table is never extrapolated. The low-level `selection_curve` returns 0
+  outside the nodes and does not hold the end values; it performs no
+  coverage check itself. `ParameterPlan.catalog_model` records
+  the table as `family`, `n_nodes`, `z_min`, `z_max` and `table_sha256` (the
+  sha256 of the float64 `z` bytes followed by the `completeness` bytes;
+  `selection_record`) in place of the arrays, so two tables give two run
+  fingerprints. The records of the other families are unchanged. The frozen
+  reference has no such family.
 - `model(..., count_ratio="row"|"pooled", count_ratio_window=None)`: the
   estimator of the count-ratio completeness (`completeness="incomplete"`,
   either sky weighting, one value for every catalog of a mixture that runs

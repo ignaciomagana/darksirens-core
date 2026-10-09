@@ -946,6 +946,83 @@ instead of one vmap (6.7e-16 relative, measured). The chunked schedule had
 that property before this change, and it does not separate before from
 after.
 
+### Tabulated completeness for `completeness="selection"` (opt-in, default unchanged)
+
+`ds.model(..., completeness="selection", selection=TabulatedSelection(z,
+completeness))` takes the catalog's completeness directly as a table in
+redshift, where the selection mode so far took a Gaussian or Schechter
+magnitude-selection model. It is for a completeness that was measured (for
+example against a deeper survey) and not fitted with a luminosity function.
+
+- **Payload.** `{"format_version": "darksirens-catalog-selection-1.0",
+  "family": "tabulated", "z": [...], "completeness": [...]}`: two lists of
+  floats of equal length, the nodes and the values. It is the selection
+  payload the other families use, so the catalog file does not change between
+  analyses with different curves. `TabulatedSelection` stores both as tuples
+  of Python floats and compares by value.
+- **Meaning.** `C(z)` in [0, 1], linear between nodes (which need not be
+  evenly spaced) and clipped to [0, 1]. It enters at the one place the other
+  families' curve does (`selection_curve`), so `C(z, row) = row_fraction[row]
+  * C(z)`, hosts above the catalog's `z_depth` are all missing, and the
+  missing-host budget `(1 - C) n0 dV_c/dz (1 + z)^delta`, the field weighting
+  and the mixture (one table per catalog) are unchanged. It is a function of
+  the catalog redshift alone. The magnitude-selection curves do not depend on
+  `H0` either (the h-scaling of their magnitude zero point cancels it), but
+  they do depend on `Om0`, `w0` and `wa` through the distance modulus; the
+  table depends on none of them.
+- **No sampled parameter.** The family is fixed: the survey block is
+  `log10n0`, `delta`, `sigma_kde`, and a selection nuisance named in
+  `survey_priors` is refused as unknown.
+- **Refused** (`ValueError`, from the payload and in `ds.model`): non-finite
+  nodes or values, values outside [0, 1], nodes not strictly increasing,
+  fewer than 2 nodes, unequal lengths, arrays that are not one-dimensional.
+- **Coverage, no extrapolation.** The curve is read on the model's redshift
+  grid, whose lowest point is 0. The first node must be at or below 0 and the
+  last at or above the catalog's `z_depth`. For a catalog without a
+  `z_depth` the last node must reach the top of the grid (5 by default):
+  the magnitude-selection curves are read on the whole grid in that case, and
+  so is the table. `ds.model` raises otherwise, for each catalog of a mixture
+  against its own depth. The low-level `selection_curve` and
+  `selection_completion_curves` do not make this check; outside the nodes
+  they return 0 and never the end value.
+- **Fingerprint.** `ParameterPlan.catalog_model` records `family`,
+  `n_nodes`, `z_min`, `z_max` and `table_sha256` (sha256 of the float64 `z`
+  bytes followed by the `completeness` bytes) in place of the arrays. Two
+  tables give two run fingerprints.
+- **Default and existing modes.** Nothing changes without the family. On 21
+  configurations (count ratio, complete, Gaussian and Schechter selection,
+  each conditional and field-weighted, with and without a depth; a row
+  fraction; a sampled nuisance; a payload mapping; two two-catalog mixtures)
+  the log-likelihood at three points, its gradient and the plan record are
+  the same bit for bit as on `main` before the change.
+- **Checks.** A Schechter curve tabulated on the model grid gives the
+  Schechter mode's log-likelihood to 3e-14, at H0 values other than the one
+  the table was built at. On uniform tables over [0, 0.25] the difference is
+  2.8e-2, 2.1e-3, 8.8e-5, 1.1e-5 and 5.6e-7 for 9, 33, 129, 513 and 2049
+  nodes (second order in the spacing). A table of ones on a catalog without a
+  depth gives the complete catalog's log-likelihood to rounding, for both
+  weightings; with a depth it does not, because every host above the depth is
+  missing in the selection mode. A non-uniform table gives the value of the
+  uniform table of the same piecewise-linear function.
+- **Legacy parity.** The frozen reference has no such family.
+
+**Catalogs with galaxy weights.** In the selection mode a row's host density
+is `N_obs,p p_cat(z | p) + (1 - C(z)) n0 dV_c/dz (1 + z)^delta` in
+row `p`, with `N_obs,p` the row's galaxy count and `p_cat` the kernel
+with the weights normalized inside the row. The catalogued term is therefore
+the row's weighted density divided by the row's mean weight. If the hosts are
+meant to be weighted (by stellar mass, say), the missing term has to be in
+the same unit: the completeness supplied must be the weight-fraction
+completeness (the fraction of the total weight that is in the catalog at each
+redshift), and `n0` must be the reference weight density divided by the
+catalog's mean weight, with `n0_units` stated. Supplying weights together with
+a count-based `n0` and a count-based completeness biases `H0`: a consumer
+reported -1.5 km/s/Mpc on a toy, which was not reproduced here. The
+prescription is exact only where a row's mean weight equals the catalog's,
+because core divides by each row's own mean weight and takes one `n0`. Core
+does not check any of this, and `host_mass="weight"` remains refused with an
+incomplete catalog.
+
 ### Pooled count-ratio completeness (opt-in, default unchanged)
 
 `ds.model(catalog=..., completeness="incomplete", count_ratio="pooled",
