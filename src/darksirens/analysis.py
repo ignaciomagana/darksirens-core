@@ -70,6 +70,14 @@ FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
 #: (opt-in, complete catalogs only) is the sum of the row's galaxy weights,
 #: so every galaxy carries its own weight in every row.
 HOST_MASS_SETTINGS = ("count", "weight")
+#: Settings of ``model(..., count_ratio=...)``: the estimator of the count-ratio
+#: completeness (``completeness="incomplete"``). ``"row"`` (the frozen default)
+#: divides each row's smoothed observed density by the smoothed expected one,
+#: with the fixed kernel width 0.05; ``"pooled"`` (opt-in) smooths the ratio
+#: itself, pools the catalog's rows before the clip and takes its kernel
+#: width from ``count_ratio_window``
+#: (:func:`darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
+COUNT_RATIO_SETTINGS = ("row", "pooled")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
@@ -110,6 +118,11 @@ class IncompleteCatalogRedshift:
     :func:`darksirens.selection.footprint.selection_completion_curves_with_row_fraction`).
     ``row_fraction_sha256`` is the digest of that array, the field the
     dataclass compares and the run fingerprint records.
+
+    ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS` and applies without
+    a ``selection``; ``count_ratio_window`` is the kernel width of
+    ``"pooled"`` (``None`` for ``"row"``), whose rows may also carry a
+    ``row_fraction``.
     """
 
     catalog: Any
@@ -117,6 +130,8 @@ class IncompleteCatalogRedshift:
     selection: Any = None
     row_fraction: Any = field(default=None, compare=False, repr=False)
     row_fraction_sha256: str | None = None
+    count_ratio: str = "row"
+    count_ratio_window: float | None = None
 
 
 @dataclass(frozen=True)
@@ -153,7 +168,10 @@ class FieldCatalogMixtureRedshift:
     give both per catalog. ``host_mass`` is one of :data:`HOST_MASS_SETTINGS`,
     the same for every catalog: ``"count"`` (a row's host mass is its galaxy
     count) or ``"weight"`` (the sum of its galaxy weights; every catalog is
-    then complete).
+    then complete). ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS`,
+    the estimator of every catalog that runs ``"incomplete"``, and
+    ``count_ratio_window`` the kernel width of ``"pooled"`` (``None`` for
+    ``"row"``).
     """
 
     components: tuple
@@ -161,6 +179,8 @@ class FieldCatalogMixtureRedshift:
     n0_units: str = "physical"
     normalizer: str | tuple = "direct"
     host_mass: str = "count"
+    count_ratio: str = "row"
+    count_ratio_window: float | None = None
 
     @property
     def n_catalogs(self) -> int:
@@ -381,6 +401,31 @@ def selection_family(model) -> str:
     return "gaussian" if isinstance(model, GaussianMagnitudeSelection) else "schechter"
 
 
+def _count_ratio_window(count_ratio, window):
+    """Validate ``count_ratio`` and return the kernel width of ``"pooled"`` (``None`` for ``"row"``)."""
+    if count_ratio not in COUNT_RATIO_SETTINGS:
+        raise ValueError(
+            f"count_ratio must be one of {COUNT_RATIO_SETTINGS}, got {count_ratio!r}"
+        )
+    if count_ratio == "row":
+        if window is not None:
+            raise ValueError(
+                "count_ratio_window applies only to count_ratio='pooled': the "
+                "default estimator's kernel width is fixed at 0.05"
+            )
+        return None
+    from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
+
+    if window is None:
+        return POOLED_WINDOW_DEFAULT
+    if isinstance(window, bool) or not isinstance(window, (int, float)):
+        raise TypeError(f"count_ratio_window must be a number, got {window!r}")
+    window = float(window)
+    if not 0.0 < window < float("inf"):
+        raise ValueError(f"count_ratio_window must be finite and > 0, got {window!r}")
+    return window
+
+
 def _resolve_row_fraction(row_fraction, store):
     """Host-validate a per-row coverage fraction; return (read-only array, sha256)."""
     import numpy as np
@@ -405,8 +450,20 @@ def _resolve_redshift(
     counterpart_nside=None,
     selection=None,
     row_fraction=None,
+    count_ratio="row",
+    count_ratio_window=None,
 ):
-    if (selection is not None or row_fraction is not None) and completeness != "selection":
+    pooled = count_ratio == "pooled"
+    if pooled and (catalog is None or completeness not in (None, "incomplete")):
+        raise ValueError(
+            "count_ratio='pooled' applies only to the count-ratio completeness "
+            "(completeness='incomplete') of a catalog, got "
+            f"catalog={'None' if catalog is None else 'set'} and "
+            f"completeness={completeness!r}"
+        )
+    if selection is not None and completeness != "selection" or (
+        row_fraction is not None and completeness != "selection" and not pooled
+    ):
         raise ValueError(
             "selection and row_fraction apply only to completeness='selection', got "
             f"completeness={completeness!r}"
@@ -472,8 +529,20 @@ def _resolve_redshift(
         raise TypeError("catalog must be the CatalogStore returned by ds.load_catalog")
 
     if completeness is None or completeness == "incomplete":
+        fraction, digest = (
+            (None, None)
+            if row_fraction is None
+            else _resolve_row_fraction(row_fraction, catalog)
+        )
         return (
-            IncompleteCatalogRedshift(catalog, n0_units or "physical"),
+            IncompleteCatalogRedshift(
+                catalog,
+                n0_units or "physical",
+                row_fraction=fraction,
+                row_fraction_sha256=digest,
+                count_ratio=count_ratio,
+                count_ratio_window=count_ratio_window,
+            ),
             _INCOMPLETE_CATALOG_PRIORS,
         )
     if completeness == "complete":
@@ -539,7 +608,7 @@ def _per_catalog(value, n, what, single_types):
 
 def _resolve_mixture(
     catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer,
-    host_mass="count",
+    host_mass="count", count_ratio="row", count_ratio_window=None,
 ):
     """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
 
@@ -573,6 +642,12 @@ def _resolve_mixture(
                 f"{where}, got completeness={entry!r}"
             )
     resolved = tuple(entry or "incomplete" for entry in entries)
+    pooled = count_ratio == "pooled"
+    if pooled and "incomplete" not in resolved:
+        raise ValueError(
+            "count_ratio='pooled' applies only to the count-ratio completeness "
+            f"(completeness='incomplete'), got completeness={completeness!r}"
+        )
     if host_mass == "weight":
         for k, comp in enumerate(resolved):
             if comp != "complete":
@@ -622,7 +697,8 @@ def _resolve_mixture(
 
     fractions = _per_catalog(row_fraction, n, "row_fraction", (np.ndarray,))
     if "selection" not in resolved and (
-        any(s is not None for s in selections) or any(f is not None for f in fractions)
+        any(s is not None for s in selections)
+        or (not pooled and any(f is not None for f in fractions))
     ):
         raise ValueError(
             "selection and row_fraction apply only to completeness='selection', got "
@@ -651,7 +727,10 @@ def _resolve_mixture(
             raise ValueError(
                 f"completeness='selection' requires a selection model for catalog {k + 1}"
             )
-        if comp != "selection" and (sel is not None or frac is not None):
+        if comp != "selection" and (
+            sel is not None
+            or (frac is not None and not (pooled and comp == "incomplete"))
+        ):
             raise ValueError(
                 f"catalog {k + 1} runs completeness={comp!r}: selection and "
                 "row_fraction apply only to completeness='selection'; give None "
@@ -674,6 +753,8 @@ def _resolve_mixture(
         n0_units=n0_units or "physical",
         normalizer=_collapse_setting(normalizers),
         host_mass=host_mass,
+        count_ratio=count_ratio,
+        count_ratio_window=count_ratio_window,
     )
 
 
@@ -1194,14 +1275,24 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     and row-fraction digest. The completeness and the normaliser are one
     string when every catalog shares it (the record of every analysis before
     per-catalog completeness) and a list with one entry per catalog otherwise.
-    ``host_mass`` enters only when it is not the default ``"count"``, so the
-    record of every analysis without it is unchanged.
+    ``host_mass`` enters only when it is not the default ``"count"``, and
+    ``count_ratio`` with its window only when it is not the default ``"row"``,
+    so the record of every analysis without them is unchanged.
     """
+    pooled = (
+        {}
+        if getattr(redshift, "count_ratio", "row") == "row"
+        else {
+            "count_ratio": redshift.count_ratio,
+            "count_ratio_window": redshift.count_ratio_window,
+        }
+    )
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         from darksirens.selection.catalog import selection_record
 
         return _canonical_json({
             **({} if redshift.host_mass == "count" else {"host_mass": redshift.host_mass}),
+            **pooled,
             "sky_weighting": "field",
             "completeness": redshift.completeness,
             "n_catalogs": redshift.n_catalogs,
@@ -1219,7 +1310,12 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
         })
     selection = getattr(redshift, "selection", None)
     if selection is None:
-        return ""
+        if not pooled:
+            return ""
+        record = {"completeness": "incomplete", **pooled}
+        if redshift.row_fraction_sha256 is not None:
+            record["row_fraction_sha256"] = redshift.row_fraction_sha256
+        return _canonical_json(record)
     from darksirens.selection.catalog import selection_record
 
     record = {
@@ -1295,6 +1391,8 @@ def model(
     field_normalizer=None,
     per_catalog_population=None,
     host_mass="count",
+    count_ratio="row",
+    count_ratio_window=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -1467,6 +1565,31 @@ def model(
     records it (``ParameterPlan.catalog_model``) and a run fingerprint
     changes with it. The frozen reference has no such mode.
 
+    ``count_ratio="pooled"`` (opt-in; the default ``"row"`` changes nothing)
+    replaces the estimator of the count-ratio completeness
+    (``completeness="incomplete"``). ``"row"`` divides each row's smoothed
+    observed density by the smoothed expected density, with a fixed Gaussian
+    width of 0.05 in redshift, and clips the row's ratio at 1. Both densities
+    rise steeply with redshift, so that ratio is the completeness near
+    ``z + 2 w^2 / z``: too low where the completeness falls, which adds
+    missing hosts there (H0 higher by about 0.7 to 0.8 km/s/Mpc on the two
+    mocks it was measured on; see the README). ``"pooled"`` smooths the ratio
+    itself, each galaxy weighted by one over the expected density at its own
+    redshift, over all the rows of the catalog at once, clips the pooled
+    curve, and gives row ``p`` the completeness ``f_p C(z)``, with ``f_p``
+    the row's ``row_fraction`` (1 for every row without one), as
+    ``completeness="selection"`` does with a fitted curve
+    (:func:`~darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
+    ``count_ratio_window`` is its Gaussian width in redshift (default 0.02;
+    refused with ``"row"``). The catalog is one completeness cell: a catalog
+    whose depth varies over the sky must be given as one catalog per depth
+    (``catalog_sky_weighting="field"``, each with its ``row_fraction``).
+    Binding refuses a window that holds fewer than 100 effective galaxies at
+    the catalog's median redshift and warns below 1000. It is one value for
+    every catalog that runs ``"incomplete"`` and is refused without one. The
+    plan records it and the window (``ParameterPlan.catalog_model``) and a
+    run fingerprint changes with them. The frozen reference has no such mode.
+
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
     labels' ``_c{k}`` suffix) its own copy of the named population
@@ -1518,6 +1641,7 @@ def model(
         )
     if host_mass not in HOST_MASS_SETTINGS:
         raise ValueError(f"host_mass must be one of {HOST_MASS_SETTINGS}, got {host_mass!r}")
+    count_ratio_window = _count_ratio_window(count_ratio, count_ratio_window)
     several = isinstance(catalog, (list, tuple))
     if catalog_sky_weighting == "field":
         if catalog is None:
@@ -1538,6 +1662,8 @@ def model(
             row_fraction=row_fraction,
             field_normalizer=field_normalizer,
             host_mass=host_mass,
+            count_ratio=count_ratio,
+            count_ratio_window=count_ratio_window,
         )
         catalog_priors = _INCOMPLETE_CATALOG_PRIORS
     else:
@@ -1589,6 +1715,8 @@ def model(
             counterpart_nside=counterpart_nside,
             selection=selection,
             row_fraction=row_fraction,
+            count_ratio=count_ratio,
+            count_ratio_window=count_ratio_window,
         )
     block = _survey_block(redshift, catalog_priors)
     fcat_labels = {label for label, *_ in block if label.startswith("fcat_")}

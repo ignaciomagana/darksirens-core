@@ -1098,3 +1098,79 @@ ratio and selection, each conditional and field-weighted, at three H0
 values, on eight catalogs: plain, with a survey depth, with a galaxy at
 z = 4.99, at the grid top, at z = 3 above a survey depth, at z = -0.002,
 -0.02 and -0.1 with a wide error; and two catalogs together).
+
+### Pooled count-ratio completeness (opt-in, default unchanged)
+
+`ds.model(catalog=..., completeness="incomplete", count_ratio="pooled",
+count_ratio_window=0.02, row_fraction=None)` replaces the estimator of the
+count-ratio completeness. The default estimator (`count_ratio="row"`)
+smooths each row's observed galaxy density and the expected density with the
+same Gaussian of width 0.05 and divides. Both densities rise steeply with
+redshift, so the ratio at `z` leans on the far side of the kernel, where the
+completeness is lower. To first order it is `C + w^2 (C' dlnE/dz + C''/2)`,
+`E = dN_exp/dz`, which is the completeness near `z + 2 w^2 / z` at low
+redshift. The missing-host density is then too large where the completeness
+falls, and H0 comes out high:
+
+- the darksirens-desi-gwtc5 clean-room check (unclustered toy, exact
+  reference model, 16 realisations of 200 events): +0.68 +- 0.14 km/s/Mpc,
+  0.17 of the posterior width, the same without the clip, without Poisson
+  noise and pooled over the sky, and scaling as `w^2` (+1.94, +0.67, +0.25,
+  +0.12, +0.04 at w = 0.1, 0.05, 0.03, 0.02, 0.01);
+- our examples mock (clustered, magnitude limit 21, photo-z 0.015(1+z), 100
+  seeds of about 150 events): +0.78 +- 0.18 km/s/Mpc against the
+  magnitude-selection completeness;
+- core's own curve on a toy with a known completeness falling from 0.92 to
+  0.23 between z = 0.15 and 0.3: 0.14 low at z = 0.2 with the default width,
+  0.027 at 0.02 and 0.007 at 0.01, and on the examples mock 0.15 to 0.20 low
+  at z = 0.08 to 0.13.
+
+The default is kept, bit for bit, for reproducibility and for the legacy
+parity tests. `count_ratio="pooled"` smooths the ratio itself (each galaxy
+weighted by one over the expected density at its own redshift, normalised
+by the kernel mass inside the surveyed range), pools all the rows of the
+catalog before the clip and gives row `p` the completeness `f_p C(z)`, with
+`f_p` the optional `row_fraction`.
+
+- **Default.** Nothing changes without the option: the plan record, the run
+  fingerprint, the binding (the observed-density cache) and the
+  log-likelihood bit for bit, for one catalog under either sky weighting and
+  for a two-catalog mixture. The legacy parity probes run the defaults.
+- **Accuracy.** Its expectation is the kernel mean of the completeness, so
+  the `w^2 C''/2` of any kernel remains: on the toy the pooled curve is
+  within 0.006 of the truth at w = 0.01 and 0.016 at 0.02 (tests). The
+  clean-room toy recovered the exact model to +0.00 +- 0.01 km/s/Mpc at
+  w = 0.01 with this construction. On the examples mock (100 seeds, same
+  grids as above) its H0 minus the magnitude-selection completeness's is
+  -0.03 +- 0.05 km/s/Mpc at w = 0.02 and -0.10 +- 0.04 at 0.01, against
+  +0.78 +- 0.18 for the default. Narrowing the default's per-row window does
+  not help there: with about 180 galaxies per row the clip of each row's
+  noisy ratio takes over (+0.59 +- 0.28 at 0.02, +1.28 +- 0.37 at 0.01).
+- **Pooling.** The catalog is one completeness cell: every row shares the
+  same radial curve, scaled by its coverage. Core does not know the survey's
+  selection strata; a catalog whose depth or magnitude limit varies over the
+  sky must be split by the caller into one catalog per stratum (a
+  field-weighted mixture, each with its `row_fraction`). Galaxy-free rows
+  count as surveyed unless `row_fraction` says otherwise (a warning above
+  10% of the rows). Clustering along the line of sight is averaged over the
+  whole sky rather than per row.
+- **Low redshift.** Each galaxy's weight `1/dN_exp(z_i)` grows as `z_i^-2`.
+  With photometric redshifts some galaxies scatter to `z_obs` near 0, where
+  the expected density vanishes, so within about three windows of `z = 0`
+  the pooled ratio is far above 1 (6 at z = 0.05 with w = 0.02 on the
+  examples mock) and the clip makes it 1: the estimator takes the catalog
+  to be complete there, as a magnitude-limited catalog is.
+- **Noise.** Binding refuses a window with fewer than 100 effective galaxies
+  at the catalog's median redshift and warns below 1000: the clip at 1 then
+  biases the curve low.
+- **Cost.** At bind, one pass over the catalog in row blocks (a histogram of
+  the real galaxies' redshifts in bins of 1e-4) and one `(N_z, N_z)`
+  operator (8 MB), in place of the `(N_rows, N_z)` observed-density cache
+  (its kernel over every padded slot). Per call, one matrix-vector product
+  over the grid, then the arithmetic of the row-fraction selection
+  completeness.
+- **Fingerprint.** `ParameterPlan.catalog_model` records `count_ratio`, the
+  window and the row fraction's digest when `"pooled"`.
+- **Not covered.** `darksirens-lss` passes the bound cache to
+  `completion_curves`, which accepts the pooled cache, but it has not been
+  tested with it. The reference has no such mode.
