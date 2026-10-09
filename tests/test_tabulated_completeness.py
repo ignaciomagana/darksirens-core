@@ -286,27 +286,32 @@ def test_schechter_tabulated_on_the_model_grid_is_the_schechter_likelihood(store
     tabulated = _bind(_analysis(_schechter_table(ZGRID), store=store))
     schechter = _bind(_analysis(SCHECHTER, store=store))
     for theta in _points(tabulated.analysis):
-        _close(tabulated(theta), schechter(theta), 1e-11)
+        _close(tabulated(theta), schechter(theta), 1e-12)
 
 
 def test_schechter_tabulated_converges_with_node_spacing():
     """Uniform tables on [0, 0.25] (catalog depth 0.22): second-order convergence.
 
     Linear interpolation has an error proportional to the square of the node
-    spacing, so each four-fold refinement should reduce the log-likelihood
-    difference about sixteen-fold.
+    spacing, so a four-fold refinement reduces the log-likelihood difference
+    about sixteen-fold. Measured here, the largest difference over the four
+    points for 9, 33, 129, 513 and 2049 nodes is 2.75e-2, 2.10e-3, 8.80e-5,
+    1.06e-5 and 5.6e-7: factors of 13, 24, 8 and 19 (3.5e-8 at 8193 nodes,
+    3e-14 with the nodes on the model grid). The bounds are those values with
+    a margin of about 2 (the factor) and 3.5 (the finest table).
     """
     schechter = _bind(_analysis(SCHECHTER, store=STORE_DEPTH))
     thetas = _points(schechter.analysis)
     errors = []
-    for n in (9, 33, 129, 513):
+    for n in (9, 33, 129, 513, 2049):
         table = _schechter_table(np.linspace(0.0, 0.25, n))
         errors.append(_worst(_bind(_analysis(table, store=STORE_DEPTH)), schechter, thetas))
-    print("tabulated Schechter |dlogL| for 9, 33, 129, 513 nodes:", errors)
-    assert errors[0] > 1e-4
+    print("tabulated Schechter |dlogL| for 9, 33, 129, 513, 2049 nodes:", errors)
+    assert errors[0] > 1e-3
     for coarse, fine in zip(errors, errors[1:]):
-        assert fine < coarse / 8.0, errors
-    assert errors[-1] < 1e-5, errors
+        assert fine < coarse / 4.0, errors
+    assert errors[0] / errors[-1] > 1.0e4, errors
+    assert errors[-1] < 2e-6, errors
 
 
 # ---------------------------------------------------------------------------
@@ -421,14 +426,35 @@ def test_missing_host_curves_follow_the_table_and_the_depth():
 
 
 @pytest.mark.parametrize("store", (STORE, STORE_DEPTH), ids=("no-depth", "depth"))
-def test_field_weighting_with_one_catalog(store):
-    tabulated = _bind(_analysis(_schechter_table(ZGRID), store=store, catalog_sky_weighting="field"))
-    schechter = _bind(_analysis(SCHECHTER, store=store, catalog_sky_weighting="field"))
-    conditional = _bind(_analysis(_schechter_table(ZGRID), store=store))
-    for theta in _points(tabulated.analysis):
-        _close(tabulated(theta), schechter(theta), 1e-11)
-    theta = _points(tabulated.analysis, n=1)[0]
-    assert abs(float(tabulated(theta)) - float(conditional(theta))) > 1e-6
+def test_field_and_default_weighting_with_one_catalog(store):
+    """Both weightings through ``ds.model``, each against the Schechter family.
+
+    The two weightings differ in how a row is normalised: the default divides
+    each row by its own ``N_obs + N_miss``, the field weighting by one total.
+    At ``log10n0 = -2`` the missing hosts are about 1e9 times the catalogued
+    galaxies in every row of this fixture, the row normalisers are equal to
+    that precision, and the two weightings agree to about 1e-10 for every
+    family (measured: Gaussian 3e-10 and 6e-10, Schechter and its table 1e-10
+    and 3e-10, without and with a depth). At ``log10n0 = -10`` the two terms
+    are comparable and the weightings differ by 0.038 and 0.014, the same for
+    the Schechter family and its table.
+    """
+    table = _schechter_table(ZGRID)
+    bound = {
+        (name, weighting): _bind(_analysis(sel, store=store, catalog_sky_weighting=weighting))
+        for name, sel in (("table", table), ("schechter", SCHECHTER))
+        for weighting in ("conditional", "field")
+    }
+    analysis = bound["table", "field"].analysis
+    for log10n0 in (-2.0, -10.0):
+        for theta in _points(analysis, n=2, log10n0=log10n0):
+            for weighting in ("conditional", "field"):
+                _close(bound["table", weighting](theta), bound["schechter", weighting](theta), 1e-12)
+    dense = _points(analysis, n=1, log10n0=-2.0)[0]
+    sparse = _points(analysis, n=1, log10n0=-10.0)[0]
+    for name in ("table", "schechter"):
+        _close(bound[name, "field"](dense), bound[name, "conditional"](dense), 1e-8)
+        assert abs(float(bound[name, "field"](sparse)) - float(bound[name, "conditional"](sparse))) > 5e-3
 
 
 def test_field_mixture_takes_one_table_per_catalog():
