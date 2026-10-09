@@ -42,9 +42,11 @@ COMPLETENESS_SETTINGS = ("incomplete", "complete", "selection")
 #: model's values unless named in ``model(..., survey_priors=...)``, which
 #: makes them sampled. ``m_lim``, ``M_faint_offset`` and the K-correction are
 #: never sampled: they are data and protocol constants of the selection fit.
+#: A tabulated completeness is fixed: it has no nuisance.
 SELECTION_NUISANCES = {
     "gaussian": (("M0hat", -23.0, -18.0), ("sigma_M", 0.05, 3.0)),
     "schechter": (("Mstar_hat", -23.0, -18.0), ("alpha", -1.9, 0.0)),
+    "tabulated": (),
 }
 
 #: Settings of ``model(..., catalog_sky_weighting=...)``. ``"conditional"``
@@ -336,39 +338,46 @@ def _counterpart_nside(value) -> int:
     return int(nside)
 
 
-def resolve_selection_model(selection):
+def resolve_selection_model(selection, z_depth=None):
     """The validated runtime selection model of ``model(..., selection=...)``.
 
     ``selection`` is a :class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
-    a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, or
+    a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, a
+    :class:`~darksirens.selection.catalog.TabulatedSelection`, or
     the runtime payload mapping
     (:func:`~darksirens.selection.catalog.selection_from_mapping`, format
     ``darksirens-catalog-selection-1.0``). The result is the model rebuilt
     from its validated payload, so every field is a Python float (a constant
     of the bound likelihood) and two equal declarations compare equal.
+    ``z_depth`` is the depth of the catalog the model completes: a table that
+    does not cover the redshifts read up to it is refused
+    (:func:`~darksirens.selection.catalog.validate_selection_coverage`).
     """
     from darksirens.selection.catalog import (
-        GaussianMagnitudeSelection,
-        SchechterMagnitudeSelection,
         selection_from_mapping,
         selection_to_mapping,
+        validate_selection_coverage,
     )
 
     if isinstance(selection, Mapping):
-        return selection_from_mapping(selection)
-    if isinstance(selection, (GaussianMagnitudeSelection, SchechterMagnitudeSelection)):
-        return selection_from_mapping(selection_to_mapping(selection))
+        return validate_selection_coverage(selection_from_mapping(selection), z_depth)
+    if isinstance(selection, _single_selection_types()[1:]):
+        return validate_selection_coverage(
+            selection_from_mapping(selection_to_mapping(selection)), z_depth
+        )
     raise TypeError(
         "selection must be a GaussianMagnitudeSelection, a "
-        "SchechterMagnitudeSelection or its runtime payload mapping "
+        "SchechterMagnitudeSelection, a TabulatedSelection or its runtime payload mapping "
         f"(darksirens.selection.catalog.selection_to_mapping), got {type(selection).__name__}"
     )
 
 
 def selection_family(model) -> str:
-    """``"gaussian"`` or ``"schechter"``: the family of a runtime selection model."""
-    from darksirens.selection.catalog import GaussianMagnitudeSelection
+    """``"gaussian"``, ``"schechter"`` or ``"tabulated"``: the family of a runtime selection model."""
+    from darksirens.selection.catalog import GaussianMagnitudeSelection, TabulatedSelection
 
+    if isinstance(model, TabulatedSelection):
+        return "tabulated"
     return "gaussian" if isinstance(model, GaussianMagnitudeSelection) else "schechter"
 
 
@@ -476,7 +485,7 @@ def _resolve_redshift(
         if selection is None:
             raise ValueError(
                 "completeness='selection' requires selection=<GaussianMagnitudeSelection, "
-                "SchechterMagnitudeSelection or its runtime payload mapping>"
+                "SchechterMagnitudeSelection, TabulatedSelection or its runtime payload mapping>"
             )
         fraction, digest = (
             (None, None)
@@ -487,7 +496,7 @@ def _resolve_redshift(
             IncompleteCatalogRedshift(
                 catalog,
                 n0_units or "physical",
-                selection=resolve_selection_model(selection),
+                selection=resolve_selection_model(selection, catalog.z_depth),
                 row_fraction=fraction,
                 row_fraction_sha256=digest,
             ),
@@ -503,9 +512,10 @@ def _single_selection_types():
     from darksirens.selection.catalog import (
         GaussianMagnitudeSelection,
         SchechterMagnitudeSelection,
+        TabulatedSelection,
     )
 
-    return (Mapping, GaussianMagnitudeSelection, SchechterMagnitudeSelection)
+    return (Mapping, GaussianMagnitudeSelection, SchechterMagnitudeSelection, TabulatedSelection)
 
 
 def _per_catalog(value, n, what, single_types):
@@ -651,7 +661,9 @@ def _resolve_mixture(
         components.append(
             CatalogComponent(
                 catalog=store,
-                selection=None if sel is None else resolve_selection_model(sel),
+                selection=(
+                    None if sel is None else resolve_selection_model(sel, store.z_depth)
+                ),
                 row_fraction=fraction,
                 row_fraction_sha256=digest,
             )
@@ -1186,7 +1198,7 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     record of every analysis without it is unchanged.
     """
     if isinstance(redshift, FieldCatalogMixtureRedshift):
-        from darksirens.selection.catalog import selection_to_mapping
+        from darksirens.selection.catalog import selection_record
 
         return _canonical_json({
             **({} if redshift.host_mass == "count" else {"host_mass": redshift.host_mass}),
@@ -1198,7 +1210,7 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
             "catalogs": [
                 {
                     "selection": (
-                        None if c.selection is None else selection_to_mapping(c.selection)
+                        None if c.selection is None else selection_record(c.selection)
                     ),
                     "row_fraction_sha256": c.row_fraction_sha256,
                 }
@@ -1208,11 +1220,11 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     selection = getattr(redshift, "selection", None)
     if selection is None:
         return ""
-    from darksirens.selection.catalog import selection_to_mapping
+    from darksirens.selection.catalog import selection_record
 
     record = {
         "completeness": "selection",
-        "selection": selection_to_mapping(selection),
+        "selection": selection_record(selection),
     }
     digest = getattr(redshift, "row_fraction_sha256", None)
     if digest is not None:
@@ -1366,6 +1378,17 @@ def model(
     digest (``ParameterPlan.catalog_model``) and a run fingerprint changes with
     them. ``selection`` and ``row_fraction`` are refused with any other
     completeness.
+
+    ``selection`` may instead be a
+    :class:`~darksirens.selection.catalog.TabulatedSelection` (payload family
+    ``"tabulated"``): the completeness given directly as a table, nodes ``z``
+    (strictly increasing, any spacing) and values ``completeness`` in [0, 1],
+    linear between nodes. It enters where ``C_sel(z)`` does, is a function of
+    redshift alone (no cosmological parameter enters it) and has no nuisance
+    to sample. The table must start at or below redshift 0 and reach the
+    catalog's ``z_depth`` (the top of the redshift grid for a catalog without
+    one); it is never extrapolated, and one that falls short is refused here.
+    The plan records the table's sha256 in place of the arrays.
 
     ``survey_priors={label: prior}`` (opt-in) sets the prior of the named
     survey parameters of a catalog analysis: ``(lower, upper)`` or
