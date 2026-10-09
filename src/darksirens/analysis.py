@@ -658,12 +658,14 @@ def _resolve_mixture(
                 "for its entry"
             )
         fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
+        try:
+            sel = None if sel is None else resolve_selection_model(sel, store.z_depth)
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(f"catalog {k + 1} ({store.path}): {exc}") from exc
         components.append(
             CatalogComponent(
                 catalog=store,
-                selection=(
-                    None if sel is None else resolve_selection_model(sel, store.z_depth)
-                ),
+                selection=sel,
                 row_fraction=fraction,
                 row_fraction_sha256=digest,
             )
