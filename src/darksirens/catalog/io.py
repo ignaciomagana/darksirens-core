@@ -7,13 +7,14 @@ consumes only the frozen standardized HDF5 representation used by inference.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-from .types import GalaxyCatalog
+from .types import GalaxyCatalog, row_blocks, validate_catalog
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,62 @@ def _sort_rows_by_z(zgals, dzgals, wgals, ngals):
     return z_sorted, take(dzgals), take(wgals), ng
 
 
+def _require_file_contract(path, nside, zgals, dzgals, wgals, ngals):
+    """Refuse a file whose rows cannot be the HEALPix pixels its ``nside`` names.
+
+    Row ``r`` of the file is RING pixel ``r``, so the file may hold at most
+    ``12 * nside**2`` rows. More rows mean a wrong ``nside`` attribute (the
+    samples would be matched to the wrong rows) or rows nothing can read. A
+    file with fewer rows covers only the first pixels of its sky and binds
+    only when no sample falls beyond them, so it is accepted with a warning.
+    The arrays are then checked as binding checks them. A negative redshift
+    of a real galaxy warns: the kernel is defined for it (it is truncated at
+    zero) and blueshifted nearby galaxies are real, but it is more often a
+    placeholder that was counted as a galaxy.
+    """
+    if nside < 1:
+        raise ValueError(f"{path}: nside attribute must be a positive integer, got {nside}")
+    try:
+        validate_catalog(
+            GalaxyCatalog(np.pi / (3.0 * nside * nside), zgals, dzgals, wgals, ngals)
+        )
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
+    n_rows = int(zgals.shape[0])
+    n_pix = 12 * nside * nside
+    if n_rows > n_pix:
+        raise ValueError(
+            f"{path}: {n_rows} rows but nside={nside} has only {n_pix} pixels "
+            "(row r is HEALPix RING pixel r); the nside attribute is wrong or "
+            "the file holds surplus rows"
+        )
+    if n_rows < n_pix:
+        warnings.warn(
+            f"{path}: {n_rows} rows for nside={nside} ({n_pix} pixels); the rows "
+            f"are read as RING pixels 0..{n_rows - 1} and a GW sample in any other "
+            "pixel fails at bind. Check the nside attribute if the file was meant "
+            "to cover the sky.",
+            UserWarning,
+            stacklevel=3,
+        )
+    cols = np.arange(zgals.shape[1])[None, :]
+    n_negative, z_min = 0, 0.0
+    for rows in row_blocks(n_rows, zgals.shape[1]):
+        z_real = zgals[rows][cols < ngals[rows, None]]
+        negative = z_real[z_real < 0.0]
+        if negative.size:
+            n_negative += int(negative.size)
+            z_min = min(z_min, float(negative.min()))
+    if n_negative:
+        warnings.warn(
+            f"{path}: {n_negative} real galaxies have a negative redshift "
+            f"(minimum {z_min:.6g}); each galaxy's redshift distribution is "
+            "truncated at zero and renormalised, so they stay hosts near z = 0.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
     """Load the frozen standardized pixelated-catalog inference contract.
 
@@ -60,6 +117,11 @@ def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
     arrays. Rows are stably sorted over the real-galaxy prefix by default,
     matching the frozen inference loader. Arrays stay on the host; later model
     construction decides what is transferred to an accelerator.
+
+    A ``ValueError`` is raised for a file with more rows than ``12 * nside**2``
+    and for arrays binding would refuse (:func:`validate_catalog`). Fewer rows
+    than pixels, and a negative redshift of a real galaxy, emit a
+    ``UserWarning``.
     """
     path = Path(path)
     with h5py.File(path, "r") as handle:
@@ -74,6 +136,7 @@ def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
         dzgals = np.asarray(handle["dzgals"])
         wgals = np.asarray(handle["wgals"])
 
+    _require_file_contract(path, nside, zgals, dzgals, wgals, ngals)
     if sort_rows_by_z:
         zgals, dzgals, wgals, ngals = _sort_rows_by_z(
             zgals, dzgals, wgals, ngals

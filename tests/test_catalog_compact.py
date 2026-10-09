@@ -31,9 +31,14 @@ def _full_catalog():
 def test_standardized_catalog_validation_checks_only_real_prefix():
     cat = _full_catalog()
     assert validate_catalog(cat) is cat
-    # Padding sentinels are not scientific data and remain unconstrained.
+    # Padding sentinels are not scientific data and remain unconstrained,
+    # except that a padded redshift must be finite (test_input_checks.py).
+    for name in ("dzgals", "wgals"):
+        values = np.array(getattr(cat, name), copy=True)
+        values[1, 1] = np.nan
+        assert validate_catalog(cat._replace(**{name: values})) is not None
     z = np.array(cat.zgals, copy=True)
-    z[1, 1] = np.nan
+    z[1, 1] = -1.0e30
     assert validate_catalog(cat._replace(zgals=z)) is not None
 
 

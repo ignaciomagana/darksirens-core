@@ -1308,7 +1308,9 @@ def model(
     the bound likelihood uses ``n0 = 10**log10n0 * (H0 / 100)**3``, so the
     expected count does not depend on H0 at fixed background shape. The plan
     records it (``ParameterPlan.n0_units``) and a run fingerprint changes with
-    it.
+    it. Fixing ``log10n0`` (``fixed_survey``) without ``n0_units`` emits a
+    ``UserWarning`` and keeps the default: a fitted density is usually
+    h-scaled, and the two readings differ by ``(H0 / 100)**3``.
 
     ``fixed_survey={name: value}`` fixes the named survey parameters of a
     catalog analysis (``log10n0``, ``delta``, ``sigma_kde``; the complete
@@ -1565,6 +1567,22 @@ def model(
         allow_out_of_prior,
         [(label, lo, hi) for label, lo, hi, _, opt_in in block if opt_in],
     )
+    # The unit decides how a fixed density moves with the sampled H0, and a
+    # fitted density is usually h-scaled, so the default must not be silent.
+    if n0_units is None:
+        for label, value in survey_fixed.items():
+            if _base_name(label) != "log10n0":
+                continue
+            warnings.warn(
+                f"survey parameter {label!r} is fixed at {value!r} without n0_units: "
+                "it is read as Mpc^-3 at the sampled H0 (n0_units='physical', the "
+                "default). A density fitted in h^3 Mpc^-3, as darksirens-surveys "
+                "reports it, needs n0_units='h_scaled'. Pass n0_units to ds.model "
+                "to state the unit and silence this warning.",
+                UserWarning,
+                stacklevel=3,
+            )
+            break
     survey_prior_overrides = _resolve_survey_priors(
         survey_priors,
         [

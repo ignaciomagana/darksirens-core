@@ -268,6 +268,81 @@ def expected_pe_size(attrs: Mapping[str, Any]) -> int | None:
     return nobs * nsamp
 
 
+#: Columns read to tell the events of a PE store apart, and the two thresholds
+#: of :func:`event_block_problems`: the ratio below which a column does not
+#: separate the blocks, and the chance probability below which it does.
+EVENT_BLOCK_COLUMNS = ("m1det", "dL", "ra", "dec")
+EVENT_BLOCK_MIN_RATIO = 3.0
+EVENT_BLOCK_MAX_CHANCE = 1.0e-6
+
+
+def _block_separation(values: np.ndarray, n_blocks: int, block: int) -> float:
+    """Scatter of the block means over the scatter inside the blocks (one-way F).
+
+    About one when the rows are exchangeable between blocks, and of order
+    ``block`` times the ratio of the two variances when the blocks differ.
+    NaN for a constant column.
+    """
+    rows = np.asarray(values, dtype=np.float64).reshape(n_blocks, block)
+    means = rows.mean(axis=1)
+    between = block * float(((means - rows.mean()) ** 2).sum()) / (n_blocks - 1)
+    within = float(((rows - means[:, None]) ** 2).sum()) / (n_blocks * (block - 1))
+    if within == 0.0:
+        return float("inf") if between > 0.0 else float("nan")
+    return between / within
+
+
+def event_block_problems(
+    columns: Mapping[str, np.ndarray], nobs: int, nsamp: int
+) -> tuple[list[str], list[str]]:
+    """``(errors, warnings)`` on the event blocks of a PE store.
+
+    The store has no per-sample event index: event ``i`` is rows
+    ``[i * nsamp, (i + 1) * nsamp)`` by contract, so a file written in another
+    order cannot be told from a valid one by its layout. It can by its values:
+    samples of one event scatter far less than samples of different events in
+    mass, distance or sky position. If no column of
+    :data:`EVENT_BLOCK_COLUMNS` separates the declared blocks, the samples are
+    statistically interchangeable between events. That is an error when the
+    sample-major reading (event ``i`` is rows ``i, i + nobs, ...``) does
+    separate them beyond chance, and a warning otherwise (a store of
+    near-identical events is legitimate).
+    """
+    if nobs < 2 or nsamp < 2:
+        return [], []
+    usable = [
+        name for name in EVENT_BLOCK_COLUMNS
+        if name in columns and np.asarray(columns[name]).shape == (nobs * nsamp,)
+    ]
+    ratios = {name: _block_separation(columns[name], nobs, nsamp) for name in usable}
+    ratios = {name: value for name, value in ratios.items() if not np.isnan(value)}
+    if not ratios or max(ratios.values()) >= EVENT_BLOCK_MIN_RATIO:
+        return [], []
+
+    from scipy.stats import f as f_distribution
+
+    found = ", ".join(f"{name}: {value:.2f}" for name, value in ratios.items())
+    summary = (
+        f"no column separates the {nobs} declared event blocks of {nsamp} rows "
+        f"(scatter between block means over scatter inside blocks, about 1 for "
+        f"interchangeable rows: {found})"
+    )
+    for name in ratios:
+        strided = np.asarray(columns[name]).reshape(nsamp, nobs).T
+        ratio = _block_separation(strided, nobs, nsamp)
+        chance = float(f_distribution.sf(ratio, nobs - 1, nobs * (nsamp - 1)))
+        if ratio >= EVENT_BLOCK_MIN_RATIO and chance < EVENT_BLOCK_MAX_CHANCE:
+            return [
+                f"{summary}, while reading event i as rows i, i + nobs, ... does "
+                f"({name}: {ratio:.3g}); the samples are interleaved across events, "
+                "and event i must be the contiguous rows [i * nsamp, (i + 1) * nsamp)"
+            ], []
+    return [], [
+        f"{summary}; event i must be the contiguous rows [i * nsamp, (i + 1) * nsamp). "
+        "Check that the samples were not shuffled across events"
+    ]
+
+
 def quality_problems(f: Any, contract: StoreContract) -> list[str]:
     problems: list[str] = []
     for name in contract.finite:

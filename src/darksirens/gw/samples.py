@@ -189,6 +189,17 @@ def _require_store_quality(f, contract, path, conversion_hint=""):
         )
 
 
+def _require_event_blocks(columns, n_events, nsamp, path, conversion_hint=""):
+    problems, cautions = store_contract.event_block_problems(columns, n_events, nsamp)
+    if problems:
+        raise RuntimeError(
+            f"Malformed store layout in {path!r}: " + "; ".join(problems) + "."
+            + (f" {conversion_hint}" if conversion_hint else "")
+        )
+    for caution in cautions:
+        warnings.warn(f"PE store {path!r}: {caution}.", RuntimeWarning, stacklevel=3)
+
+
 def _decoded_attrs(f):
     return {key: _decode_hdf5_attr(f.attrs[key]) for key in f.attrs}
 
@@ -258,6 +269,7 @@ def load_gw_store(gw_path, fit_columns=None) -> GWStore:
 
         nsamp = int(f.attrs["nsamp"])
         n_events = int(f.attrs["nobs"])
+        _require_event_blocks(columns, n_events, nsamp, gw_path, conversion_hint)
         raw_columns = {name: np.array(columns[name]) for name in columns}
         p_pe = np.array(columns["p_pe"])
         if basis == "chieff":
