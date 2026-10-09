@@ -10,7 +10,10 @@ Each case was reproduced on the unchanged code first:
 - a catalog file with more rows than its ``nside`` has pixels (a wrong
   ``nside`` reads the wrong rows); negative redshifts of real galaxies warn;
 - a PE store whose samples are interleaved across events;
-- a fixed ``log10n0`` with the unit left to the default.
+- a fixed ``log10n0`` with the unit left to the default;
+- a real galaxy stored beyond the redshift grid, or many kernel widths below
+  zero: its sky row lost every host (``-inf`` for a complete catalog, a
+  finite shifted value otherwise).
 
 The first is now computed correctly; the others raise or warn. Valid float64
 inputs evaluate exactly as before.
@@ -32,11 +35,16 @@ from darksirens import Population
 from darksirens.catalog import completeness as completeness_module
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.io import CatalogStore, load_catalog
+from darksirens.catalog.redshift import (
+    KERNEL_WIDTHS_BELOW_ZERO_MAX,
+    check_kernels_below_zero,
+)
 from darksirens.catalog.types import validate_catalog
 from darksirens.cosmology._grid import zgrid
 from darksirens.gw.samples import load_gw_store
 from darksirens.gw.store import event_block_problems
 from darksirens.runtime_binding import _jax_catalog, bind_analysis
+from darksirens.selection.catalog import GaussianMagnitudeSelection
 
 from _catalog_model_fixtures import (
     COSMOLOGY,
@@ -420,3 +428,198 @@ def test_fixed_log10n0_of_any_catalog_warns_once():
             fixed_survey={"log10n0": -2.0, "log10n0_c2": -2.4},
         )
     assert len(caught) == 1
+
+
+# ---------------------------------------------------------------------------
+# A real galaxy beyond the redshift grid
+
+Z_TOP = float(np.asarray(zgrid)[-1])
+SELECTION = GaussianMagnitudeSelection(
+    m_lim=21.0, M0hat=-20.3, sigma_M=0.72, k_corr_coeffs=(1.13, -4.89, 8.59)
+)
+CATALOG_MODES = {
+    "complete": dict(completeness="complete"),
+    "count_ratio": dict(completeness="incomplete"),
+    "selection": dict(completeness="selection", selection=SELECTION),
+    "field_complete": dict(completeness="complete", catalog_sky_weighting="field"),
+    "field_selection": dict(
+        completeness="selection", selection=SELECTION, catalog_sky_weighting="field"
+    ),
+}
+#: Rows with a galaxy and a free slot, where one more galaxy can be appended.
+ROOMY = np.flatnonzero(
+    (STORE.catalog.ngals > 0) & (STORE.catalog.ngals < STORE.catalog.zgals.shape[1])
+)
+
+
+def _with_galaxy(store, row, z, dz=1.0e-4):
+    """``store`` with one more real galaxy in ``row``, the row kept sorted by redshift."""
+    catalog = store.catalog
+    arrays = {
+        name: np.array(getattr(catalog, name)) for name in ("zgals", "dzgals", "wgals", "ngals")
+    }
+    n = arrays["ngals"][row] + 1
+    arrays["zgals"][row, n - 1] = z
+    arrays["dzgals"][row, n - 1] = dz
+    arrays["wgals"][row, n - 1] = 1.0
+    arrays["ngals"][row] = n
+    order = np.argsort(arrays["zgals"][row, :n], kind="stable")
+    for name in ("zgals", "dzgals", "wgals"):
+        arrays[name][row, :n] = arrays[name][row, :n][order]
+    return _with(store, **arrays)
+
+
+@pytest.mark.parametrize("mode", sorted(CATALOG_MODES))
+def test_real_galaxy_beyond_the_grid_is_refused_at_bind(mode):
+    row = int(ROOMY[-1])
+    slot = int(STORE.catalog.ngals[row])
+    store = _with_galaxy(STORE, row, 5.5)
+    analysis = ds.model(
+        cosmology=COSMOLOGY, population=POPULATION, catalog=store, **CATALOG_MODES[mode]
+    )
+    with pytest.raises(
+        ValueError,
+        match=rf"1 real galaxy lies beyond the redshift grid, which ends at z = 5 "
+        rf"\(first: row {row}, slot {slot}, z = 5\.5; largest z = 5\.5\)",
+    ):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+def test_galaxies_beyond_the_grid_are_counted_over_row_blocks(monkeypatch):
+    from darksirens.catalog import types
+
+    first, last = int(ROOMY[0]), int(ROOMY[-1])
+    store = _with_galaxy(_with_galaxy(STORE, last, 7.0), first, np.nextafter(Z_TOP, 6.0))
+    monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 5 * store.catalog.zgals.shape[1])
+    with pytest.raises(
+        ValueError, match=rf"2 real galaxies lie beyond .*first: row {first}, .*largest z = 7\)"
+    ):
+        validate_catalog(store.catalog, z_max=Z_TOP)
+    # The grid is the model's: without it the arrays alone are a valid catalog.
+    assert validate_catalog(store.catalog) is store.catalog
+
+
+def test_padding_beyond_the_grid_is_not_a_galaxy():
+    # The surveys writer pads redshifts with 100.0; only the first ngals slots
+    # of a row are galaxies. A survey depth changes nothing about that.
+    store = catalog_store(11, z_depth=0.22)
+    catalog = store.catalog
+    pad = _padding(catalog)
+    assert pad.any() and np.all(catalog.zgals[pad] == 100.0)
+    assert validate_catalog(catalog, z_max=Z_TOP) is catalog
+    inside = _with(store, zgals=np.where(pad, 0.5, catalog.zgals))
+    for kwargs in (CATALOG_MODES["complete"], CATALOG_MODES["selection"]):
+        values = _values(store, **kwargs)
+        assert np.isfinite(values).all()
+        assert values.tobytes() == _values(inside, **kwargs).tobytes()
+
+
+def test_galaxy_above_the_survey_depth_and_inside_the_grid_is_accepted():
+    store = catalog_store(11, z_depth=0.22)
+    deep = _with_galaxy(store, int(ROOMY[-1]), 3.0, dz=0.04)
+    assert validate_catalog(deep.catalog, z_max=Z_TOP) is deep.catalog
+    for kwargs in (CATALOG_MODES["complete"], CATALOG_MODES["selection"]):
+        assert np.isfinite(_values(deep, **kwargs)).all()
+
+
+@pytest.mark.parametrize("mode", ("complete", "selection", "field_complete", "field_selection"))
+def test_galaxy_at_the_top_of_the_grid_is_evaluated_as_one_inside(mode):
+    # A kernel that straddles the top is truncated there and renormalised, so
+    # the galaxy keeps its share of the row's weight and puts no host near the
+    # samples (z < 0.3): the same likelihood as with the galaxy at z = 4.
+    row = int(ROOMY[-1])
+    reference = _values(_with_galaxy(STORE, row, 4.0), **CATALOG_MODES[mode])
+    assert np.isfinite(reference).all()
+    for z in (Z_TOP - 0.01, np.nextafter(Z_TOP, 0.0), Z_TOP):
+        got = _values(_with_galaxy(STORE, row, z), **CATALOG_MODES[mode])
+        np.testing.assert_allclose(got, reference, rtol=0.0, atol=1.0e-9)
+
+
+# ---------------------------------------------------------------------------
+# A real galaxy far below z = 0, in kernel widths
+
+FIXED_WIDTH = {"sigma_kde": 0.01}
+
+
+def _bind_quietly(store, **kwargs):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*redshift widths below")
+        return _values(store, **kwargs)
+
+
+@pytest.mark.parametrize("mode", ("complete", "selection", "field_complete"))
+@pytest.mark.parametrize("z", (-0.002, -0.02))
+def test_small_negative_redshift_is_accepted_and_evaluated(mode, z):
+    # 0.2 and 2 widths below zero at sigma_kde = 0.01: the truncated kernel
+    # sits at z = 0+, far below the samples, as a galaxy at z = 4 is far above.
+    row = int(ROOMY[-1])
+    kwargs = dict(fixed_survey=FIXED_WIDTH, **CATALOG_MODES[mode])
+    reference = _bind_quietly(_with_galaxy(STORE, row, 4.0), **kwargs)
+    got = _bind_quietly(_with_galaxy(STORE, row, z), **kwargs)
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, reference, rtol=0.0, atol=1.0e-5)
+
+
+@pytest.mark.parametrize("mode", sorted(CATALOG_MODES))
+def test_galaxy_many_widths_below_zero_is_refused_at_bind(mode):
+    # z = -0.1 at width 0.01 is 10 widths below zero: the row had no hosts
+    # left (-inf for a complete catalog and with the selection completeness).
+    row = int(ROOMY[-1])
+    store = _with_galaxy(STORE, row, -0.1)
+    analysis = ds.model(
+        cosmology=COSMOLOGY, population=POPULATION, catalog=store,
+        fixed_survey=FIXED_WIDTH, **CATALOG_MODES[mode],
+    )
+    with pytest.raises(
+        ValueError,
+        match=rf"1 real galaxy lies more than 5 effective redshift widths below z = 0 "
+        rf"\(first: row {row}, slot 0, z = -0\.1, width 0\.01.* at sigma_kde = 0\.01, "
+        r"10 widths\)",
+    ):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+def test_sampled_sigma_kde_refuses_what_fails_everywhere_and_warns_for_the_rest():
+    # The default prior is sigma_kde in [0, 0.05]. z = -0.3 is 6 widths below
+    # zero at its upper edge: no proposal can evaluate the row.
+    row = int(ROOMY[-1])
+    with pytest.raises(ValueError, match="more than 5 effective redshift widths below z = 0"):
+        _values(_with_galaxy(STORE, row, -0.3), completeness="complete")
+    # z = -0.1 is 2 widths below at the upper edge and out of reach below
+    # sigma_kde = 0.02: accepted, and the warning says where it goes wrong.
+    with pytest.warns(
+        UserWarning, match=r"1 real galaxy at negative redshift is more than 5 .* when "
+        r"sigma_kde is below 0\.02, and sigma_kde reaches 0 here",
+    ):
+        analysis, bound = _bound(_with_galaxy(STORE, row, -0.1), completeness="complete")
+
+    def value(sigma_kde):
+        return float(bound(theta_of(analysis, {**SURVEY, "H0": 70.0, "sigma_kde": sigma_kde})))
+
+    assert np.isfinite(value(0.04))
+    assert value(0.01) == -np.inf
+
+
+def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
+    from darksirens.catalog import types
+
+    catalog = STORE.catalog
+    monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 5 * catalog.zgals.shape[1])
+    # Negative padding is a placeholder, whatever its value.
+    padded = catalog._replace(zgals=np.where(_padding(catalog), -1.0, catalog.zgals))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check_kernels_below_zero(padded, 0.0, 0.05)
+    assert _bind_quietly(_with(STORE, zgals=padded.zgals), completeness="complete").tobytes() == (
+        _values(STORE, completeness="complete").tobytes()
+    )
+    first, last = int(ROOMY[0]), int(ROOMY[-1])
+    far = _with_galaxy(_with_galaxy(STORE, last, -0.2), first, -0.06).catalog
+    with pytest.raises(ValueError, match=rf"2 real galaxies lie .*first: row {first}, slot 0"):
+        check_kernels_below_zero(far, 0.01, 0.01)
+    # Just inside the limit of 5 widths of sqrt(dz^2 + sigma_kde^2).
+    width = float(np.hypot(1.0e-4, 0.01))
+    edge = _with_galaxy(STORE, last, -0.999 * KERNEL_WIDTHS_BELOW_ZERO_MAX * width).catalog
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check_kernels_below_zero(edge, 0.01, 0.01)

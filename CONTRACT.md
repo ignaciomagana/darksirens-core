@@ -373,6 +373,21 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   compute_dtype=None)` are likelihood options, never sampler options. `auto`
   resolves to `soft` for NumPyro and `hard` otherwise. They are refused for an
   `InferenceTarget`.
+- `bind_analysis` refuses a catalog whose real galaxies (the first `ngals`
+  slots of a row; padding is never read) cannot be represented by the
+  redshift kernel. A real redshift above the top of the redshift grid
+  (`DARKSIRENS_ZMAX`, default 5) raises `ValueError`; one at the top or
+  below it is accepted whatever its width, including above a survey depth. A
+  real redshift more than 5 effective widths
+  (`max(sqrt(dz**2 + sigma_kde**2), 1e-4)`) below zero raises `ValueError`
+  when that holds at the largest `sigma_kde` of the analysis, and emits a
+  `UserWarning` when it holds only for part of a sampled `sigma_kde` prior.
+  Negative redshifts within that reach are accepted. The checks run where
+  the grid and the width are known, at bind; `validate_catalog(z_max=...)`
+  and `darksirens.catalog.redshift.check_kernels_below_zero` are the host
+  functions, and a caller that compacts a catalog itself
+  (`compact_catalog`, `compact_pe_selection_catalog`) gets the first only
+  by passing `z_max`.
 - `bind_analysis(..., compute_dtype=None|"float64"|"float32")`: `None` and
   `"float64"` are the default float64 program, unchanged bit for bit (the
   option is not even passed to the likelihood). `"float32"` rounds the

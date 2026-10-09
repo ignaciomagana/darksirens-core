@@ -1023,6 +1023,82 @@ because core divides by each row's own mean weight and takes one `n0`. Core
 does not check any of this, and `host_mass="weight"` remains refused with an
 incomplete catalog.
 
+### Real galaxies outside the redshift range of the kernel (new errors and a warning at bind; no likelihood change for accepted catalogs)
+
+Each galaxy's redshift distribution is its Gaussian truncated to the grid
+`[0, DARKSIRENS_ZMAX]` (default 5) and renormalised. A real galaxy stored far
+outside that range, in units of its effective width
+`max(sqrt(dz**2 + sigma_kde**2), 1e-4)`, made its whole sky row lose its
+hosts, with no error. Reproduced on an nside-2 catalog with one such galaxy
+added to one row (15 of 48 PE samples), `sigma_kde = 0.01`, against the same
+galaxy placed at z = 4:
+
+- **Above the grid.** With a redshift error of 1e-4 (50 widths beyond the
+  top) a galaxy at z = 5.5 gave `-inf` for `completeness="complete"` and a
+  finite likelihood lower by 0.97, 3.05 and 3.00 at H0 = 55, 70 and 80 for
+  `"selection"`, in the conditional and the field weighting; the count ratio
+  moved by 1e-5. With a photometric error of 0.01 (1 + z), the same galaxy
+  at z = 5.5 (7.6 widths) and at z = 6 were evaluated correctly, to rounding,
+  and z = 10 failed in the same way. The galaxy's normaliser stays accurate
+  (1e-3 or better out to 40 widths); what fails is the row's kernel sum,
+  which is taken relative to the row's largest galaxy weight
+  (`log_kw_eff_rowmax`): the galaxy's weight is the reciprocal of its
+  vanishing in-grid mass, and once it exceeds the others by about e^745 they
+  underflow to zero.
+- **Below zero.** A galaxy at z = -0.1 with width 0.01 gave `-inf` with
+  both completeness models; at z = -0.3 to -1 it gave `-inf` for a complete
+  catalog and `-inf` or the same finite shift as above with the selection
+  completeness. Here the normaliser itself fails: its
+  quadrature nodes are clipped to z = 0, where the galaxy measure vanishes.
+  Against a dense quadrature of the same integrand it is right to its usual
+  7e-3 down to 6.0 widths below zero, off by 0.03 at 6.25, 0.5 at 6.75 and
+  3.6 at 7.0, and by about 700 from 7.25 on, at every width and `delta`
+  tried. z = -0.002 and -0.02 (0.2 and 2 widths) were evaluated correctly.
+
+`bind_analysis` now checks the real galaxies of the catalog (the first
+`ngals` slots of each row; padding, such as the surveys writer's 100.0, is
+not read):
+
+- **A real redshift above the top of the grid raises `ValueError`**, naming
+  the number of such galaxies, the first one's row and slot, the largest
+  redshift and the grid's upper edge (`validate_catalog(..., z_max=...)`,
+  run inside the pass binding already makes). The rule does not depend on
+  the width: a galaxy at or below the top keeps at least half of its kernel
+  on the grid and is evaluated correctly, so kernels that straddle the top
+  are accepted as before (the same likelihood as with the galaxy at z = 4,
+  to 1e-9). A galaxy above a survey depth and inside the grid is accepted as
+  before.
+- **A real redshift more than 5 effective widths below zero raises
+  `ValueError`** when that holds at the largest `sigma_kde` the analysis
+  evaluates (its fixed value or the upper edge of its prior), so at every
+  proposal (`darksirens.catalog.redshift.check_kernels_below_zero`; the
+  limit is `KERNEL_WIDTHS_BELOW_ZERO_MAX`, one width inside the last
+  correct value). When it holds only below some `sigma_kde` inside a sampled
+  prior, binding emits a `UserWarning` that names that value: the catalog is
+  accepted, and the row is wrong for proposals below it. With the default
+  prior `[0, 0.05]` and a spectroscopic error, a galaxy at z = -0.002 is in
+  this case for `sigma_kde` below 4e-4. Negative redshifts within reach
+  (peculiar velocities) are accepted silently at bind; `ds.load_catalog`
+  keeps its warning for any negative redshift of a real galaxy.
+- `ds.load_catalog` does not make these checks: the catalog package imports
+  without the cosmology tables, and the width depends on the analysis.
+  Callers that compact a catalog themselves (`compact_catalog`,
+  `compact_pe_selection_catalog` without `z_max`) are not checked either.
+- **`host_mass="weight"` without a catalog** now raises a `ValueError` that
+  says a catalog is required, instead of the refusal about the conditional
+  sky weighting.
+
+**Cost.** The upper check adds one comparison to the row blocks binding
+already reads. The lower check is one more pass in row blocks that takes the
+minimum of each block and looks further only where it is negative.
+
+**Numerics.** Accepted catalogs evaluate exactly as before: 150
+log-likelihoods are the same bit for bit before and after (complete, count
+ratio and selection, each conditional and field-weighted, at three H0
+values, on eight catalogs: plain, with a survey depth, with a galaxy at
+z = 4.99, at the grid top, at z = 3 above a survey depth, at z = -0.002,
+-0.02 and -0.1 with a wide error; and two catalogs together).
+
 ### Pooled count-ratio completeness (opt-in, default unchanged)
 
 `ds.model(catalog=..., completeness="incomplete", count_ratio="pooled",
