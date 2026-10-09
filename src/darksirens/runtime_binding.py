@@ -720,6 +720,7 @@ class BoundAnalysis:
                 self.n_draw,
                 completeness=self.analysis.redshift.completeness,
                 normalizer=self.analysis.redshift.normalizer,
+                host_mass=self.analysis.redshift.host_mass,
                 **ordinary_common,
             )
 
@@ -1020,6 +1021,29 @@ def _mixture_pin_premise(analysis, k):
     return decoded.cosmology, params
 
 
+def _row_weight_sums(catalog) -> np.ndarray:
+    """Each row's sum of real-galaxy weights, ``(N_rows,)`` float64 (host side, NumPy).
+
+    The row host mass of ``host_mass="weight"``. Only the first ``ngals``
+    slots of a row count, whatever its padding slots hold. One pass over the
+    stored weights in blocks of rows, so nothing of the catalog's size is
+    allocated.
+    """
+    wgals = catalog.wgals
+    ngals = np.asarray(catalog.ngals)
+    n_rows, n_max = (int(n) for n in np.shape(wgals))
+    slots = np.arange(n_max)[None, :]
+    sums = np.zeros(n_rows, dtype=np.float64)
+    step = max(1, (1 << 24) // max(n_max, 1))
+    for start in range(0, n_rows, step):
+        stop = min(start + step, n_rows)
+        block = np.asarray(wgals[start:stop], dtype=np.float64)
+        sums[start:stop] = np.sum(
+            np.where(slots < ngals[start:stop, None], block, 0.0), axis=1
+        )
+    return sums
+
+
 def _bind_mixture(analysis, events, injections):
     """Per-catalog compact and full-sky views, caches, pins and row fractions.
 
@@ -1039,6 +1063,7 @@ def _bind_mixture(analysis, events, injections):
         redshift, analysis.parameters.labels, analysis.parameters.kernel_pin
     )
     galaxy_list = catalog_evaluation_settings().kernel_layout == "galaxy_list"
+    weighted = redshift.host_mass == "weight"
     pe_rows, sel_rows, components = [], [], []
     for k, (component, completeness, normalizer) in enumerate(
         zip(redshift.components, redshift.catalog_completeness, redshift.catalog_normalizers)
@@ -1052,6 +1077,19 @@ def _bind_mixture(analysis, events, injections):
         )
         views = compact_pe_selection_catalog(store.catalog, global_pe, global_sel)
         compact = _jax_catalog(views.catalog)
+        compact_weight = full_weight = None
+        if weighted:
+            # host_mass="weight": the rows' weight sums, from the stored weights
+            # before the full view below drops them. With two or more catalogs
+            # the compact rows read the full sky's sums (one pass).
+            if n >= 2:
+                sums = _row_weight_sums(store.catalog)
+                full_weight = jnp.asarray(sums)
+                compact_weight = jnp.asarray(
+                    sums[_store_rows(store.catalog, views.catalog)]
+                )
+            else:
+                compact_weight = jnp.asarray(_row_weight_sums(views.catalog))
         full = None
         light = False
         if n >= 2:
@@ -1114,6 +1152,8 @@ def _bind_mixture(analysis, events, injections):
                 full_pin=full_pin,
                 compact_row_fraction=compact_fraction,
                 full_row_fraction=full_fraction,
+                compact_row_weight=compact_weight,
+                full_row_weight=full_weight,
             )
         )
         pe_rows.append(np.asarray(views.pe_sample_to_row, dtype=np.int32))

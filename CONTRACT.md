@@ -232,7 +232,18 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   (its galaxy count); `"moments"` with the count ratio or a complete catalog
   is refused. `compute_dtype="float32"` is refused with a complete catalog
   (as for the conditional complete catalog), and a missing-host extension
-  is not called for one. The kernel pin applies per
+  is not called for one. `host_mass="count"|"weight"` is what a row's host
+  mass is: `"count"` (the default, the reference's convention) is the row's
+  galaxy count, with the galaxy weights sharing it inside the row;
+  `"weight"` (opt-in, no reference counterpart) is the sum of the row's
+  galaxy weights `W_p`, so `n_k = W_p p_cat(z | p)` and `Z_k = sum_p W_p`. It
+  is one value for every catalog, requires every catalog to be
+  `"complete"`, and is refused with `"incomplete"`, `"selection"` and the
+  conditional weighting. The row sums are taken once at bind from the stored
+  weights (real slots only) and are data operands of the binding
+  (`CatalogMixtureComponent.compact_row_weight`, `full_row_weight`).
+  `ParameterPlan.catalog_model` records `host_mass` only when it is
+  `"weight"`. The kernel pin applies per
   catalog, to its compact view and (with a survey depth) its full sky, when
   `Om0`, `w0`, `wa` and its own `delta`, `sigma_kde` are fixed; each pin's
   catalog digest is checked against its view when the binding is made. A

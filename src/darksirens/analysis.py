@@ -62,6 +62,12 @@ FIELD_NORMALIZER_SETTINGS = ("auto", "direct", "moments")
 #: catalog): the per-row count ratio, the magnitude-selection curve, or a
 #: complete catalog (every host is in it).
 FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
+#: Settings of ``model(..., host_mass=...)``: what a sky row's host mass is
+#: under the field weighting. ``"count"`` (the default) is the row's galaxy
+#: count, with the galaxy weights sharing it inside the row; ``"weight"``
+#: (opt-in, complete catalogs only) is the sum of the row's galaxy weights,
+#: so every galaxy carries its own weight in every row.
+HOST_MASS_SETTINGS = ("count", "weight")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
@@ -142,13 +148,17 @@ class FieldCatalogMixtureRedshift:
     :mod:`darksirens.catalog.mixture`; it is not evaluated for one catalog,
     where it cancels), likewise one value when they agree and a tuple
     otherwise. :attr:`catalog_completeness` and :attr:`catalog_normalizers`
-    give both per catalog.
+    give both per catalog. ``host_mass`` is one of :data:`HOST_MASS_SETTINGS`,
+    the same for every catalog: ``"count"`` (a row's host mass is its galaxy
+    count) or ``"weight"`` (the sum of its galaxy weights; every catalog is
+    then complete).
     """
 
     components: tuple
     completeness: str | tuple = "incomplete"
     n0_units: str = "physical"
     normalizer: str | tuple = "direct"
+    host_mass: str = "count"
 
     @property
     def n_catalogs(self) -> int:
@@ -518,7 +528,8 @@ def _per_catalog(value, n, what, single_types):
 
 
 def _resolve_mixture(
-    catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer
+    catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer,
+    host_mass="count",
 ):
     """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
 
@@ -552,6 +563,17 @@ def _resolve_mixture(
                 f"{where}, got completeness={entry!r}"
             )
     resolved = tuple(entry or "incomplete" for entry in entries)
+    if host_mass == "weight":
+        for k, comp in enumerate(resolved):
+            if comp != "complete":
+                where = f" (catalog {k + 1})" if n >= 2 else ""
+                raise ValueError(
+                    "host_mass='weight' is implemented only for completeness='complete'"
+                    f", got completeness={comp!r}{where}: an incomplete catalog's "
+                    "out-of-catalog hosts would need a mean weight and the fraction of "
+                    "weight, not of galaxies, that the catalog holds, and weighting "
+                    "only the in-catalog hosts is inconsistent"
+                )
     if n0_units is not None and n0_units not in N0_UNITS_SETTINGS:
         raise ValueError(f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}")
     per_catalog_normalizer = isinstance(field_normalizer, (list, tuple))
@@ -639,6 +661,7 @@ def _resolve_mixture(
         completeness=_collapse_setting(resolved),
         n0_units=n0_units or "physical",
         normalizer=_collapse_setting(normalizers),
+        host_mass=host_mass,
     )
 
 
@@ -1159,11 +1182,14 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     and row-fraction digest. The completeness and the normaliser are one
     string when every catalog shares it (the record of every analysis before
     per-catalog completeness) and a list with one entry per catalog otherwise.
+    ``host_mass`` enters only when it is not the default ``"count"``, so the
+    record of every analysis without it is unchanged.
     """
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         from darksirens.selection.catalog import selection_to_mapping
 
         return _canonical_json({
+            **({} if redshift.host_mass == "count" else {"host_mass": redshift.host_mass}),
             "sky_weighting": "field",
             "completeness": redshift.completeness,
             "n_catalogs": redshift.n_catalogs,
@@ -1256,6 +1282,7 @@ def model(
     catalog_sky_weighting="conditional",
     field_normalizer=None,
     per_catalog_population=None,
+    host_mass="count",
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -1394,6 +1421,27 @@ def model(
     (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`) is not
     called for one, which has no missing hosts.
 
+    ``host_mass="weight"`` (opt-in; the default ``"count"`` changes nothing)
+    makes the host mass of a sky row the sum of its galaxy weights instead of
+    its galaxy count, for complete catalogs under the field weighting. With
+    ``"count"`` a row carries ``N_obs,p = ngals[p]`` and the weights only
+    share that mass among the row's galaxies, ``n(z | p) = (ngals[p] / W_p)
+    sum_i w_i K_i(z)`` with ``W_p = sum_i w_i`` over the row's real galaxies.
+    With ``"weight"`` the row carries ``W_p``: ``n_k(z | p) = W_p p_cat(z | p)
+    = sum_i w_i K_i(z)`` and ``Z_k = sum_p W_p`` over every row of the
+    catalog's sky, so a galaxy's share of the hosts is its weight whatever
+    row it is in. Inside a row nothing changes. The weights must still be
+    finite and strictly positive, and multiplying every weight of a catalog
+    by one constant changes nothing. The row sums are taken once when the
+    analysis is bound, from the stored weights. It is one value for every
+    catalog and is refused where it is not implemented: with
+    ``completeness="incomplete"`` or ``"selection"`` for any catalog (the
+    out-of-catalog hosts would need a mean weight and a weighted
+    completeness; only the in-catalog hosts would be weighted) and with the
+    conditional weighting (which divides each row's host mass out). The plan
+    records it (``ParameterPlan.catalog_model``) and a run fingerprint
+    changes with it. The frozen reference has no such mode.
+
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
     labels' ``_c{k}`` suffix) its own copy of the named population
@@ -1443,6 +1491,8 @@ def model(
             f"catalog_sky_weighting must be one of {CATALOG_SKY_WEIGHTINGS}, got "
             f"{catalog_sky_weighting!r}"
         )
+    if host_mass not in HOST_MASS_SETTINGS:
+        raise ValueError(f"host_mass must be one of {HOST_MASS_SETTINGS}, got {host_mass!r}")
     several = isinstance(catalog, (list, tuple))
     if catalog_sky_weighting == "field":
         if catalog is None:
@@ -1462,9 +1512,16 @@ def model(
             selection=selection,
             row_fraction=row_fraction,
             field_normalizer=field_normalizer,
+            host_mass=host_mass,
         )
         catalog_priors = _INCOMPLETE_CATALOG_PRIORS
     else:
+        if host_mass != "count":
+            raise ValueError(
+                "host_mass='weight' applies only to catalog_sky_weighting='field' "
+                "with completeness='complete': the conditional weighting normalizes "
+                "every sky row by itself, which divides the row's host mass out"
+            )
         if field_normalizer is not None:
             raise ValueError(
                 "field_normalizer applies only to catalog_sky_weighting='field'"
@@ -1722,6 +1779,7 @@ __all__ = [
     "CATALOG_SKY_WEIGHTINGS",
     "CatalogComponent",
     "FIELD_COMPLETENESS_SETTINGS",
+    "HOST_MASS_SETTINGS",
     "FIELD_NORMALIZER_SETTINGS",
     "FieldCatalogMixtureRedshift",
     "COMPLETENESS_SETTINGS",

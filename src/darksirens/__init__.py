@@ -82,6 +82,7 @@ def model(
     catalog_sky_weighting="conditional",
     field_normalizer=None,
     per_catalog_population=None,
+    host_mass="count",
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -106,6 +107,7 @@ def model(
         catalog_sky_weighting=catalog_sky_weighting,
         field_normalizer=field_normalizer,
         per_catalog_population=per_catalog_population,
+        host_mass=host_mass,
     )
 
 
