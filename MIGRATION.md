@@ -856,3 +856,73 @@ survey depth; two catalogs; a fixed density in both units) at three H0
 values: all 48 values are the same bit for bit. The tests compare the
 observed-count density against the previous implementation bit for bit on a
 float64 catalog.
+
+
+### Kernel pin and row chunks at bind (memory fix; no likelihood change)
+
+Binding a large catalog needed far more memory than the bound likelihood
+keeps. The bound likelihood keeps 40 bytes per padded slot of the compact
+view (rows touched by an event or an injection times the longest row): 24 for
+the catalog's redshifts, widths and weights, 16 for the kernel pin's two
+per-slot leaves. A consumer measured the bind peak on GPU (complete catalog,
+field weighting, nside 64, 150 to 400 million galaxies) at 65 bytes per slot
+when the number of touched rows was a multiple of 512 and 105 when it was not,
+and a 400-million-galaxy bind failed on a single 24.9 GiB request. Those GPU
+numbers are the consumer's. The numbers below were measured for this change
+on CPU, where the device is the host (peak resident memory of the process,
+49,152 or 48,185 touched rows, 50, 100 and 200 million galaxies).
+
+Two things held the extra memory, and both are gone.
+
+- **The row-chunked build copied the catalog to pad it.** Above 2^25 slots
+  the kernel is built in chunks of 512 rows. When the row count was not a
+  multiple of 512, the three per-slot arrays were concatenated with zero rows
+  first (24 bytes per slot) and the padded outputs were sliced afterwards (up
+  to 16 more). Each chunk is now sliced from the catalog inside the loop.
+  The last chunk is moved back to end at the last row, so the rows it shares
+  with the chunk before it are computed twice and dropped. Nothing is padded
+  and no argument is copied (`darksirens.catalog.redshift._map_rows`).
+- **The kernel pin built the whole per-proposal state.** The pin keeps two of
+  the state's five per-slot leaves. The other three (24 bytes per slot) were
+  outputs of the same program and stayed live until it returned. Above the
+  same threshold the pin now builds only its own leaves, chunk by chunk, and
+  writes each chunk into them in place
+  (`darksirens.catalog.redshift._pinned_kernel_leaves`). It no longer
+  evaluates the kernel window's check, which the pin never kept (every
+  likelihood call still evaluates it).
+
+| bytes per slot at bind, CPU | before | after |
+| --- | --- | --- |
+| peak, touched rows a multiple of 512 | 76.0 to 76.9 | 52.1 to 53.0 |
+| peak, touched rows not a multiple of 512 | 106.8 to 107.4 | 52.7 to 53.4 |
+| resident after bind | 40.3 to 41.3 | 40.3 to 41.4 |
+
+The remaining 12 bytes per slot above the resident 40 are one chunk's
+temporaries, not a per-slot cost: on CPU a chunk needs about 1,130 bytes for
+each of its 512 x N_max slots (the 24 quadrature nodes of every slot), which
+at nside 64 is 1/96 of the catalog. On GPU the consumer measured the chunk's
+share at 0.1 to 0.2 GiB. The pin alone took 49.7 s before and 33.7 s after at
+50 million galaxies (same node, 32 cores). The per-proposal state, which a
+run without the pin builds on every call, peaks 24 bytes per slot lower when
+the rows are not a multiple of 512 (86 to 62 at 50 million galaxies) and is
+unchanged otherwise, in memory and in time.
+
+Not changed: a view of at most 2^25 slots is still built in one pass, whose
+temporaries are the same 1,130 bytes per slot on CPU (37 GB just under the
+threshold); and with `kernel_layout="galaxy_list"` on an incomplete catalog
+the normaliser of the real galaxies is still evaluated whole before the
+chunks (8 bytes per slot, 16 with a survey depth).
+
+**Numerics.** No likelihood value changes. Every row runs the same
+arithmetic in any chunk. The pin's leaves were compared by digest before and
+after on the 50, 100 and 200 million galaxy catalogs with aligned and
+unaligned rows, and the log-likelihood on those bindings at eight H0 values:
+all identical. The log-likelihood and its H0 derivative were compared as hex
+floats before and after on 20 configurations of the mock (complete, count
+ratio and selection completion; conditional and field weighting; one and two
+catalogs; `host_mass="weight"`; pin on and off; kernel window on and off;
+padded and galaxy-list layouts), with the library's chunk constants and with
+the chunked schedule forced at four chunk sizes: the output files are
+byte-identical. The tests compare the chunked state and the chunked pin with
+the unchunked ones bit for bit at five chunk sizes (tails of four rows and of
+one row, an exact multiple, exactly one chunk, fewer rows than a chunk).
