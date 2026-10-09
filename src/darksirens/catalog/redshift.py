@@ -27,6 +27,7 @@ catalog it is about to be served with.
 from __future__ import annotations
 
 import hashlib
+import warnings
 from typing import Any, NamedTuple
 
 import jax
@@ -42,7 +43,7 @@ from darksirens.cosmology._grid import log_interp_zgrid, zgrid
 from darksirens.cosmology.distances import dV_of_z, threads_distance_table
 from darksirens.cosmology.parameters import H0_FID, CosmologyParameters
 
-from .types import CatalogParameters, GalaxyCatalog, GalaxyIndex
+from .types import CatalogParameters, GalaxyCatalog, GalaxyIndex, row_blocks
 
 jax.config.update("jax_enable_x64", True)
 
@@ -268,6 +269,85 @@ def _row_log_kernel_norms(zs, sig_eff, real, log_g_grid, z_hi=_ZMAX, ndtri_fn=nd
         + jnp.log(jnp.maximum(Zg, 1.0e-300)),
     )
     return jnp.where(real, log_Z, 0.0)
+
+
+#: Effective kernel widths below ``z = 0`` up to which a real galaxy is
+#: accepted.  Measured against a dense quadrature of the same integrand,
+#: :func:`_row_log_kernel_norms` matches to its own 7e-3 for a centre up to
+#: 6.0 widths below zero; it is off by 0.03 at 6.25, 0.5 at 6.75 and 3.6 at
+#: 7.0, and by about 700 from 7.25 on (every node is clipped to ``z = 0``,
+#: where the measure vanishes), which removes every host of the row.
+KERNEL_WIDTHS_BELOW_ZERO_MAX: float = 5.0
+
+
+def check_kernels_below_zero(catalog: GalaxyCatalog, sigma_kde_lo, sigma_kde_hi) -> None:
+    """Refuse real galaxies too far below ``z = 0`` for the kernel normaliser.
+
+    Host side, in row blocks; padding is not read.  ``sigma_kde_lo`` and
+    ``sigma_kde_hi`` bound the ``|sigma_kde|`` the likelihood will evaluate
+    (equal when it is fixed).  A real galaxy more than
+    :data:`KERNEL_WIDTHS_BELOW_ZERO_MAX` effective widths below zero at
+    ``sigma_kde_hi`` is beyond the normaliser at every proposal and raises
+    ``ValueError``.  One that is within reach there, but not at
+    ``sigma_kde_lo``, emits a ``UserWarning`` naming the ``sigma_kde`` below
+    which its row goes wrong.  A small negative redshift (a peculiar
+    velocity) is within reach at any width and passes silently.
+    """
+
+    z = np.asarray(catalog.zgals)
+    dz = np.asarray(catalog.dzgals)
+    ng = np.asarray(catalog.ngals)
+    reach = KERNEL_WIDTHS_BELOW_ZERO_MAX
+    cols = np.arange(z.shape[1])[None, :]
+    n_far, first_far, n_part, sigma_needed = 0, None, 0, 0.0
+    for rows in row_blocks(z.shape[0], z.shape[1]):
+        z_rows = z[rows]
+        if not z_rows.size or not z_rows.min() < 0.0:
+            continue
+        negative = (cols < ng[rows, None]) & (z_rows < 0.0)
+        if not negative.any():
+            continue
+        depth = -z_rows[negative].astype(np.float64)
+        var = dz[rows][negative].astype(np.float64) ** 2
+        far = depth > reach * np.maximum(np.sqrt(var + sigma_kde_hi**2), SIGMA_EFF_FLOOR)
+        part = ~far & (
+            depth > reach * np.maximum(np.sqrt(var + sigma_kde_lo**2), SIGMA_EFF_FLOOR)
+        )
+        if far.any():
+            if first_far is None:
+                row, slot = np.argwhere(negative)[np.flatnonzero(far)[0]]
+                first_far = (int(row) + (rows.start or 0), int(slot))
+            n_far += int(np.count_nonzero(far))
+        if part.any():
+            n_part += int(np.count_nonzero(part))
+            needed = np.sqrt(np.maximum((depth[part] / reach) ** 2 - var[part], 0.0))
+            sigma_needed = max(sigma_needed, float(needed.max()))
+    if n_far:
+        row, slot = first_far
+        width = max(float(np.hypot(dz[row, slot], sigma_kde_hi)), SIGMA_EFF_FLOOR)
+        raise ValueError(
+            f"{n_far} real {'galaxy lies' if n_far == 1 else 'galaxies lie'} more than "
+            f"{reach:g} effective redshift widths below z = 0 (first: row {row}, slot "
+            f"{slot}, z = {float(z[row, slot]):.6g}, width {width:.6g} at sigma_kde = "
+            f"{sigma_kde_hi:.6g}, {-float(z[row, slot]) / width:.3g} widths). A "
+            "galaxy's redshift distribution is truncated at zero and renormalised; "
+            "that far below zero the normalisation fails and the galaxy's sky row "
+            "loses every host. A negative redshift within a few widths of zero (a "
+            "peculiar velocity) is accepted; drop these entries or correct their "
+            "redshift or redshift error"
+        )
+    if n_part:
+        warnings.warn(
+            f"{n_part} real {'galaxy' if n_part == 1 else 'galaxies'} at negative "
+            f"redshift {'is' if n_part == 1 else 'are'} more than {reach:g} effective "
+            f"redshift widths below z = 0 when sigma_kde is below {sigma_needed:.3g}, "
+            f"and sigma_kde reaches {sigma_kde_lo:.3g} here: below that value the "
+            "galaxy's truncated redshift distribution cannot be normalised and its "
+            "sky row loses its hosts. Fix sigma_kde, raise the lower edge of its "
+            "prior, or drop these entries.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _renormalize_below_depth(
@@ -1620,11 +1700,13 @@ __all__ = [
     "KERNEL_PIN_H0_REF",
     "KERNEL_PIN_PROBE_ROWS",
     "KERNEL_PIN_TOL",
+    "KERNEL_WIDTHS_BELOW_ZERO_MAX",
     "PinnedCatalogKernel",
     "SIGMA_EFF_FLOOR",
     "build_catalog_kernel_state",
     "build_pinned_catalog_kernel",
     "catalog_kernel_pin_digest",
+    "check_kernels_below_zero",
     "check_pinned_catalog_kernel",
     "eval_log_catalog_prior_state",
     "eval_log_catalog_prior_state_vmap",

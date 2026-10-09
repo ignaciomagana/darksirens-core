@@ -29,8 +29,10 @@ from darksirens.catalog.compact import compact_pe_selection_catalog
 from darksirens.catalog.completeness import build_observed_density_cache
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.redshift import (
+    _ZMAX,
     PinnedCatalogKernel,
     build_pinned_catalog_kernel,
+    check_kernels_below_zero,
     check_pinned_catalog_kernel,
     kernel_window_applies,
     with_galaxy_index,
@@ -986,6 +988,23 @@ def _kernel_window_sigma_kde(analysis, k=None) -> float:
     return abs(float(sigma))
 
 
+def _sigma_kde_range(analysis, k=None) -> tuple[float, float]:
+    """The smallest and largest ``|sigma_kde|`` the bound likelihood evaluates.
+
+    Equal when ``sigma_kde`` is fixed; the prior's edges when it is sampled
+    (zero for a prior that spans it).
+    """
+    hi = _kernel_window_sigma_kde(analysis, k)
+    plan = analysis.parameters
+    name = "sigma_kde" if k is None else "sigma_kde" + catalog_label_suffix(k)
+    if name not in plan.labels:
+        return hi, hi
+    i = plan.labels.index(name)
+    lower, upper = float(plan.lower[i]), float(plan.upper[i])
+    lo = 0.0 if lower <= 0.0 <= upper else min(abs(lower), abs(upper))
+    return lo, hi
+
+
 def _with_kernel_window(analysis, catalog, k=None):
     """``catalog`` with the kernel window when it is configured.
 
@@ -1075,7 +1094,10 @@ def _bind_mixture(analysis, events, injections):
         global_sel = ang2pix_ring(
             store.nside, injections.columns["ra"], injections.columns["dec"]
         )
-        views = compact_pe_selection_catalog(store.catalog, global_pe, global_sel)
+        views = compact_pe_selection_catalog(
+            store.catalog, global_pe, global_sel, z_max=_ZMAX
+        )
+        check_kernels_below_zero(store.catalog, *_sigma_kde_range(analysis, k))
         compact = _jax_catalog(views.catalog)
         compact_weight = full_weight = None
         if weighted:
@@ -1329,9 +1351,14 @@ def bind_analysis(
             injections.columns["ra"],
             injections.columns["dec"],
         )
+        # z_max: a real galaxy beyond the redshift grid, in any row of the
+        # store, is refused here (validate_catalog says why).
         views = compact_pe_selection_catalog(
-            catalog_store.catalog, global_pe, global_sel
+            catalog_store.catalog, global_pe, global_sel, z_max=_ZMAX
         )
+        # The lower edge depends on the kernel width: a real galaxy too far
+        # below z = 0, in effective widths, is refused or warned about.
+        check_kernels_below_zero(catalog_store.catalog, *_sigma_kde_range(analysis))
         catalog = _jax_catalog(views.catalog)
         # Opt-in (kernel_layout="galaxy_list", darksirens.catalog.settings):
         # the compact view carries the list of its real galaxies, and the
