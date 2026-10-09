@@ -131,6 +131,18 @@ class CatalogPairViews(NamedTuple):
     selection_sample_to_row: Any
 
 
+#: Padded slots per row block of the host-side catalog checks.
+_CHECK_BLOCK_SLOTS: int = 2**22
+
+
+def row_blocks(n_rows: int, n_max: int):
+    """Row slices of about ``_CHECK_BLOCK_SLOTS`` padded slots each."""
+
+    step = max(1, _CHECK_BLOCK_SLOTS // max(1, int(n_max)))
+    for start in range(0, int(n_rows), step):
+        yield slice(start, start + step)
+
+
 def validate_catalog(
     catalog: GalaxyCatalog,
     *,
@@ -143,7 +155,9 @@ def validate_catalog(
     errors and strictly positive finite base weights.  Padding is unconstrained,
     except that a padded redshift must be finite: the kernel sum multiplies
     every slot's redshift offset by a reciprocal width that is zero on padding,
-    and ``nan * 0`` or ``inf * 0`` is NaN for the whole row.
+    and ``nan * 0`` or ``inf * 0`` is NaN for the whole row.  The arrays are
+    read in row blocks, so the check's own memory does not grow with the
+    catalog.
     """
 
     z = np.asarray(catalog.zgals)
@@ -171,25 +185,39 @@ def validate_catalog(
     if not np.isfinite(apix) or apix <= 0.0:
         raise ValueError(f"apix must be finite and > 0, got {apix!r}")
 
+    # Row blocks: the masks and the copies of the real-galaxy values are one
+    # block's size, not the catalog's.
     cols = np.arange(z.shape[1])[None, :]
-    real = cols < ng[:, None]
-    if np.any(~np.isfinite(z[real])):
+    check_sorted = require_sorted and z.shape[1] > 1
+    bad_z = bad_dz = bad_w = unsorted = False
+    n_bad = 0
+    for rows in row_blocks(z.shape[0], z.shape[1]):
+        real = cols < ng[rows, None]
+        z_rows = z[rows]
+        finite = np.isfinite(z_rows)
+        bad_z = bad_z or not bool(np.all(finite[real]))
+        n_bad += int(finite.size - np.count_nonzero(finite))
+        dz_real = dz[rows][real]
+        bad_dz = bad_dz or bool(np.any(~np.isfinite(dz_real)) or np.any(dz_real < 0.0))
+        w_real = w[rows][real]
+        bad_w = bad_w or bool(np.any(~np.isfinite(w_real)) or np.any(w_real <= 0.0))
+        if check_sorted:
+            unsorted = unsorted or bool(
+                np.any((np.diff(z_rows, axis=1) < 0.0) & real[:, 1:])
+            )
+    if bad_z:
         raise ValueError("real-galaxy redshifts must be finite")
-    if not np.all(np.isfinite(z)):
-        n_bad = int(np.count_nonzero(~np.isfinite(z)))
+    if n_bad:
         raise ValueError(
             f"zgals holds {n_bad} non-finite value(s) in its padding (slots at or "
             "beyond ngals); pad redshifts with a finite number such as 100.0"
         )
-    if np.any(~np.isfinite(dz[real])) or np.any(dz[real] < 0.0):
+    if bad_dz:
         raise ValueError("real-galaxy redshift errors must be finite and >= 0")
-    if np.any(~np.isfinite(w[real])) or np.any(w[real] <= 0.0):
+    if bad_w:
         raise ValueError("real-galaxy weights must be finite and strictly positive")
-
-    if require_sorted and z.shape[1] > 1:
-        left_real = np.arange(1, z.shape[1])[None, :] < ng[:, None]
-        if np.any((np.diff(z, axis=1) < 0.0) & left_real):
-            raise ValueError("real-galaxy prefixes must be non-decreasing in redshift")
+    if unsorted:
+        raise ValueError("real-galaxy prefixes must be non-decreasing in redshift")
 
     if catalog.unique_pixels is not None:
         up = np.asarray(catalog.unique_pixels)

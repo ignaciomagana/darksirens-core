@@ -8,7 +8,7 @@ Each case was reproduced on the unchanged code first:
 - a non-finite redshift in the padding of ``zgals``: ``-inf`` or a shifted
   likelihood, depending on the completeness;
 - a catalog file with more rows than its ``nside`` has pixels (a wrong
-  ``nside`` reads the wrong rows), or with negative redshifts;
+  ``nside`` reads the wrong rows); negative redshifts of real galaxies warn;
 - a PE store whose samples are interleaved across events;
 - a fixed ``log10n0`` with the unit left to the default.
 
@@ -231,15 +231,57 @@ def test_load_catalog_warns_on_fewer_rows_than_pixels(tmp_path):
     assert store.nside == 4
 
 
-def test_load_catalog_refuses_a_negative_redshift_of_a_real_galaxy(tmp_path):
+def test_load_catalog_warns_on_a_negative_redshift_of_a_real_galaxy(tmp_path):
+    # The kernel is defined for it and blueshifted nearby galaxies are real.
     z = np.array(STORE.catalog.zgals)
-    row = int(np.argmax(STORE.catalog.ngals > 0))
-    z[row, 0] = -0.01
-    with pytest.raises(ValueError, match="1 real galaxies have a negative redshift"):
-        load_catalog(_write_catalog(tmp_path / "c.h5", zgals=z))
+    first, last = np.flatnonzero(STORE.catalog.ngals > 0)[[0, -1]]
+    z[first, 0], z[last, 0] = -0.01, -0.002
+    with pytest.warns(
+        UserWarning, match=r"2 real galaxies have a negative redshift \(minimum -0\.01\)"
+    ):
+        store = load_catalog(_write_catalog(tmp_path / "c.h5", zgals=z))
+    assert store.catalog.zgals.min() == -0.01
     # In the padding a negative redshift is only a placeholder.
     z = np.where(_padding(STORE.catalog), -1.0, STORE.catalog.zgals)
-    load_catalog(_write_catalog(tmp_path / "pad.h5", zgals=z))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_catalog(_write_catalog(tmp_path / "pad.h5", zgals=z))
+
+
+def test_catalog_checks_read_every_row_block(tmp_path, monkeypatch):
+    # The checks run over row blocks; a problem in the last row of the last
+    # block must be found, and counts must add up across blocks.
+    from darksirens.catalog import types
+
+    catalog = STORE.catalog
+    n_max = catalog.zgals.shape[1]
+    monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 5 * n_max)
+    assert len(list(types.row_blocks(catalog.zgals.shape[0], n_max))) == 10
+    assert validate_catalog(catalog, require_sorted=True) is catalog
+    last = int(np.flatnonzero(catalog.ngals > 1)[-1])
+    assert last >= 45
+
+    pad = _padding(catalog)
+    with pytest.raises(ValueError, match=f"{int(pad.sum())} non-finite value"):
+        validate_catalog(catalog._replace(zgals=np.where(pad, np.nan, catalog.zgals)))
+    for name, value, match in (
+        ("zgals", np.nan, "redshifts must be finite"),
+        ("dzgals", -1.0, "redshift errors must be finite and >= 0"),
+        ("wgals", 0.0, "strictly positive"),
+    ):
+        values = np.array(getattr(catalog, name))
+        values[last, 0] = value
+        with pytest.raises(ValueError, match=match):
+            validate_catalog(catalog._replace(**{name: values}))
+    z = np.array(catalog.zgals)
+    z[last, :2] = z[last, 1::-1]
+    assert z[last, 0] > z[last, 1]
+    with pytest.raises(ValueError, match="non-decreasing"):
+        validate_catalog(catalog._replace(zgals=z), require_sorted=True)
+    z = np.array(catalog.zgals)
+    z[0, 0], z[last, 0] = -0.01, -0.03
+    with pytest.warns(UserWarning, match=r"2 real galaxies .*minimum -0\.03"):
+        load_catalog(_write_catalog(tmp_path / "c.h5", zgals=z))
 
 
 @pytest.mark.parametrize(

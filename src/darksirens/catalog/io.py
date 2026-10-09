@@ -14,7 +14,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .types import GalaxyCatalog, validate_catalog
+from .types import GalaxyCatalog, row_blocks, validate_catalog
 
 
 @dataclass(frozen=True)
@@ -61,8 +61,10 @@ def _require_file_contract(path, nside, zgals, dzgals, wgals, ngals):
     samples would be matched to the wrong rows) or rows nothing can read. A
     file with fewer rows covers only the first pixels of its sky and binds
     only when no sample falls beyond them, so it is accepted with a warning.
-    The arrays are then checked as binding checks them, plus the redshift
-    range of the real galaxies, which the kernel does not require.
+    The arrays are then checked as binding checks them. A negative redshift
+    of a real galaxy warns: the kernel is defined for it (it is truncated at
+    zero) and blueshifted nearby galaxies are real, but it is more often a
+    placeholder that was counted as a galaxy.
     """
     if nside < 1:
         raise ValueError(f"{path}: nside attribute must be a positive integer, got {nside}")
@@ -89,11 +91,21 @@ def _require_file_contract(path, nside, zgals, dzgals, wgals, ngals):
             UserWarning,
             stacklevel=3,
         )
-    real = np.arange(zgals.shape[1])[None, :] < ngals[:, None]
-    n_negative = int((zgals[real] < 0.0).sum())
+    cols = np.arange(zgals.shape[1])[None, :]
+    n_negative, z_min = 0, 0.0
+    for rows in row_blocks(n_rows, zgals.shape[1]):
+        z_real = zgals[rows][cols < ngals[rows, None]]
+        negative = z_real[z_real < 0.0]
+        if negative.size:
+            n_negative += int(negative.size)
+            z_min = min(z_min, float(negative.min()))
     if n_negative:
-        raise ValueError(
-            f"{path}: {n_negative} real galaxies have a negative redshift"
+        warnings.warn(
+            f"{path}: {n_negative} real galaxies have a negative redshift "
+            f"(minimum {z_min:.6g}); each galaxy's redshift distribution is "
+            "truncated at zero and renormalised, so they stay hosts near z = 0.",
+            UserWarning,
+            stacklevel=3,
         )
 
 
@@ -106,9 +118,10 @@ def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
     matching the frozen inference loader. Arrays stay on the host; later model
     construction decides what is transferred to an accelerator.
 
-    A ``ValueError`` is raised for a file with more rows than ``12 * nside**2``,
-    for arrays binding would refuse (:func:`validate_catalog`), and for a
-    negative redshift of a real galaxy; fewer rows than pixels only warn.
+    A ``ValueError`` is raised for a file with more rows than ``12 * nside**2``
+    and for arrays binding would refuse (:func:`validate_catalog`). Fewer rows
+    than pixels, and a negative redshift of a real galaxy, emit a
+    ``UserWarning``.
     """
     path = Path(path)
     with h5py.File(path, "r") as handle:

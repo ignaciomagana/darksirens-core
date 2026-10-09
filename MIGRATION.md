@@ -774,12 +774,16 @@ nside-16 catalog). The numbers below are log-likelihood differences.
   the sky, and moved a complete-catalog likelihood by -9 to -40. A file with
   fewer rows than pixels loads with a `UserWarning`, because it binds only
   when no GW sample falls in a missing pixel (binding already raises
-  otherwise). A negative redshift of a real galaxy raises `ValueError`. The
-  checks binding makes (array shapes, integer `ngals`, finite redshifts,
+  otherwise). A negative redshift of a real galaxy also loads with a
+  `UserWarning` that gives the number of such galaxies and the minimum: the
+  kernel is defined for it (the galaxy's redshift distribution is truncated
+  at zero) and blueshifted nearby galaxies are real. The checks binding makes (array shapes, integer `ngals`, finite redshifts,
   finite non-negative widths and positive finite weights of the real
   galaxies) now also run at load, and the message names the file. A NaN
   redshift of a real galaxy therefore raises `ValueError` at load, where the
-  row sort raised `AssertionError` before.
+  row sort raised `AssertionError` before. The checks read the arrays in row
+  blocks of about four million slots, at load and at bind, so their own
+  memory does not grow with the catalog.
 - **`ds.load_events` now checks that the samples of an event are stored
   together.** The store has no per-sample event index: event `i` is rows
   `[i * nsamp, (i + 1) * nsamp)` by contract, so a file in another order had
