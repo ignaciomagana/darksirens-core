@@ -129,6 +129,47 @@ analysis = ds.model(
 )
 ```
 
+The default count-ratio completeness (`completeness="incomplete"`) is biased
+where the completeness falls. It divides each row's observed galaxy density,
+smoothed with a Gaussian of width 0.05 in redshift, by the expected density
+smoothed the same way. Both densities rise steeply with redshift, so the ratio
+at `z` is dominated by the far side of the kernel, where fewer galaxies are
+catalogued: to first order it is the completeness near `z + 2 w^2 / z`, and
+the missing-host density is too large where the completeness drops. Measured
+H0 shifts: +0.68 +- 0.14 km/s/Mpc against the exact model on an unclustered
+toy with a known completeness (the darksirens-desi-gwtc5 clean-room check),
+and +0.78 +- 0.18 km/s/Mpc against the magnitude-selection completeness on
+100 seeds of the clustered examples mock. The default is kept for
+reproducibility. `count_ratio="pooled"` (opt-in) smooths the ratio itself,
+each galaxy weighted by one over the expected density at its own redshift,
+pools all the rows of the catalog before the clip at 1, and gives row `p` the
+completeness `f_p C(z)` with `f_p` its `row_fraction` (1 without one):
+
+```python
+analysis = ds.model(
+    cosmology=cosmology,
+    population=population,
+    catalog=catalog,
+    completeness="incomplete",
+    count_ratio="pooled",
+    count_ratio_window=0.02,  # Gaussian width in redshift (the default)
+    row_fraction=coverage,  # optional, one value in [0, 1] per catalog row
+)
+```
+
+What is left is the kernel's own `w^2 C''/2`, so the window should be small:
+on the toy the curve is within 0.006 of the truth at 0.01 and 0.016 at 0.02
+(the default estimator is off by 0.14 at z = 0.2). The whole catalog is one
+completeness cell, so a survey whose depth varies over the sky should be
+given as one catalog per depth (`catalog_sky_weighting="field"`, each with
+its `row_fraction`). Binding refuses a window that holds fewer than 100
+effective galaxies at the catalog's median redshift and warns below 1000,
+and warns when more than a tenth of the rows are empty without a
+`row_fraction` (they count as surveyed). Within about three windows of
+`z = 0` the curve is clipped to 1 (galaxies scattered to the lowest redshifts
+carry weights that grow as `z^-2`), so the catalog is taken to be complete
+there.
+
 Several catalogs combine in a field-weighted mixture: each sample's host
 density is `sum_k w_k n_k(z | p_k) / Z_k`, with each catalog's host mass
 normalized by its survey-global total and stick-breaking weights `fcat_k`:

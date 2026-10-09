@@ -198,6 +198,36 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `catalog.selection` (`CatalogParameters.selection`, `None` otherwise). On
   the frozen reference's `c_mode="selection"` fixture the likelihood agrees
   with it to 3e-14 (`tools/probe_selection_completeness.py`).
+- `model(..., count_ratio="row"|"pooled", count_ratio_window=None)`: the
+  estimator of the count-ratio completeness (`completeness="incomplete"`,
+  either sky weighting, one value for every catalog of a mixture that runs
+  it). `"row"` (the default, the reference's estimator) is unchanged: the
+  per-row `clip[S dN_obs / S dN_exp, 0, 1]` with the fixed width
+  `SIGMA_SMOOTH = 0.05`; it is biased low where the completeness falls (to
+  first order `C + w^2 (C' dlnE/dz + C''/2)`, `E = dN_exp/dz`). `"pooled"`
+  (opt-in, no reference counterpart) is
+  `C_p(z) = f_p clip[R(z), 0, 1]` with
+  `R(z) = sum_i G_w(z - z_i) / dN_exp(z_i) / [kappa(z) sum_p f_p]` over the
+  real galaxies of every row of the catalog store with `0 < z_i <= z_top`
+  (`z_top` the store's `z_depth`, or the end of the grid), `kappa` the kernel
+  mass inside `(0, z_top]`, `w = count_ratio_window` (default 0.02) and
+  `f_p` the `row_fraction` (accepted with `"pooled"`, otherwise only with
+  `"selection"`; 1 for every row without one). Its expectation is the kernel
+  mean of `C`. It is built at bind
+  (`catalog.completeness.build_pooled_count_ratio_cache`) as one `(N_z, N_z)`
+  operator, linear in `z^2 / dN_exp` at the proposal (galaxies binned in
+  `1e-4` in redshift, `1/dN_exp` interpolated linearly between grid nodes),
+  plus one coverage value per row; it replaces the `(N_rows, N_z)`
+  observed-density cache, which is not built. Assembly, depth convention
+  and the missing-host budget are those of the row-fraction selection
+  completeness (grid and gathered forms), and the field normaliser is the
+  direct form. Binding refuses fewer than 100 effective galaxies (Kish) under
+  the kernel at the catalog's median redshift, and warns below 1000, for
+  galaxies at `z <= 0`, and for more than 10% galaxy-free rows without a
+  `row_fraction`. `count_ratio_window` with `"row"`, and `"pooled"` without a
+  count-ratio catalog, are refused. `ParameterPlan.catalog_model` records
+  `count_ratio`, `count_ratio_window` and the row fraction's sha256 only
+  when `"pooled"`, so default plans and fingerprints are unchanged.
 - `model(..., catalog_sky_weighting="conditional"|"field",
   field_normalizer=None)`: the default `"conditional"` is the frozen
   per-row normalization (one catalog). `"field"` (opt-in) keeps each row's

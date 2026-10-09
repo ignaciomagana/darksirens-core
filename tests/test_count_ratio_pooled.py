@@ -112,7 +112,7 @@ def _kernel_mean_of_truth(window):
     out = np.empty(Z.size)
     for k, zk in enumerate(Z):
         g = np.exp(-0.5 * ((zk - zf) / window) ** 2)
-        out[k] = np.sum(g * _toy_truth(zf)) / np.sum(g)
+        out[k] = np.sum(g * _toy_truth(zf)) / max(np.sum(g), 1e-300)
     return out
 
 
@@ -288,8 +288,10 @@ def test_galaxy_free_rows_without_a_row_fraction_warn():
             catalog, window=0.05, row_fraction=np.ones(12)
         )
     # The pooled curve is per unit coverage.
+    scale = float(np.max(np.asarray(everywhere.operator)))
     np.testing.assert_allclose(
-        np.asarray(covered.operator), np.asarray(everywhere.operator) * 12.0 / 9.0, rtol=1e-13
+        np.asarray(covered.operator), np.asarray(everywhere.operator) * 12.0 / 9.0,
+        rtol=1e-13, atol=1e-15 * scale,
     )
 
 

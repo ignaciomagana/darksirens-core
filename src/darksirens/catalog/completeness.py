@@ -317,7 +317,10 @@ def build_pooled_count_ratio_cache(
     their counts in redshift bins of ``POOLED_BIN_WIDTH``.  Real galaxies
     with ``z <= 0`` or ``z > z_top`` are not counted.  The catalog is read in
     row blocks; the cache is one ``(N_z, N_z)`` operator and one value per
-    row, in place of the ``(N_rows, N_z)`` observed-density cache.
+    row, in place of the ``(N_rows, N_z)`` observed-density cache.  The
+    weight ``1/dN_exp(z_i)`` grows as ``z_i^-2``: within a few windows of
+    ``z = 0`` a galaxy scattered there by its redshift error dominates the
+    sum, the ratio exceeds 1 and the clip makes the catalog complete there.
 
     A ``ValueError`` is raised when the kernel holds fewer than
     ``POOLED_MIN_EFFECTIVE`` effective galaxies at the catalog's median
@@ -428,8 +431,9 @@ def build_pooled_count_ratio_cache(
 def _pooled_curve(state: CompletionState, cache: PooledCountRatioCache):
     """The clipped pooled ratio on the redshift grid at this proposal's ``dN_exp``."""
 
-    u = zgrid**2 / jnp.where(state.dN_exp > 0.0, state.dN_exp, 1.0)
-    # z^2 / dN_exp is finite at z = 0; the grid's first node carries 0 / floor.
+    # z^2 / dN_exp is finite at z = 0, where the grid carries 0 / floor: the
+    # first node takes the second's value (and no 0 / 0 enters reverse mode).
+    u = zgrid**2 / jnp.where(zgrid > 0.0, state.dN_exp, 1.0)
     u = u.at[0].set(u[1])
     return jnp.clip(cache.operator @ u, 0.0, 1.0)
 
