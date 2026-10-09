@@ -169,9 +169,13 @@ def _observed_density_row(row, catalog: GalaxyCatalog):
     Raw galaxy counts are used.  Catalog host weights and per-galaxy redshift
     uncertainties do not enter this estimator; the fixed 0.05 kernel must match
     the expected-count smoothing operator exactly.
+
+    The redshifts are read in the grid's float64 whatever the catalog stores:
+    the ``1e-300`` floor on a kernel's mass is zero in float32, so a float32
+    padding slot beyond the grid (zero mass, zero density) would give 0/0.
     """
 
-    zs = catalog.zgals[row]
+    zs = catalog.zgals[row].astype(zgrid.dtype)
     real = jnp.arange(zs.shape[0]) < catalog.ngals[row]
     mass = ndtr((_ZMAX - zs) / SIGMA_SMOOTH) - ndtr(-zs / SIGMA_SMOOTH)
     mass = jnp.maximum(mass, 1.0e-300)

@@ -738,3 +738,76 @@ changes in two entries: `mu_chi` 0.0633 to 0.04 and `sigma_chi` 0.3654 to
   evaluated at legacy's vector, so the model's numerics are still compared
   at 1e-12, and each code's stored pair is checked against its declared
   value.
+
+### Input checks for five silent wrong answers (new errors and warnings; no likelihood change for valid float64 inputs)
+
+Five kinds of input gave a finite, plausible likelihood that was wrong, with
+no error and a clean guard report. Each was reproduced first, on small
+synthetic inputs and on the quick mock (150 events, 4,096 samples each, an
+nside-16 catalog). The numbers below are log-likelihood differences.
+
+- **A float32 catalog in the count-ratio completeness is now computed
+  correctly.** The observed-count density floors each galaxy's kernel mass at
+  `1e-300`, which is zero in float32. A padding redshift beyond the redshift
+  grid (the surveys writer pads with 100) has zero mass, so the masked slot
+  contributed 0/0 and the density was NaN in every row with padding (3,071 of
+  3,072 on the mock). The likelihood stayed finite and was wrong by +7.2,
+  +8.1 and +8.6 at H0 = 55, 67.74 and 80. The density now reads the redshifts
+  in float64 whatever the catalog stores
+  (`darksirens.catalog.completeness._observed_density_row`). A float32
+  catalog then gives the likelihood of the same values stored as float64, to
+  rounding (2e-12 on the test fixture). Float32 catalogs are not refused: the
+  complete and selection modes were already correct for them. For a float64
+  catalog the cast is a no-op and the density is the same bit for bit.
+- **A non-finite redshift in the padding of `zgals` now raises
+  `ValueError`** (`validate_catalog`, so at load and at bind). The kernel sum
+  multiplies every slot's redshift offset by a reciprocal width that is zero
+  on padding, and `nan * 0` and `inf * 0` are NaN for the whole row. The
+  result was `-inf` at every H0 (complete catalog; count ratio with NaN) or a
+  small finite shift (count ratio with infinity, selection). Finite padding
+  of any value is ignored exactly, as before. Non-finite padding in `dzgals`
+  and `wgals` is ignored exactly and still accepted.
+- **`ds.load_catalog` now checks the file.** It raises `ValueError` when the
+  file has more rows than `12 * nside**2`. Row `r` is HEALPix RING pixel `r`,
+  so more rows mean a wrong `nside` attribute or rows nothing reads: a file
+  written at nside 2 and declared as nside 1 bound, read its first 12 rows as
+  the sky, and moved a complete-catalog likelihood by -9 to -40. A file with
+  fewer rows than pixels loads with a `UserWarning`, because it binds only
+  when no GW sample falls in a missing pixel (binding already raises
+  otherwise). A negative redshift of a real galaxy raises `ValueError`. The
+  checks binding makes (array shapes, integer `ngals`, finite redshifts,
+  finite non-negative widths and positive finite weights of the real
+  galaxies) now also run at load, and the message names the file. A NaN
+  redshift of a real galaxy therefore raises `ValueError` at load, where the
+  row sort raised `AssertionError` before.
+- **`ds.load_events` now checks that the samples of an event are stored
+  together.** The store has no per-sample event index: event `i` is rows
+  `[i * nsamp, (i + 1) * nsamp)` by contract, so a file in another order had
+  the right layout and was accepted (+135 to +163 on the mock). The loader
+  now compares, for `m1det`, `dL`, `ra` and `dec`, the scatter between the
+  means of the declared blocks with the scatter inside them
+  (`darksirens.gw.store.event_block_problems`). If no column separates the
+  blocks (ratio below 3, where interchangeable rows give about 1), the
+  samples are not grouped by event. The loader raises `RuntimeError` when
+  the sample-major reading (event `i` is rows `i, i + nobs, ...`) does
+  separate them beyond chance (probability below 1e-6), and emits a
+  `RuntimeWarning` otherwise, since a store of near-identical events is
+  legitimate. The check is statistical: it cannot see a few misplaced
+  samples, or two events exchanged in part. Stores with one event or one
+  sample per event are not checked. In-memory `GWStore` objects are not
+  checked.
+- **Fixing `log10n0` without `n0_units` now emits a `UserWarning`.** The
+  default stays `"physical"` and no value changes. A fitted density is
+  usually h-scaled (`darksirens-surveys` reports `n0_units: "h_scaled"`),
+  and the two readings differ by `(H0 / 100)**3`: on the mock the same fixed
+  value moves the likelihood by -2.6 to -6.0 across H0 = 45 to 90. Pass
+  `n0_units="physical"` or `n0_units="h_scaled"` to `ds.model` to state the
+  unit; the warning then does not appear. A sampled `log10n0` does not warn.
+
+**Numerics.** For valid float64 inputs nothing changes. The log-likelihood
+was compared before and after on 16 configurations (spectral; complete, count
+ratio and selection, each conditional and field-weighted, with and without a
+survey depth; two catalogs; a fixed density in both units) at three H0
+values: all 48 values are the same bit for bit. The tests compare the
+observed-count density against the previous implementation bit for bit on a
+float64 catalog.

@@ -578,6 +578,8 @@ _OUT_OF_PRIOR = [
 
 
 def _out_of_prior_model(population_fixed, survey_fixed, **kwargs):
+    # The unit is stated so that the only warnings are the out-of-prior ones.
+    kwargs.setdefault("n0_units", "physical")
     return model(
         cosmology=COSMOLOGY,
         population=Population(MODEL, fixed=population_fixed or True),

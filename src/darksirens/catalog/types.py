@@ -139,8 +139,11 @@ def validate_catalog(
     """Validate the standardized ordinary-catalog contract on the host.
 
     This is a construction-time check, not a traced likelihood operation.
-    Real galaxies must have finite non-negative redshift errors and strictly
-    positive finite base weights.  Padding is deliberately unconstrained.
+    Real galaxies must have finite redshifts, finite non-negative redshift
+    errors and strictly positive finite base weights.  Padding is unconstrained,
+    except that a padded redshift must be finite: the kernel sum multiplies
+    every slot's redshift offset by a reciprocal width that is zero on padding,
+    and ``nan * 0`` or ``inf * 0`` is NaN for the whole row.
     """
 
     z = np.asarray(catalog.zgals)
@@ -172,6 +175,12 @@ def validate_catalog(
     real = cols < ng[:, None]
     if np.any(~np.isfinite(z[real])):
         raise ValueError("real-galaxy redshifts must be finite")
+    if not np.all(np.isfinite(z)):
+        n_bad = int(np.count_nonzero(~np.isfinite(z)))
+        raise ValueError(
+            f"zgals holds {n_bad} non-finite value(s) in its padding (slots at or "
+            "beyond ngals); pad redshifts with a finite number such as 100.0"
+        )
     if np.any(~np.isfinite(dz[real])) or np.any(dz[real] < 0.0):
         raise ValueError("real-galaxy redshift errors must be finite and >= 0")
     if np.any(~np.isfinite(w[real])) or np.any(w[real] <= 0.0):
