@@ -69,6 +69,9 @@ class SchechterMagnitudeSelection(NamedTuple):
     M_faint_offset: Any = M_FAINT_OFFSET_DEFAULT
 
 
+_KIND_NAMES = {"U": "str", "S": "bytes", "b": "bool", "O": "object"}
+
+
 @dataclass(frozen=True)
 class TabulatedSelection:
     """Runtime completeness given directly as a table in redshift.
@@ -92,7 +95,19 @@ class TabulatedSelection:
 
     def __post_init__(self):
         for name in ("z", "completeness"):
-            values = np.asarray(getattr(self, name), dtype=np.float64)
+            raw = getattr(self, name)
+            # NumPy would convert "0.1" and True to floats: refuse them here.
+            items = raw if isinstance(raw, (list, tuple)) else ()
+            dtype = np.asarray(raw).dtype
+            if any(isinstance(x, (bool, np.bool_)) for x in items):
+                dtype = np.dtype(bool)
+            if dtype.kind not in "iuf":
+                raise TypeError(
+                    f"tabulated selection {name} must hold integers or floats; got "
+                    f"entries of type {_KIND_NAMES.get(dtype.kind, dtype)} (strings "
+                    "and booleans are not converted)"
+                )
+            values = np.asarray(raw, dtype=np.float64)
             if values.ndim != 1:
                 raise ValueError(
                     f"tabulated selection {name} must be one-dimensional; got "

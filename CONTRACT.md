@@ -213,7 +213,9 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `sigma_kde`, and naming a selection nuisance in `survey_priors` is
   refused. Refused with `ValueError`, from the payload and at `model`:
   non-finite nodes or values, values outside [0, 1], nodes not strictly
-  increasing, fewer than 2 nodes, unequal lengths. Refused at `model`
+  increasing, fewer than 2 nodes, unequal lengths; with `TypeError`, entries
+  that are not integers or floats (strings such as `"0.1"`, booleans), which
+  NumPy would convert. Refused at `model`
   (`validate_selection_coverage`): a first node above the lowest redshift of
   the model grid (0), and a last node below the catalog's `z_depth`, or below
   the top of the model grid for a catalog without one, since the curve is

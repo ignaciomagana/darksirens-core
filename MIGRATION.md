@@ -975,14 +975,17 @@ example against a deeper survey) and not fitted with a luminosity function.
   `survey_priors` is refused as unknown.
 - **Refused** (`ValueError`, from the payload and in `ds.model`): non-finite
   nodes or values, values outside [0, 1], nodes not strictly increasing,
-  fewer than 2 nodes, unequal lengths, arrays that are not one-dimensional.
+  fewer than 2 nodes, unequal lengths, arrays that are not one-dimensional;
+  with `TypeError`, entries that are not integers or floats (strings such as
+  `"0.1"` and booleans, which NumPy would convert).
 - **Coverage, no extrapolation.** The curve is read on the model's redshift
   grid, whose lowest point is 0. The first node must be at or below 0 and the
   last at or above the catalog's `z_depth`. For a catalog without a
   `z_depth` the last node must reach the top of the grid (5 by default):
   the magnitude-selection curves are read on the whole grid in that case, and
   so is the table. `ds.model` raises otherwise, for each catalog of a mixture
-  against its own depth. The low-level `selection_curve` and
+  against its own depth, and the error names the catalog (`catalog 2
+  (<path>): ...`). The low-level `selection_curve` and
   `selection_completion_curves` do not make this check; outside the nodes
   they return 0 and never the end value.
 - **Fingerprint.** `ParameterPlan.catalog_model` records `family`,
@@ -1019,7 +1022,10 @@ catalog's mean weight, with `n0_units` stated. Supplying weights together with
 a count-based `n0` and a count-based completeness biases `H0`: a consumer
 reported -1.5 km/s/Mpc on a toy, which was not reproduced here. The
 prescription is exact only where a row's mean weight equals the catalog's,
-because core divides by each row's own mean weight and takes one `n0`. Core
+because core divides by each row's own mean weight and takes one `n0`. It is
+also exact where the row has no catalogued density, since no weight enters
+there: in empty rows (`N_obs,p = 0`) and above the depth (`p_cat` is zero
+there and the missing term is the full `n0 dV_c/dz (1 + z)^delta`). Core
 does not check any of this, and `host_mass="weight"` remains refused with an
 incomplete catalog.
 
