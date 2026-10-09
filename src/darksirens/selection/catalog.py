@@ -16,6 +16,8 @@ legacy behavior rather than reinterpreting it.
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple
 
 import jax
@@ -67,6 +69,106 @@ class SchechterMagnitudeSelection(NamedTuple):
     M_faint_offset: Any = M_FAINT_OFFSET_DEFAULT
 
 
+@dataclass(frozen=True)
+class TabulatedSelection:
+    """Runtime completeness given directly as a table in redshift.
+
+    ``z`` are the nodes (strictly increasing, not necessarily uniform) and
+    ``completeness`` the values in [0, 1] there; both are stored as tuples of
+    Python floats.  The curve is linear between nodes and is a function of the
+    catalog redshift alone: no cosmological parameter and no absolute magnitude
+    enters it.  It has no sampled nuisance.
+
+    Beyond its nodes the curve is not defined.  :func:`c_sel_tabulated` returns
+    zero there and never a clamped end value; an analysis must not read it
+    there, which :func:`validate_selection_coverage` checks on the host.
+
+    The object is a leafless pytree: a table is a constant of the trace, like
+    the float fields of the magnitude-selection models once bound.
+    """
+
+    z: tuple
+    completeness: tuple
+
+    def __post_init__(self):
+        for name in ("z", "completeness"):
+            values = np.asarray(getattr(self, name), dtype=np.float64)
+            if values.ndim != 1:
+                raise ValueError(
+                    f"tabulated selection {name} must be one-dimensional; got "
+                    f"shape {values.shape}"
+                )
+            object.__setattr__(self, name, tuple(float(x) for x in values))
+
+
+jax.tree_util.register_pytree_node(
+    TabulatedSelection, lambda model: ((), model), lambda model, _: model
+)
+
+
+def _validate_tabulated(model: TabulatedSelection) -> TabulatedSelection:
+    z = np.asarray(model.z, dtype=np.float64)
+    c = np.asarray(model.completeness, dtype=np.float64)
+    if z.size != c.size:
+        raise ValueError(
+            "tabulated selection z and completeness must have equal lengths; "
+            f"got {z.size} and {c.size}"
+        )
+    if z.size < 2:
+        raise ValueError(
+            f"tabulated selection needs at least 2 nodes; got {z.size}"
+        )
+    if not (np.all(np.isfinite(z)) and np.all(np.isfinite(c))):
+        raise ValueError("tabulated selection z and completeness must be finite")
+    if np.any(c < 0.0) or np.any(c > 1.0):
+        raise ValueError(
+            "tabulated selection completeness values must lie in [0, 1]; got "
+            f"[{c.min()!r}, {c.max()!r}]"
+        )
+    if np.any(np.diff(z) <= 0.0):
+        raise ValueError("tabulated selection z nodes must be strictly increasing")
+    return model
+
+
+def validate_selection_coverage(model, z_depth):
+    """Refuse a table that does not cover the redshifts an analysis reads.
+
+    The completeness curve is evaluated on the modeled redshift grid.  The
+    missing-host budget reads it at every grid node up to the catalog depth
+    ``z_depth``, and at every grid node when there is none (the
+    magnitude-selection curves are likewise read up to the top of the grid
+    then).  The first node must therefore be at or below the grid's lowest
+    redshift (0) and the last at or above ``z_depth`` (the top of the grid
+    without one).  Nothing is extrapolated.  The magnitude-selection families
+    are defined at every redshift and pass.
+    """
+
+    if not isinstance(model, TabulatedSelection):
+        return model
+    z_lo, z_top = float(zgrid[0]), float(zgrid[-1])
+    if model.z[0] > z_lo:
+        raise ValueError(
+            f"tabulated selection must start at or below z = {z_lo:g}, the lowest "
+            f"redshift of the model grid; its first node is {model.z[0]!r}. "
+            "The table is never extrapolated."
+        )
+    if z_depth is None:
+        need = z_top
+        what = (
+            f"the top of the model redshift grid ({z_top:g}; the catalog has "
+            "no z_depth)"
+        )
+    else:
+        need = min(float(z_depth), z_top)
+        what = f"the catalog's z_depth ({float(z_depth)!r})"
+    if model.z[-1] < need:
+        raise ValueError(
+            f"tabulated selection must reach {what}; its last node is "
+            f"{model.z[-1]!r}. The table is never extrapolated."
+        )
+    return model
+
+
 def _finite_scalar(value, name: str) -> float:
     value = float(np.asarray(value))
     if not np.isfinite(value):
@@ -111,9 +213,12 @@ def validate_catalog_selection(model):
             )
         return model
 
+    if isinstance(model, TabulatedSelection):
+        return _validate_tabulated(model)
+
     raise TypeError(
-        "catalog selection must be GaussianMagnitudeSelection or "
-        "SchechterMagnitudeSelection"
+        "catalog selection must be GaussianMagnitudeSelection, "
+        "SchechterMagnitudeSelection or TabulatedSelection"
     )
 
 
@@ -174,8 +279,20 @@ def selection_from_mapping(payload: Mapping[str, Any]):
         )
         return validate_catalog_selection(model)
 
+    if family == "tabulated":
+        required = {"z", "completeness"}
+        missing = sorted(required - set(data))
+        extra = sorted(set(data) - required)
+        if missing or extra:
+            raise ValueError(
+                f"tabulated selection payload has missing={missing}, extra={extra}"
+            )
+        model = TabulatedSelection(z=data["z"], completeness=data["completeness"])
+        return validate_catalog_selection(model)
+
     raise ValueError(
-        f"selection family must be 'gaussian' or 'schechter'; got {family!r}"
+        "selection family must be 'gaussian', 'schechter' or 'tabulated'; "
+        f"got {family!r}"
     )
 
 
@@ -192,6 +309,13 @@ def selection_to_mapping(model) -> dict[str, Any]:
             "sigma_M": float(model.sigma_M),
             "k_corr_coeffs": [float(x) for x in (model.k_corr_coeffs or ())],
         }
+    if isinstance(model, TabulatedSelection):
+        return {
+            "format_version": SELECTION_RUNTIME_FORMAT,
+            "family": "tabulated",
+            "z": list(model.z),
+            "completeness": list(model.completeness),
+        }
     return {
         "format_version": SELECTION_RUNTIME_FORMAT,
         "family": "schechter",
@@ -199,6 +323,29 @@ def selection_to_mapping(model) -> dict[str, Any]:
         "Mstar_hat": float(model.Mstar_hat),
         "alpha": float(model.alpha),
         "M_faint_offset": float(model.M_faint_offset),
+    }
+
+
+def selection_record(model) -> dict[str, Any]:
+    """What a run records of a selection model.
+
+    The runtime payload (:func:`selection_to_mapping`) of a magnitude-selection
+    model; for a table, its node count, range and the sha256 of its float64
+    ``z`` then ``completeness`` bytes in place of the arrays.
+    """
+
+    payload = selection_to_mapping(model)
+    if not isinstance(model, TabulatedSelection):
+        return payload
+    z = np.asarray(model.z, dtype=np.float64)
+    c = np.asarray(model.completeness, dtype=np.float64)
+    return {
+        "format_version": payload["format_version"],
+        "family": "tabulated",
+        "n_nodes": int(z.size),
+        "z_min": float(z[0]),
+        "z_max": float(z[-1]),
+        "table_sha256": hashlib.sha256(z.tobytes() + c.tobytes()).hexdigest(),
     }
 
 
@@ -286,6 +433,22 @@ def c_sel_schechter(
     return jnp.where(alpha > ALPHA_MIN, ratio, jnp.nan)
 
 
+def c_sel_tabulated(z, nodes, values):
+    """Tabulated completeness: linear between nodes, clipped to [0, 1].
+
+    Zero outside ``[nodes[0], nodes[-1]]``: the table is not extrapolated and
+    its end values are not held.  An analysis never reads the curve there
+    (:func:`validate_selection_coverage`); zero is what the depth convention
+    already consumes above the catalog depth.
+    """
+
+    nodes = jnp.asarray(nodes, dtype=zgrid.dtype)
+    values = jnp.asarray(values, dtype=zgrid.dtype)
+    z = jnp.asarray(z)
+    curve = jnp.clip(jnp.interp(z, nodes, values), 0.0, 1.0)
+    return jnp.where((z >= nodes[0]) & (z <= nodes[-1]), curve, 0.0)
+
+
 def _selection_curve_impl(z, cosmo: CosmologyParameters, model):
     if isinstance(model, GaussianMagnitudeSelection):
         return c_sel_gaussian(
@@ -311,9 +474,12 @@ def _selection_curve_impl(z, cosmo: CosmologyParameters, model):
             cosmo.w0,
             cosmo.wa,
         )
+    if isinstance(model, TabulatedSelection):
+        # A function of the catalog redshift only: no cosmology enters.
+        return c_sel_tabulated(z, model.z, model.completeness)
     raise TypeError(
-        "catalog selection must be GaussianMagnitudeSelection or "
-        "SchechterMagnitudeSelection"
+        "catalog selection must be GaussianMagnitudeSelection, "
+        "SchechterMagnitudeSelection or TabulatedSelection"
     )
 
 
@@ -484,14 +650,18 @@ __all__ = [
     "M_FAINT_OFFSET_MIN",
     "SELECTION_RUNTIME_FORMAT",
     "SchechterMagnitudeSelection",
+    "TabulatedSelection",
     "c_sel_gaussian",
     "c_sel_schechter",
+    "c_sel_tabulated",
     "k_of_z",
     "m0_absolute",
     "selection_budget_audit",
     "selection_completion_curves",
     "selection_curve",
     "selection_from_mapping",
+    "selection_record",
     "selection_to_mapping",
     "validate_catalog_selection",
+    "validate_selection_coverage",
 ]
