@@ -711,3 +711,30 @@ before each block carried its own back. The difference is at most 7.8e-16 of
 the gradient's largest component on the test likelihoods (3.3e-15 on the
 density alone). A table
 built for another dtype is not used; the density then builds its own.
+
+### GWTC-5 fixed population: effective-spin values (fixed-population results change; declared divergence from legacy)
+
+The fixed vector of `gwtc5_fiducial_bpl2peaks` (and its aliases
+`gwtc5_fiducial_brokenpowerlaw+2peaks` and `gwtc5_brokenpowerlaw+2peaks`)
+changes in two entries: `mu_chi` 0.0633 to 0.04 and `sigma_chi` 0.3654 to
+0.10.
+
+- **Why.** The old pair are the GWTC-5 release medians for the spin
+  magnitude. The model's spin component is a truncated Gaussian in the
+  effective spin, so the distribution was about 3.7 times too wide. On the
+  259 GWTC-5 BBH events the spectral H0 likelihood peaks 107 to 110 lower in
+  log with the old pair than with a width near 0.10, and the
+  fixed-population H0 is about 1.7 km/s/Mpc lower.
+- **The new pair is a fit, not a published number:** the best point of a
+  30-point spectral grid over the pair with every other parameter at the
+  release medians, to two decimals.
+- **What changes.** Every result that fixes this population at its stored
+  vector (`fixed=True`, `fixed="gwtc5"`). Sampled populations and the model
+  itself do not change.
+- **Reproducing old results.** Pass the full vector as an explicit
+  `fixed={...}` mapping with the old pair.
+- **Legacy parity.** Legacy keeps the old pair. `tools/probe_population.py`
+  declares the two entries (`DECLARED_FIDUCIAL_DIVERGENCE`): both codes are
+  evaluated at legacy's vector, so the model's numerics are still compared
+  at 1e-12, and each code's stored pair is checked against its declared
+  value.

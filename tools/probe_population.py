@@ -57,6 +57,19 @@ MODELS = [
     "gwtc3_plpeak_component_spin",
 ]
 
+# Declared divergences of a fixed vector from legacy: {model: {index: (legacy value,
+# core value)}}.  For these models both APIs evaluate log_p_pop at the LEGACY
+# vector and report it as "fiducial", so the model's numerics stay compared at
+# full tolerance, and each API's stored vector is checked here against its own
+# declared values.  Any other difference still fails the comparison.
+#
+# gwtc5_fiducial_bpl2peaks: legacy's mu_chi and sigma_chi are spin-MAGNITUDE
+# values applied to the effective spin; core corrected them (MIGRATION.md,
+# "GWTC-5 fixed population: effective-spin values").
+DECLARED_FIDUCIAL_DIVERGENCE = {
+    "gwtc5_fiducial_bpl2peaks": {14: (0.0633, 0.04), 15: (0.3654, 0.10)},
+}
+
 m1 = jnp.asarray([6.0, 10.0, 35.0, 55.0, 75.0, 120.0], dtype=jnp.float64)
 q = jnp.asarray([0.5, 0.9, 0.7, 0.95, 0.8, 0.6], dtype=jnp.float64)
 z = jnp.asarray([0.2, 0.1, 0.3, 0.5, 0.05, 0.8], dtype=jnp.float64)
@@ -105,8 +118,16 @@ try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             lows, highs, labels, _, latex = pop_model_prior_parser(name)
-            theta = np.asarray(get_fixed_population_params(name), dtype=np.float64)
+            theta = np.array(get_fixed_population_params(name), dtype=np.float64)
             model = get_model(name)
+        for index, (legacy_value, core_value) in DECLARED_FIDUCIAL_DIVERGENCE.get(name, {}).items():
+            declared = legacy_value if args.api == "legacy" else core_value
+            if theta[index] != declared:
+                raise SystemExit(
+                    f"{name}: fixed value {index} is {theta[index]!r}, declared {declared!r} "
+                    f"for the {args.api} API; update DECLARED_FIDUCIAL_DIVERGENCE deliberately"
+                )
+            theta[index] = legacy_value
         theta_j = jnp.asarray(theta, dtype=jnp.float64)
         if consumes_spin_block(model):
             values = model.log_p_pop(m1, q, z, chi, theta_j, spin=spin)
