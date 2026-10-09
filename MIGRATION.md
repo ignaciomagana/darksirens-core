@@ -738,3 +738,44 @@ changes in two entries: `mu_chi` 0.0633 to 0.04 and `sigma_chi` 0.3654 to
   evaluated at legacy's vector, so the model's numerics are still compared
   at 1e-12, and each code's stored pair is checked against its declared
   value.
+
+### Host mass of a sky row from the galaxy weights (opt-in, default unchanged)
+
+`ds.model(catalog=..., catalog_sky_weighting="field", completeness="complete",
+host_mass="weight")` makes the host mass of a sky row the sum of its galaxy
+weights. By default (`host_mass="count"`) the row's host mass is its galaxy
+count and the weights only share that mass among the galaxies of the row.
+That is the frozen reference's convention, and it means a row with one heavy
+galaxy weighs the same as a row with one light galaxy. With
+`host_mass="weight"` the row's density is `W_p p_cat(z | p) = sum_i w_i
+K_i(z)` and the catalog's total is `Z_k = sum_p W_p`, with `W_p` the sum of
+the weights of the row's real galaxies. Each galaxy then hosts in proportion
+to its own weight in every row. Inside a row nothing changes.
+
+- **Default.** Nothing changes without the option. The plan record, the run
+  fingerprint and the bound program are the same, and the log-likelihood and
+  its gradient are the same bit for bit against a clean `main` on the test
+  catalogs. The legacy parity probes run the defaults and are not touched.
+- **Scope.** Complete catalogs under the field weighting, one catalog or a
+  mixture in which every catalog is complete. In a mixture the option is one
+  value for all catalogs, and each catalog is normalized by its own total
+  weight, so the catalogs' weights may be in different units.
+- **Refused.** `completeness="incomplete"` and `"selection"`, for any
+  catalog. The hosts that are missing from an incomplete catalog are counted
+  by number (`n0` and the completeness are number quantities), so weighting
+  only the galaxies in the catalog would compare weights with counts. The
+  conditional weighting is refused as well, because it divides each row's
+  host mass out and the option would have no effect. The likelihood also
+  refuses a binding whose row sums do not match the option.
+- **Weights.** They must be finite and strictly positive, as before.
+  Multiplying every weight of a catalog by one constant changes nothing.
+- **Cost.** One pass over the stored weights when the analysis is bound,
+  in blocks of rows, and one float64 number per row kept on the binding.
+  Padding slots beyond a row's galaxy count are not read. No per-galaxy array
+  is added and the per-call work is unchanged. The sums are taken before the
+  full-sky view of a complete catalog drops its galaxy slots.
+- **Fingerprint.** `ParameterPlan.catalog_model` records `host_mass` when it
+  is `"weight"`, so a checkpoint of one mode is not resumed in the other.
+- **Legacy parity.** The reference has no such mode. The tests compare the
+  option on a catalog with integer weights against the same catalog with each
+  galaxy written weight-many times at unit weight, evaluated by count.
