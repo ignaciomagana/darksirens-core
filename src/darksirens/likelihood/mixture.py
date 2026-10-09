@@ -48,6 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from darksirens.catalog.completeness import (
+    PooledCountRatioCache,
     build_completion_state,
     completion_curves,
     gathered_completion_curves,
@@ -286,6 +287,11 @@ def _missing_total(k, cosmology, params, component, completeness, normalizer,
                 cosmology, params, full, params.selection, component.full_row_fraction,
                 gather=True,
             )
+        )
+    if isinstance(component.full_cache, PooledCountRatioCache):
+        # Opt-in pooled count ratio: the gathered form's row sums.
+        return missing_total_from_curves(
+            gathered_completion_curves(cosmology, params, full, component.full_cache)
         )
     state = build_completion_state(cosmology, params, full)
     return count_ratio_missing_total(

@@ -83,6 +83,8 @@ def model(
     field_normalizer=None,
     per_catalog_population=None,
     host_mass="count",
+    count_ratio="row",
+    count_ratio_window=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -108,6 +110,8 @@ def model(
         field_normalizer=field_normalizer,
         per_catalog_population=per_catalog_population,
         host_mass=host_mass,
+        count_ratio=count_ratio,
+        count_ratio_window=count_ratio_window,
     )
 
 

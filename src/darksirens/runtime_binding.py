@@ -26,7 +26,10 @@ from darksirens.analysis import (
     kernel_pin_applies,
 )
 from darksirens.catalog.compact import compact_pe_selection_catalog
-from darksirens.catalog.completeness import build_observed_density_cache
+from darksirens.catalog.completeness import (
+    build_observed_density_cache,
+    build_pooled_count_ratio_cache,
+)
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.redshift import (
     PinnedCatalogKernel,
@@ -1044,6 +1047,17 @@ def _row_weight_sums(catalog) -> np.ndarray:
     return sums
 
 
+def _pooled_count_ratio_cache(redshift, component):
+    """The pooled count-ratio cache of one catalog store (``count_ratio="pooled"``)."""
+    store = component.catalog
+    return build_pooled_count_ratio_cache(
+        store.catalog,
+        window=redshift.count_ratio_window,
+        z_depth=store.z_depth,
+        row_fraction=component.row_fraction,
+    )
+
+
 def _bind_mixture(analysis, events, injections):
     """Per-catalog compact and full-sky views, caches, pins and row fractions.
 
@@ -1120,7 +1134,18 @@ def _bind_mixture(analysis, events, injections):
         # which sums no kernel.
         compact = _with_kernel_window(analysis, compact, k)
         compact_cache = full_cache = None
-        if count_ratio:
+        if count_ratio and redshift.count_ratio == "pooled":
+            # Opt-in: one pooled curve from every row of the store, and each
+            # view's row coverage.
+            pooled = _pooled_count_ratio_cache(redshift, component)
+            compact_cache = pooled._replace(
+                row_fraction=jnp.asarray(
+                    _compact_rows_of(pooled.row_fraction, store.catalog, views.catalog)
+                )
+            )
+            if full is not None:
+                full_cache = pooled
+        elif count_ratio:
             if full is not None:
                 full_cache = build_observed_density_cache(full)
                 rows = _store_rows(store.catalog, views.catalog)
@@ -1136,7 +1161,7 @@ def _bind_mixture(analysis, events, injections):
             if full is not None and store.z_depth is not None and not complete:
                 full_pin = build_pinned_field_kernel(cosmology, params, full)
         compact_fraction = full_fraction = None
-        if component.row_fraction is not None:
+        if component.row_fraction is not None and completeness == "selection":
             compact_fraction = jnp.asarray(
                 _compact_rows_of(component.row_fraction, store.catalog, views.catalog)
             )
@@ -1355,8 +1380,20 @@ def bind_analysis(
             build_observed_density_cache(catalog)
             if isinstance(analysis.redshift, IncompleteCatalogRedshift)
             and not selection_completeness
+            and analysis.redshift.count_ratio == "row"
             else None
         )
+        if getattr(analysis.redshift, "count_ratio", "row") == "pooled":
+            # Opt-in: one pooled curve from every row of the store, and the
+            # compact rows' coverage.
+            pooled = _pooled_count_ratio_cache(analysis.redshift, analysis.redshift)
+            cache = pooled._replace(
+                row_fraction=jnp.asarray(
+                    _compact_rows_of(
+                        pooled.row_fraction, catalog_store.catalog, views.catalog
+                    )
+                )
+            )
         if selection_completeness and analysis.redshift.row_fraction is not None:
             model_operands = {
                 "row_fraction": jnp.asarray(

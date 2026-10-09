@@ -15,12 +15,19 @@ and a finite catalog depth means completeness is exactly zero above that depth,
 so ``dN_miss`` relaxes to the full ``dN_exp`` there.  The depth is a survey
 completeness statement, not an analysis cutoff; ``N_miss`` always integrates
 over the full modeled redshift grid.
+
+Opt-in (``ds.model(..., count_ratio="pooled")``): the pooled count ratio of
+:func:`build_pooled_count_ratio_cache`, which smooths the ratio itself, pools
+the catalog's rows before the clip and takes its kernel width as an argument.
+The functions here dispatch on the cache they are given; the default cache
+and its arithmetic are unchanged.
 """
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import warnings
 from typing import Any, NamedTuple
 
 import jax
@@ -37,7 +44,7 @@ from darksirens.cosmology.distances import (
 from darksirens.cosmology.parameters import CosmologyParameters
 
 from .redshift import log_galaxy_measure_grid
-from .types import CatalogParameters, GalaxyCatalog
+from .types import CatalogParameters, GalaxyCatalog, row_blocks
 
 jax.config.update("jax_enable_x64", True)
 
@@ -224,6 +231,238 @@ def build_observed_density_cache(
     return ObservedDensityCache(jnp.asarray(out))
 
 
+#: Redshift bin width of the pooled count ratio's galaxy histogram.
+POOLED_BIN_WIDTH: float = 1.0e-4
+#: Default kernel width of the pooled count ratio.
+POOLED_WINDOW_DEFAULT: float = 0.02
+#: Effective galaxies per kernel window at the catalog's median redshift below
+#: which the pooled count ratio is refused, and below which it warns.
+POOLED_MIN_EFFECTIVE: float = 100.0
+POOLED_WARN_EFFECTIVE: float = 1000.0
+#: Fraction of galaxy-free rows above which a pooled count ratio without a
+#: ``row_fraction`` warns that they count as surveyed.
+POOLED_EMPTY_ROW_WARN: float = 0.1
+
+
+class PooledCountRatioCache(NamedTuple):
+    """Theta-independent operands of the pooled count ratio (opt-in).
+
+    ``operator`` is ``(N_z, N_z)``: applied to ``z^2 / dN_exp`` on the
+    redshift grid it gives the pooled ratio ``R(z)`` of
+    :func:`build_pooled_count_ratio_cache`.  ``row_fraction`` is the coverage
+    fraction of each row of the catalog view the cache is used with.  It
+    takes the place of :class:`ObservedDensityCache` wherever the count-ratio
+    curves are evaluated.
+    """
+
+    operator: Any
+    row_fraction: Any
+
+
+def _pooled_histogram(catalog: GalaxyCatalog, z_top: float):
+    """Counts of the real galaxies with ``0 < z <= z_top`` in bins of ``POOLED_BIN_WIDTH``."""
+
+    z = np.asarray(catalog.zgals)
+    ng = np.asarray(catalog.ngals)
+    n_bins = max(1, int(np.ceil(z_top / POOLED_BIN_WIDTH)))
+    counts = np.zeros(n_bins, dtype=np.int64)
+    cols = np.arange(z.shape[1])[None, :]
+    n_low = 0
+    # Row blocks: one block's redshifts in float64 at a time, never the catalog's.
+    for rows in row_blocks(z.shape[0], z.shape[1]):
+        zr = np.asarray(z[rows], dtype=np.float64)[cols < ng[rows, None]]
+        n_low += int(np.count_nonzero(zr <= 0.0))
+        zr = zr[(zr > 0.0) & (zr <= z_top)]
+        idx = np.minimum((zr / POOLED_BIN_WIDTH).astype(np.int64), n_bins - 1)
+        counts += np.bincount(idx, minlength=n_bins)
+    return counts, n_low
+
+
+def build_pooled_count_ratio_cache(
+    catalog: GalaxyCatalog,
+    *,
+    window: float = POOLED_WINDOW_DEFAULT,
+    z_depth: float | None = None,
+    row_fraction=None,
+) -> PooledCountRatioCache:
+    """Precompute the pooled count ratio of a catalog (opt-in ``count_ratio="pooled"``).
+
+    The default estimator smooths the observed and the expected density and
+    divides.  Both rise steeply with redshift, so that ratio at ``z`` is, to
+    first order in the squared kernel width ``w^2``,
+    ``C + w^2 (C' dlnE/dz + C''/2)`` with ``E = dN_exp/dz``: the completeness
+    near ``z + 2 w^2 / z``, too low wherever the completeness falls.  This
+    one smooths the ratio itself,
+
+        R(z) = sum_i G_w(z - z_i) / dN_exp(z_i) / [F kappa(z)],
+
+    over every real galaxy ``i`` of ``catalog`` (all its rows), with ``G_w``
+    the Gaussian of width ``window``, ``F = sum_p f_p`` the summed coverage
+    of the rows and ``kappa`` the kernel mass inside ``(0, z_top]``
+    (``z_top`` is ``z_depth``, or the end of the redshift grid without one).
+    Its expectation is the kernel mean of the completeness over
+    ``(0, z_top]``: the ``C' dlnE/dz`` term is gone, the ``w^2 C''/2`` of any
+    kernel remains, so the width should be small.  Every row then has
+
+        C_p(z) = f_p clip[R(z), 0, 1],
+
+    so the rows are pooled before the clip: the catalog is ONE completeness
+    cell, the rows that ``row_fraction`` covers (every row without one), and
+    a catalog whose depth varies over the sky has to be split into one
+    catalog per depth (a field mixture) by the caller.
+
+    ``dN_exp`` depends on the proposal, so what is stored is linear in it:
+    ``1 / dN_exp(z_i)`` is ``z_i^-2`` times the linear interpolation of
+    ``z^2 / dN_exp`` between the grid nodes, and the galaxies enter through
+    their counts in redshift bins of ``POOLED_BIN_WIDTH``.  Real galaxies
+    with ``z <= 0`` or ``z > z_top`` are not counted.  The catalog is read in
+    row blocks; the cache is one ``(N_z, N_z)`` operator and one value per
+    row, in place of the ``(N_rows, N_z)`` observed-density cache.
+
+    A ``ValueError`` is raised when the kernel holds fewer than
+    ``POOLED_MIN_EFFECTIVE`` effective galaxies at the catalog's median
+    redshift, and a ``UserWarning`` below ``POOLED_WARN_EFFECTIVE``.
+    """
+
+    window = float(window)
+    if not np.isfinite(window) or window <= 0.0:
+        raise ValueError(f"the count-ratio window must be finite and > 0, got {window!r}")
+    z = np.asarray(zgrid, dtype=np.float64)
+    z_top = _ZMAX if z_depth is None else float(z_depth)
+    if not 0.0 < z_top <= _ZMAX:
+        raise ValueError(f"z_depth must lie in (0, {_ZMAX}], got {z_depth!r}")
+    n_rows = int(np.shape(catalog.zgals)[0])
+    ngals = np.asarray(catalog.ngals)
+    if row_fraction is None:
+        fraction = np.ones(n_rows, dtype=np.float64)
+        n_empty = int(np.count_nonzero(ngals == 0))
+        if n_empty > POOLED_EMPTY_ROW_WARN * n_rows:
+            warnings.warn(
+                f"count_ratio='pooled': {n_empty} of {n_rows} catalog rows hold no "
+                "galaxy and count as fully surveyed, which lowers the pooled "
+                "completeness of every row; pass row_fraction (0 outside the "
+                "footprint) if they are not surveyed",
+                UserWarning,
+                stacklevel=2,
+            )
+    else:
+        fraction = np.asarray(row_fraction, dtype=np.float64)
+        if fraction.shape != (n_rows,):
+            raise ValueError(
+                "row_fraction must contain exactly one value per catalog row; "
+                f"got {fraction.shape} for {n_rows} rows"
+            )
+    total = float(fraction.sum())
+    if not total > 0.0:
+        raise ValueError("count_ratio='pooled' needs a positive summed row coverage")
+
+    counts, n_low = _pooled_histogram(catalog, z_top)
+    if n_low:
+        warnings.warn(
+            f"count_ratio='pooled': {n_low} real galaxies at z <= 0 are not counted",
+            UserWarning,
+            stacklevel=2,
+        )
+    filled = np.flatnonzero(counts)
+    if filled.size == 0:
+        raise ValueError(
+            f"count_ratio='pooled': the catalog holds no galaxy in (0, {z_top}]"
+        )
+    centres = (filled + 0.5) * POOLED_BIN_WIDTH
+    number = counts[filled].astype(np.float64)
+    weights = number / centres**2
+
+    # Noise of the pooled ratio where the catalog is best sampled: the Kish
+    # effective number of galaxies under one kernel at the median redshift.
+    median = centres[np.searchsorted(np.cumsum(number), 0.5 * number.sum())]
+    kernel = np.exp(-0.5 * ((median - centres) / window) ** 2) / centres**2
+    effective = float(np.sum(number * kernel) ** 2 / np.sum(number * kernel**2))
+    text = (
+        f"count_ratio='pooled': a kernel of width {window:g} holds {effective:.0f} "
+        f"effective galaxies at the catalog's median redshift {median:.3f} "
+        f"({int(number.sum())} galaxies pooled), a relative noise of about "
+        f"{1.0 / np.sqrt(effective):.2f} in the completeness"
+    )
+    if effective < POOLED_MIN_EFFECTIVE:
+        raise ValueError(
+            f"{text}; fewer than {POOLED_MIN_EFFECTIVE:g} is refused. Use a wider "
+            "count_ratio_window, pool more rows, or completeness='selection'"
+        )
+    if effective < POOLED_WARN_EFFECTIVE:
+        warnings.warn(
+            f"{text}; below {POOLED_WARN_EFFECTIVE:g} the clip at 1 biases the "
+            "completeness low. Consider a wider count_ratio_window",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # A[k, j] = sum_b G_w(z_k - c_b) (n_b / c_b^2) phi_j(c_b), phi_j the hat
+    # function of node j: the galaxy sum with 1/dN_exp left as a vector.
+    upper = np.clip(np.searchsorted(z, centres, side="right"), 1, z.size - 1)
+    t = (centres - z[upper - 1]) / (z[upper] - z[upper - 1])
+    operator = np.zeros((z.size, z.size), dtype=np.float64)
+    for start in range(0, centres.size, 4096):
+        part = slice(start, start + 4096)
+        pdf = np.exp(-0.5 * ((z[:, None] - centres[None, part]) / window) ** 2)
+        pdf *= weights[None, part] / (_SQRT2PI * window)
+        hat = np.zeros((pdf.shape[1], z.size), dtype=np.float64)
+        bins = np.arange(pdf.shape[1])
+        hat[bins, upper[part] - 1] = 1.0 - t[part]
+        hat[bins, upper[part]] = t[part]
+        operator += pdf @ hat
+
+    from scipy.special import ndtr as scipy_ndtr
+
+    kappa = scipy_ndtr((z_top - z) / window) - scipy_ndtr(-z / window)
+    inside = z <= z_top
+    operator = np.where(
+        inside[:, None],
+        operator / (total * np.where(inside, kappa, 1.0))[:, None],
+        0.0,
+    )
+    return PooledCountRatioCache(
+        operator=jnp.asarray(operator), row_fraction=jnp.asarray(fraction)
+    )
+
+
+def _pooled_curve(state: CompletionState, cache: PooledCountRatioCache):
+    """The clipped pooled ratio on the redshift grid at this proposal's ``dN_exp``."""
+
+    u = zgrid**2 / jnp.where(state.dN_exp > 0.0, state.dN_exp, 1.0)
+    # z^2 / dN_exp is finite at z = 0; the grid's first node carries 0 / floor.
+    u = u.at[0].set(u[1])
+    return jnp.clip(cache.operator @ u, 0.0, 1.0)
+
+
+def _pooled_row_fraction(catalog: GalaxyCatalog, cache: PooledCountRatioCache, dtype):
+    fraction = jnp.asarray(cache.row_fraction, dtype=dtype)
+    n_rows = int(catalog.zgals.shape[0])
+    if fraction.ndim != 1 or int(fraction.shape[0]) != n_rows:
+        raise ValueError(
+            "the pooled count-ratio cache must carry one row fraction per catalog "
+            f"row, got {tuple(fraction.shape)} for {n_rows} rows"
+        )
+    return fraction
+
+
+def _pooled_completion_curves(state, params, catalog, cache) -> CompletionCurves:
+    """``C_p(z) = f_p clip[R(z)]`` on the grid, assembled as the row-fraction selection."""
+
+    cbar = _pooled_curve(state, cache)
+    fraction = _pooled_row_fraction(catalog, cache, cbar.dtype)
+    C = fraction[:, None] * cbar[None, :]
+    dN_exp = state.dN_exp[None, :]
+    dN_miss = (1.0 - C) * dN_exp
+    if params.z_depth is not None:
+        dN_miss = jnp.where((zgrid <= params.z_depth)[None, :], dN_miss, dN_exp)
+    N_miss = jnp.trapezoid(dN_miss, zgrid, axis=1)
+    dN_exp_pos = jnp.where(state.dN_exp > 0.0, state.dN_exp, 1.0)[None, :]
+    C_eff = jnp.clip(1.0 - dN_miss / dN_exp_pos, 0.0, 1.0)
+    N_exp = jnp.trapezoid(state.dN_exp, zgrid)
+    f = 1.0 - N_miss / jnp.where(N_exp > 0.0, N_exp, 1.0)
+    return CompletionCurves(f=f, dN_miss=dN_miss, C_eff=C_eff, N_miss=N_miss, C=C)
+
+
 def _build_completion_state_impl(
     cosmo: CosmologyParameters,
     params: CatalogParameters,
@@ -360,6 +599,22 @@ def _gathered_completion_curves_impl(
     observed_cache: ObservedDensityCache,
 ) -> GatheredCompletionCurves:
     state = _build_completion_state_impl(cosmo, params, catalog)
+    if isinstance(observed_cache, PooledCountRatioCache):
+        # Opt-in pooled count ratio: the row-fraction factors.
+        cbar = _pooled_curve(state, observed_cache)
+        fraction = _pooled_row_fraction(catalog, observed_cache, cbar.dtype)
+        depth_mask = None if params.z_depth is None else zgrid <= params.z_depth
+        return GatheredCompletionCurves(
+            observed=None,
+            row_fraction=fraction,
+            z_factor=cbar,
+            dN_exp=state.dN_exp,
+            depth_mask=depth_mask,
+            N_miss=gathered_missing_count(
+                row_fraction=fraction, z_factor=cbar, dN_exp=state.dN_exp,
+                depth_mask=depth_mask,
+            ),
+        )
     safe = jnp.where(state.dN_exp_smooth > 0.0, state.dN_exp_smooth, 1.0)
     depth_mask = None if params.z_depth is None else zgrid <= params.z_depth
     observed = observed_cache.dN_obs_kde
@@ -403,6 +658,8 @@ def _completion_curves_impl(
     observed_cache: ObservedDensityCache | None,
 ) -> CompletionCurves:
     state = _build_completion_state_impl(cosmo, params, catalog)
+    if isinstance(observed_cache, PooledCountRatioCache):
+        return _pooled_completion_curves(state, params, catalog, observed_cache)
     rows = jnp.arange(catalog.zgals.shape[0], dtype=jnp.int32)
     C = vmap(
         lambda row: _row_completeness(row, state, catalog, observed_cache)
@@ -438,9 +695,13 @@ __all__ = [
     "CompletionState",
     "GatheredCompletionCurves",
     "ObservedDensityCache",
+    "POOLED_BIN_WIDTH",
+    "POOLED_WINDOW_DEFAULT",
+    "PooledCountRatioCache",
     "SIGMA_SMOOTH",
     "build_completion_state",
     "build_observed_density_cache",
+    "build_pooled_count_ratio_cache",
     "bound_smoothing_operator",
     "completion_curves",
     "gathered_completion_curves",
