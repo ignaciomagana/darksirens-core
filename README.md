@@ -203,7 +203,9 @@ analysis = ds.model(
 
 What is left is the kernel's own `w^2 C''/2`, so the window should be small:
 on the toy the curve is within 0.006 of the truth at 0.01 and 0.016 at 0.02
-(the default estimator is off by 0.14 at z = 0.2). The whole catalog is one
+(the default estimator is off by 0.14 at z = 0.2), and on the examples mock
+its H0 is within 0.03 +- 0.05 km/s/Mpc of the magnitude-selection
+completeness's at 0.02. The whole catalog is one
 completeness cell, so a survey whose depth varies over the sky should be
 given as one catalog per depth (`catalog_sky_weighting="field"`, each with
 its `row_fraction`). Binding refuses a window that holds fewer than 100

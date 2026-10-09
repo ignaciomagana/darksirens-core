@@ -1064,7 +1064,12 @@ catalog before the clip and gives row `p` the completeness `f_p C(z)`, with
   the `w^2 C''/2` of any kernel remains: on the toy the pooled curve is
   within 0.006 of the truth at w = 0.01 and 0.016 at 0.02 (tests). The
   clean-room toy recovered the exact model to +0.00 +- 0.01 km/s/Mpc at
-  w = 0.01 with this construction.
+  w = 0.01 with this construction. On the examples mock (100 seeds, same
+  grids as above) its H0 minus the magnitude-selection completeness's is
+  -0.03 +- 0.05 km/s/Mpc at w = 0.02 and -0.10 +- 0.04 at 0.01, against
+  +0.78 +- 0.18 for the default. Narrowing the default's per-row window does
+  not help there: with about 180 galaxies per row the clip of each row's
+  noisy ratio takes over (+0.59 +- 0.28 at 0.02, +1.28 +- 0.37 at 0.01).
 - **Pooling.** The catalog is one completeness cell: every row shares the
   same radial curve, scaled by its coverage. Core does not know the survey's
   selection strata; a catalog whose depth or magnitude limit varies over the
