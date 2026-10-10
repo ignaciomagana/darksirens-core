@@ -975,14 +975,17 @@ example against a deeper survey) and not fitted with a luminosity function.
   `survey_priors` is refused as unknown.
 - **Refused** (`ValueError`, from the payload and in `ds.model`): non-finite
   nodes or values, values outside [0, 1], nodes not strictly increasing,
-  fewer than 2 nodes, unequal lengths, arrays that are not one-dimensional.
+  fewer than 2 nodes, unequal lengths, arrays that are not one-dimensional;
+  with `TypeError`, entries that are not integers or floats (strings such as
+  `"0.1"` and booleans, which NumPy would convert).
 - **Coverage, no extrapolation.** The curve is read on the model's redshift
   grid, whose lowest point is 0. The first node must be at or below 0 and the
   last at or above the catalog's `z_depth`. For a catalog without a
   `z_depth` the last node must reach the top of the grid (5 by default):
   the magnitude-selection curves are read on the whole grid in that case, and
   so is the table. `ds.model` raises otherwise, for each catalog of a mixture
-  against its own depth. The low-level `selection_curve` and
+  against its own depth, and the error names the catalog (`catalog 2
+  (<path>): ...`). The low-level `selection_curve` and
   `selection_completion_curves` do not make this check; outside the nodes
   they return 0 and never the end value.
 - **Fingerprint.** `ParameterPlan.catalog_model` records `family`,
@@ -1019,7 +1022,10 @@ catalog's mean weight, with `n0_units` stated. Supplying weights together with
 a count-based `n0` and a count-based completeness biases `H0`: a consumer
 reported -1.5 km/s/Mpc on a toy, which was not reproduced here. The
 prescription is exact only where a row's mean weight equals the catalog's,
-because core divides by each row's own mean weight and takes one `n0`. Core
+because core divides by each row's own mean weight and takes one `n0`. It is
+also exact where the row has no catalogued density, since no weight enters
+there: in empty rows (`N_obs,p = 0`) and above the depth (`p_cat` is zero
+there and the missing term is the full `n0 dV_c/dz (1 + z)^delta`). Core
 does not check any of this, and `host_mass="weight"` remains refused with an
 incomplete catalog.
 
@@ -1054,6 +1060,27 @@ galaxy placed at z = 4:
   7e-3 down to 6.0 widths below zero, off by 0.03 at 6.25, 0.5 at 6.75 and
   3.6 at 7.0, and by about 700 from 7.25 on, at every width and `delta`
   tried. z = -0.002 and -0.02 (0.2 and 2 widths) were evaluated correctly.
+- **The whole likelihood, with `sigma_kde` fixed.** A consumer observed
+  that the same galaxy at z = 5.5 with width 1e-4 and `sigma_kde` fixed at
+  0 (5000 widths beyond the top) made the whole likelihood `-inf` at H0 = 55
+  and 70 but not 80, with the count ratio and the selection completeness as
+  well, while with `sigma_kde` sampled it stayed finite. Reproduced on the
+  code before this change (`delta` and `sigma_kde` fixed at 0, so the
+  kernel pin applies): the galaxy's pinned log weight is 1.25e7, where the
+  float64 spacing (1.9e-9) exceeds the per-call probe's absolute tolerance
+  (1e-9), so the probe that compares the live kernel with the pin shifted by
+  `3 ln(H0 / H0_ref)` fails by rounding alone. It failed at H0 = 55, 60 and
+  70 and passed at 67.74 (the pin's reference), 75 and 80, and a failed
+  probe sets the likelihood to `-inf`. This happens only when the galaxy's
+  row is one of the pin's 8 probe rows: with the galaxy in each of the 36
+  rows of the fixture that had room, 7 gave `-inf` at H0 = 55 and 70 in both
+  modes, and the others gave the pinned value equal to the unpinned one. In
+  the probe rows `kernel_pin="off"` or a sampled `sigma_kde` (evaluated at 0
+  or 0.01) gave finite values, which are still wrong where the row holds PE
+  samples (the shift above). The measurements above used a sampled
+  `sigma_kde` at 0.01 and the row with most PE samples, which is not a
+  probe row, so they did not show this. The refusal below covers both: the
+  galaxy is refused at bind whatever `sigma_kde` and the pin setting.
 
 `bind_analysis` now checks the real galaxies of the catalog (the first
 `ngals` slots of each row; padding, such as the surveys writer's 100.0, is

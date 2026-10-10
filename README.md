@@ -171,7 +171,9 @@ reference weight density divided by the catalog's mean weight, with `n0_units`
 stated. Supplying weights together with a count-based `n0` and a count-based
 completeness biases `H0`; a consumer reported -1.5 km/s/Mpc on a toy (not
 verified here). Core divides by each row's own mean weight, so one `n0` is
-exact only where the rows' mean weights equal the catalog's.
+exact only where the rows' mean weights equal the catalog's, and where a row
+has no catalogued density (empty rows, and above the catalog's depth, where
+the density is the missing term `n0 dV/dz` alone).
 
 Several catalogs combine in a field-weighted mixture: each sample's host
 density is `sum_k w_k n_k(z | p_k) / Z_k`, with each catalog's host mass

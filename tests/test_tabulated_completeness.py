@@ -235,6 +235,80 @@ def test_coverage_refusals():
     assert validate_selection_coverage(SCHECHTER, None) is SCHECHTER
 
 
+def test_mixture_coverage_refusal_names_the_catalog():
+    exact = TabulatedSelection(z=[0.0, 0.1, DEPTH], completeness=[1.0, 0.6, 0.3])
+    other = catalog_store(23, nside=4, empty=(5, 40, 41, 100), n_max=4)
+
+    def mixture(stores, tables):
+        return ds.model(
+            cosmology=COSMOLOGY, population=POPULATION, catalog=stores,
+            catalog_sky_weighting="field", completeness="selection", selection=tables,
+        )
+
+    with pytest.raises(
+        ValueError, match=r"^catalog 2 \(catalog-fixture-23\.h5\): tabulated selection "
+        r"must reach the top of the model redshift grid",
+    ):
+        mixture([STORE_DEPTH, other], [exact, exact])
+    with pytest.raises(
+        ValueError, match=r"^catalog 1 \(catalog-fixture-23\.h5\): tabulated selection "
+        r"must reach the top",
+    ):
+        mixture([other, STORE_DEPTH], [exact, exact])
+    late = TabulatedSelection(z=[1e-4, 0.1, ZTOP], completeness=[1.0, 0.6, 0.3])
+    with pytest.raises(ValueError, match=r"^catalog 2 \(.*\): .*must start at or below z = 0"):
+        mixture([STORE_DEPTH, other], [exact, selection_to_mapping(late)])
+    # Each table is checked against its own catalog: these bind.
+    full = TabulatedSelection(z=[0.0, ZTOP], completeness=[1.0, 0.0])
+    assert mixture([STORE_DEPTH, other], [exact, full]).redshift.components[1].selection == full
+
+
+@pytest.mark.parametrize(
+    "z, completeness, what",
+    [
+        (["0.0", "0.1", "5.0"], [1.0, 0.5, 0.0], "z must hold integers or floats; got "
+         "entries of type str"),
+        ([0.0, 0.1, 5.0], ["1.0", "0.5", "0.0"], "completeness must hold integers or "
+         "floats; got entries of type str"),
+        ([0.0, 0.1, 5.0], [True, 0.5, False], "completeness .* type bool"),
+        ([0, 1, 5], [True, False, False], "completeness .* type bool"),
+        ([0.0, 0.1, 5.0], np.array([True, True, False]), "completeness .* type bool"),
+        (np.array(["0", "0.1", "5"]), [1.0, 0.5, 0.0], "z .* type str"),
+        ([0.0, None, 5.0], [1.0, 0.5, 0.0], "z .* type object"),
+    ],
+    ids=("str-z", "str-completeness", "bool-in-floats", "bool-in-ints", "bool-array",
+         "str-array", "none"),
+)
+def test_non_numeric_entries_are_refused(z, completeness, what):
+    payload = {
+        "format_version": SELECTION_RUNTIME_FORMAT, "family": "tabulated",
+        "z": z, "completeness": completeness,
+    }
+    with pytest.raises(TypeError, match=f"tabulated selection {what}"):
+        selection_from_mapping(payload)
+    with pytest.raises(TypeError, match=what):
+        TabulatedSelection(z=z, completeness=completeness)
+    with pytest.raises(TypeError, match=what):
+        _analysis(payload)
+
+
+def test_numbers_of_any_numeric_dtype_are_accepted():
+    reference = TabulatedSelection(z=[0.0, 1.0, 5.0], completeness=[1.0, 0.5, 0.0])
+    for z, completeness in (
+        ([0, 1, 5], [1, 0.5, 0]),
+        (np.array([0, 1, 5], dtype=np.int32), np.array([1.0, 0.5, 0.0], dtype=np.float32)),
+        (np.array([0, 1, 5], dtype=np.uint8), np.array([1, 0, 0], dtype=np.int64)),
+        ((np.float32(0.0), np.int64(1), 5.0), [np.float64(1.0), 0.5, np.int16(0)]),
+        (jnp.asarray([0.0, 1.0, 5.0]), jnp.asarray([1.0, 0.5, 0.0])),
+    ):
+        table = TabulatedSelection(z=z, completeness=completeness)
+        assert table.z == reference.z
+        assert all(type(x) is float for x in table.z + table.completeness)
+    integer = TabulatedSelection(z=[0, 1, 5], completeness=[1, 0, 0])
+    assert integer.completeness == (1.0, 0.0, 0.0)
+    assert _analysis(integer).redshift.selection == integer
+
+
 # ---------------------------------------------------------------------------
 # The plan: a fixed family with no nuisance
 

@@ -236,8 +236,8 @@ def validate_catalog(
         raise ValueError(
             f"{n_beyond} real {'galaxy lies' if n_beyond == 1 else 'galaxies lie'} "
             f"beyond the redshift grid, which ends at "
-            f"z = {z_max:.6g} (first: row {row}, slot {slot}, z = "
-            f"{float(z[row, slot]):.6g}; largest z = {z_beyond:.6g}). Such a galaxy "
+            f"z = {float(z_max)!r} (first: row {row}, slot {slot}, z = "
+            f"{float(z[row, slot])!r}; largest z = {z_beyond!r}). Such a galaxy "
             "has no host redshift on the grid and can remove every host of its sky "
             "row; drop these entries from the catalog (keep the real galaxies in "
             "the first ngals slots of the row), or set DARKSIRENS_ZMAX above them "

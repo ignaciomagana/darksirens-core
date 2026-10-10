@@ -479,7 +479,7 @@ def test_real_galaxy_beyond_the_grid_is_refused_at_bind(mode):
     )
     with pytest.raises(
         ValueError,
-        match=rf"1 real galaxy lies beyond the redshift grid, which ends at z = 5 "
+        match=rf"1 real galaxy lies beyond the redshift grid, which ends at z = 5\.0 "
         rf"\(first: row {row}, slot {slot}, z = 5\.5; largest z = 5\.5\)",
     ):
         bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
@@ -492,11 +492,25 @@ def test_galaxies_beyond_the_grid_are_counted_over_row_blocks(monkeypatch):
     store = _with_galaxy(_with_galaxy(STORE, last, 7.0), first, np.nextafter(Z_TOP, 6.0))
     monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 5 * store.catalog.zgals.shape[1])
     with pytest.raises(
-        ValueError, match=rf"2 real galaxies lie beyond .*first: row {first}, .*largest z = 7\)"
+        ValueError, match=rf"2 real galaxies lie beyond .*first: row {first}, .*largest z = 7\.0\)"
     ):
         validate_catalog(store.catalog, z_max=Z_TOP)
     # The grid is the model's: without it the arrays alone are a valid catalog.
     assert validate_catalog(store.catalog) is store.catalog
+
+
+@pytest.mark.parametrize("above", (1.0e-9, None))
+def test_refusal_prints_a_galaxy_just_above_the_top_apart_from_it(above):
+    # At six significant digits 5 + 1e-9 printed as the grid's end, 5.
+    row = int(ROOMY[-1])
+    z = Z_TOP + above if above else np.nextafter(Z_TOP, 6.0)
+    store = _with_galaxy(STORE, row, z)
+    with pytest.raises(ValueError) as caught:
+        validate_catalog(store.catalog, z_max=Z_TOP)
+    message = str(caught.value)
+    assert f"which ends at z = {Z_TOP!r} (first: row {row}, slot " in message
+    assert f", z = {float(z)!r}; largest z = {float(z)!r})" in message
+    assert repr(float(z)) != repr(Z_TOP)
 
 
 def test_padding_beyond_the_grid_is_not_a_galaxy():
