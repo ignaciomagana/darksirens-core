@@ -228,14 +228,20 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `selection_record`) in place of the arrays, so two tables give two run
   fingerprints. The records of the other families are unchanged. The frozen
   reference has no such family.
-- `model(..., count_ratio="row"|"pooled", count_ratio_window=None)`: the
+- `model(..., count_ratio=None|"pooled"|"row", count_ratio_window=None)`: the
   estimator of the count-ratio completeness (`completeness="incomplete"`,
   either sky weighting, one value for every catalog of a mixture that runs
-  it). `"row"` (the default, the reference's estimator) is unchanged: the
+  it). The default `None` resolves to `"pooled"` with the window 0.02
+  wherever a catalog runs the count ratio, and to an inert `"row"`
+  everywhere else; a `count_ratio_window` alone asks for `"pooled"`. This
+  default changed on 2026-10-10 (it was `"row"`): a declared divergence from
+  the reference, whose parity probes pass `count_ratio="row"` (MIGRATION.md,
+  "Pooled count ratio by default"). `"row"` (the legacy estimator, the
+  reference's) is unchanged: the
   per-row `clip[S dN_obs / S dN_exp, 0, 1]` with the fixed width
   `SIGMA_SMOOTH = 0.05`; it is biased low where the completeness falls (to
   first order `C + w^2 (C' dlnE/dz + C''/2)`, `E = dN_exp/dz`). `"pooled"`
-  (opt-in, no reference counterpart) is
+  (the default, no reference counterpart) is
   `C_p(z) = f_p clip[R(z), 0, 1]` with
   `R(z) = sum_i G_w(z - z_i) / dN_exp(z_i) / [kappa(z) sum_p f_p]` over the
   real galaxies of every row of the catalog store with `0 < z_i <= z_top`
@@ -257,7 +263,12 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `row_fraction`. `count_ratio_window` with `"row"`, and `"pooled"` without a
   count-ratio catalog, are refused. `ParameterPlan.catalog_model` records
   `count_ratio`, `count_ratio_window` and the row fraction's sha256 only
-  when `"pooled"`, so default plans and fingerprints are unchanged.
+  when `"pooled"`: a default count-ratio plan records them, and an explicit
+  `"row"` gives the plan and fingerprint of the default before 2026-10-10.
+  The low-level functions (`completion_curves`, `build_completion_state`,
+  `build_observed_density_cache`, the likelihoods given no cache or an
+  `ObservedDensityCache`) keep the per-row estimator; they select the pooled
+  one only when given a `PooledCountRatioCache`.
 - `model(..., catalog_sky_weighting="conditional"|"field",
   field_normalizer=None)`: the default `"conditional"` is the frozen
   per-row normalization (one catalog). `"field"` (opt-in) keeps each row's

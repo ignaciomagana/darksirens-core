@@ -1,6 +1,7 @@
 """Ordinary non-LSS catalog completeness and missing-host count budget.
 
-This module reconstructs only the frozen legacy per-row count-ratio estimator.
+This module reconstructs the frozen legacy per-row count-ratio estimator and
+adds the pooled one (:func:`build_pooled_count_ratio_cache`).
 Survey fitting, aggregate/stratified selection models, Q/latent fields, and
 field/global normalizers are deliberately out of scope.
 
@@ -16,11 +17,16 @@ so ``dN_miss`` relaxes to the full ``dN_exp`` there.  The depth is a survey
 completeness statement, not an analysis cutoff; ``N_miss`` always integrates
 over the full modeled redshift grid.
 
-Opt-in (``ds.model(..., count_ratio="pooled")``): the pooled count ratio of
+Pooled (``ds.model(..., count_ratio="pooled")``, the default of ``ds.model``
+since 2026-10-10): the pooled count ratio of
 :func:`build_pooled_count_ratio_cache`, which smooths the ratio itself, pools
 the catalog's rows before the clip and takes its kernel width as an argument.
-The functions here dispatch on the cache they are given; the default cache
-and its arithmetic are unchanged.
+The functions here dispatch on the cache they are given: no cache or an
+:class:`ObservedDensityCache` is the legacy per-row estimator (what
+``ds.model(..., count_ratio="row")`` binds), bit for bit as before; a
+:class:`PooledCountRatioCache` is the pooled one. The defaults of these
+low-level functions are therefore the legacy estimator; only ``ds.model``'s
+default changed.
 """
 
 from __future__ import annotations
@@ -245,7 +251,7 @@ POOLED_EMPTY_ROW_WARN: float = 0.1
 
 
 class PooledCountRatioCache(NamedTuple):
-    """Theta-independent operands of the pooled count ratio (opt-in).
+    """Theta-independent operands of the pooled count ratio (the ``ds.model`` default).
 
     ``operator`` is ``(N_z, N_z)``: applied to ``z^2 / dN_exp`` on the
     redshift grid it gives the pooled ratio ``R(z)`` of
@@ -285,7 +291,7 @@ def build_pooled_count_ratio_cache(
     z_depth: float | None = None,
     row_fraction=None,
 ) -> PooledCountRatioCache:
-    """Precompute the pooled count ratio of a catalog (opt-in ``count_ratio="pooled"``).
+    """Precompute the pooled count ratio of a catalog (``count_ratio="pooled"``, the default).
 
     The default estimator smooths the observed and the expected density and
     divides.  Both rise steeply with redshift, so that ratio at ``z`` is, to
@@ -389,7 +395,9 @@ def build_pooled_count_ratio_cache(
     if effective < POOLED_MIN_EFFECTIVE:
         raise ValueError(
             f"{text}; fewer than {POOLED_MIN_EFFECTIVE:g} is refused. Use a wider "
-            "count_ratio_window, pool more rows, or completeness='selection'"
+            "count_ratio_window, pool more rows, or completeness='selection'; "
+            "count_ratio='row' runs the legacy per-row estimator (the default "
+            "before 2026-10-10, biased where the completeness falls)"
         )
     if effective < POOLED_WARN_EFFECTIVE:
         warnings.warn(
@@ -604,7 +612,7 @@ def _gathered_completion_curves_impl(
 ) -> GatheredCompletionCurves:
     state = _build_completion_state_impl(cosmo, params, catalog)
     if isinstance(observed_cache, PooledCountRatioCache):
-        # Opt-in pooled count ratio: the row-fraction factors.
+        # Pooled count ratio: the row-fraction factors.
         cbar = _pooled_curve(state, observed_cache)
         fraction = _pooled_row_fraction(catalog, observed_cache, cbar.dtype)
         depth_mask = None if params.z_depth is None else zgrid <= params.z_depth

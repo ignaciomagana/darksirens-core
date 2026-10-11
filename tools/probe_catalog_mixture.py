@@ -54,6 +54,11 @@ N_SEL = 256
 N_DRAW = 2.0 * N_SEL
 MAX_VARIANCE = 1.0e3
 OM0 = 0.3075
+#: Declared divergence from the reference (MIGRATION.md, "Pooled count ratio by
+#: default"): ``ds.model`` defaults to the pooled count-ratio estimator, which
+#: the reference does not have. The candidate arm runs the reference's per-row
+#: estimator (``count_ratio="row"``) and checks that the default is this one.
+DECLARED_COUNT_RATIO_DEFAULT = "pooled"
 SCHECHTER = (
     dict(m_lim=19.0, Mstar_hat=-20.6, alpha=-1.05, M_faint_offset=5.0),
     dict(m_lim=17.5, Mstar_hat=-21.0, alpha=-0.8, M_faint_offset=5.0),
@@ -262,7 +267,7 @@ def _candidate():
             kwargs["fixed_survey"] = {
                 f"{p}{s}": v for s in suffixes for p, v in zip(("delta", "sigma_kde"), fixed_kernel)
             }
-        analysis = ds.model(
+        model_kwargs = dict(
             cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=OM0),
             population=ds.Population(POP_MODEL, fixed=dict(zip(labels, population))),
             catalog=stores,
@@ -270,6 +275,15 @@ def _candidate():
             completeness=completeness if isinstance(completeness, str) else list(completeness),
             **kwargs,
         )
+        if "incomplete" in modes:
+            default = ds.model(**model_kwargs).redshift.count_ratio
+            if default != DECLARED_COUNT_RATIO_DEFAULT:
+                raise SystemExit(
+                    f"{name}: ds.model's count ratio defaults to {default!r}, declared "
+                    f"{DECLARED_COUNT_RATIO_DEFAULT!r}; update the declaration deliberately"
+                )
+        # The reference's per-row count ratio (DECLARED_COUNT_RATIO_DEFAULT).
+        analysis = ds.model(**model_kwargs, count_ratio="row")
         if fixed_kernel is not None:
             assert analysis.parameters.kernel_pin_active
         bound = bind_analysis(analysis, events=events, injections=injections,

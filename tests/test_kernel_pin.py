@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import pickle
 
 import jax
@@ -24,7 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from darksirens import Cosmology, Population, model
+from darksirens import Cosmology, Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.models import (
     build_incomplete_catalog_prior_state,
@@ -55,6 +57,11 @@ from darksirens.population import get_fixed_population_params, pop_model_prior_p
 from darksirens.runtime_binding import _decode_theta, bind_analysis
 
 from _historical_settings import catalog_settings
+
+# These tests check the kernel pin on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 
 FIT = ("m1det", "q", "dL", "chieff")

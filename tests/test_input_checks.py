@@ -77,6 +77,9 @@ def _padding(catalog):
 
 
 def _bound(store, **kwargs):
+    # The toy catalog is too sparse for the pooled count ratio that ds.model
+    # uses by default since 2026-10-10; these checks run the legacy per-row one.
+    kwargs.setdefault("count_ratio", "row")
     analysis = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=store, **kwargs)
     bound = bind_analysis(
         analysis, events=EVENTS, injections=INJECTIONS, max_likelihood_variance=1.0e3

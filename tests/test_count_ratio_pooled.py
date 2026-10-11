@@ -1,18 +1,21 @@
-"""Pooled count-ratio completeness (``ds.model(..., count_ratio="pooled")``).
+"""Pooled count-ratio completeness (``ds.model(..., count_ratio="pooled")``, the default).
 
-The default count ratio divides each row's smoothed observed density by the
-smoothed expected density (Gaussian width 0.05). Both rise steeply with
+The legacy count ratio (``count_ratio="row"``, the default before 2026-10-10
+and the frozen reference's) divides each row's smoothed observed density by
+the smoothed expected density (Gaussian width 0.05). Both rise steeply with
 redshift, so the ratio is ``C + w^2 (C' dlnE/dz + C''/2)`` to first order:
 too low where the completeness falls. ``count_ratio="pooled"`` smooths the
 ratio itself over all the rows of the catalog, clips the pooled curve and
 gives row ``p`` the completeness ``f_p C(z)``. These tests pin, on a toy with
-a known completeness, that the default is off by the predicted amount and
-that the pooled estimator recovers the truth; that the stored operator is
-the galaxy sum it stands for at any proposal; that the default is untouched
-(same value bit for bit, same plan record and fingerprint); the plan record;
-the refusals and warnings; and that the pooled estimator runs under both sky
-weightings, with a survey depth, a row fraction, both kernel layouts and
-missing-density forms, in a two-catalog mixture, and under ``jax.grad``.
+a known completeness, that the row estimator is off by the predicted amount
+and that the pooled estimator recovers the truth; that the stored operator is
+the galaxy sum it stands for at any proposal; that the default is the pooled
+estimator with the window 0.02, that the default is inert where no catalog
+runs the count ratio, and that ``"row"`` keeps the previous default's plan
+record and fingerprint; the plan record; the refusals and warnings; and that
+the pooled estimator runs under both sky weightings, with a survey depth, a
+row fraction, both kernel layouts and missing-density forms, in a two-catalog
+mixture, and under ``jax.grad``.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import darksirens as ds
 from darksirens import Population
 from darksirens.catalog import completeness as completeness_module
 from darksirens.catalog.completeness import (
+    POOLED_WINDOW_DEFAULT,
     PooledCountRatioCache,
     build_completion_state,
     build_observed_density_cache,
@@ -42,7 +46,10 @@ from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
 from darksirens.cosmology._grid import zgrid
 from darksirens.cosmology.distances import dV_of_z
 from darksirens.cosmology.parameters import CosmologyParameters
-from darksirens.inference.run_fingerprint import parameter_plan_semantic
+from darksirens.inference.run_fingerprint import (
+    _historical_setting_hints,
+    parameter_plan_semantic,
+)
 from darksirens.runtime_binding import bind_analysis
 from darksirens.selection.catalog import SchechterMagnitudeSelection
 
@@ -116,7 +123,7 @@ def _kernel_mean_of_truth(window):
     return out
 
 
-def test_the_default_estimator_is_low_by_the_predicted_amount_on_the_toy():
+def test_the_row_estimator_is_low_by_the_predicted_amount_on_the_toy():
     """Width 0.05: the sky mean of the per-row ratio is 0.14 below the truth at
     z = 0.2 and 0.06 below at z = 0.1, and equals the ratio of the two smoothed
     densities, whose first-order form is ``C + w^2 (C' dlnE/dz + C''/2)``."""
@@ -161,7 +168,7 @@ def test_the_pooled_estimator_recovers_the_toy_completeness(window, tolerance):
     assert np.max(np.abs(error[TOY_RANGE])) < tolerance, np.max(np.abs(error[TOY_RANGE]))
     smooth = _kernel_mean_of_truth(window)
     assert np.max(np.abs(C[0] - smooth)[TOY_RANGE]) < 2.0e-3
-    # Above the depth every host is missing, as for the default estimator.
+    # Above the depth every host is missing, as for the row estimator.
     above = Z > TOY_DEPTH
     state = build_completion_state(COSMO, TOY_PARAMS, TOY)
     np.testing.assert_array_equal(
@@ -319,7 +326,7 @@ def test_a_cache_of_another_view_is_refused():
 
 
 # ---------------------------------------------------------------------------
-# ds.model: the default is untouched, the plan record, the refusals
+# ds.model: the default (pooled), the legacy "row", the plan record, the refusals
 
 POPULATION = Population(MODEL, fixed=FIXED_POPULATION)
 CAP = 1.0e3
@@ -367,34 +374,107 @@ def _values(analysis, n=3, **kwargs):
 
 
 @pytest.mark.parametrize("weighting", ["conditional", "field", "two"])
-def test_the_default_is_the_row_estimator_bit_for_bit(weighting):
-    """``count_ratio="row"`` is the default: the same plan, record, fingerprint
-    and observed-density cache, and the same value bit for bit."""
+def test_the_default_is_the_pooled_estimator_bit_for_bit(weighting):
+    """The default count ratio (since 2026-10-10) is ``"pooled"`` with the
+    window 0.02: the same plan, record, fingerprint and pooled cache as the
+    explicit setting, and the same value bit for bit."""
     kwargs = dict(catalog_sky_weighting="conditional" if weighting == "conditional" else "field")
     stores = [A, B] if weighting == "two" else A
     default = _model(stores, **kwargs)
-    row = _model(stores, count_ratio="row", **kwargs)
-    assert default.redshift.count_ratio == "row"
-    assert default.redshift.count_ratio_window is None
-    assert default.parameters == row.parameters
-    assert "count_ratio" not in default.parameters.catalog_model_settings
-    assert parameter_plan_semantic(default.parameters) == parameter_plan_semantic(row.parameters)
+    pooled = _model(stores, count_ratio="pooled", count_ratio_window=0.02, **kwargs)
+    assert default.redshift.count_ratio == "pooled"
+    assert default.redshift.count_ratio_window == POOLED_WINDOW_DEFAULT == 0.02
+    assert default.redshift == pooled.redshift
+    assert default.parameters == pooled.parameters
+    settings = default.parameters.catalog_model_settings
+    assert settings["count_ratio"] == "pooled" and settings["count_ratio_window"] == 0.02
+    assert parameter_plan_semantic(default.parameters) == parameter_plan_semantic(pooled.parameters)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="count_ratio='pooled'")
+        bound_default, bound_pooled = _bind(default), _bind(pooled)
     if weighting == "conditional":
-        assert default.parameters.catalog_model == ""
-    bound_default, bound_row = _bind(default), _bind(row)
-    if weighting == "conditional":
-        assert not isinstance(bound_default.observed_density_cache, PooledCountRatioCache)
-        assert bound_default.observed_density_cache.dN_obs_kde.shape[1] == Z.size
+        assert isinstance(bound_default.observed_density_cache, PooledCountRatioCache)
     else:
         for component in bound_default.model_operands.components:
-            assert not isinstance(component.compact_cache, PooledCountRatioCache)
+            assert isinstance(component.compact_cache, PooledCountRatioCache)
     for theta in _points(default):
-        assert float(bound_default(theta)) == float(bound_row(theta))
+        assert float(bound_default(theta)) == float(bound_pooled(theta))
+
+
+@pytest.mark.parametrize("weighting", ["conditional", "field", "two"])
+def test_the_legacy_row_estimator_keeps_the_previous_default_record(weighting):
+    """``count_ratio="row"`` (the default before 2026-10-10, the frozen
+    reference's estimator) is not recorded, so its plan and fingerprint are
+    those of a run made before the default changed, and it binds the
+    observed-density cache."""
+    kwargs = dict(catalog_sky_weighting="conditional" if weighting == "conditional" else "field")
+    stores = [A, B] if weighting == "two" else A
+    row = _model(stores, count_ratio="row", **kwargs)
+    assert row.redshift.count_ratio == "row"
+    assert row.redshift.count_ratio_window is None
+    assert "count_ratio" not in row.parameters.catalog_model_settings
+    assert "count_ratio" not in str(parameter_plan_semantic(row.parameters))
+    if weighting == "conditional":
+        assert row.parameters.catalog_model == ""
+    assert parameter_plan_semantic(row.parameters) != parameter_plan_semantic(
+        _model(stores, **kwargs).parameters
+    )
+    bound = _bind(row)
+    if weighting == "conditional":
+        assert not isinstance(bound.observed_density_cache, PooledCountRatioCache)
+        assert bound.observed_density_cache.dN_obs_kde.shape[1] == Z.size
+    else:
+        for component in bound.model_operands.components:
+            assert not isinstance(component.compact_cache, PooledCountRatioCache)
+    assert np.all(np.isfinite([float(bound(theta)) for theta in _points(row)]))
+
+
+def test_the_default_is_inert_without_a_count_ratio_catalog():
+    """Where no catalog runs the count ratio the default resolves to ``"row"``,
+    which no record carries: those plans and fingerprints are unchanged."""
+    spectral = ds.model(cosmology=COSMOLOGY, population=POPULATION)
+    assert spectral.parameters.catalog_model == ""
+    complete = _model(A, completeness="complete", fixed_survey=None, n0_units=None)
+    assert complete.parameters.catalog_model == ""
+    selection = _model(A, completeness="selection", selection=SEL)
+    assert selection.redshift.count_ratio == "row"
+    assert "count_ratio" not in selection.parameters.catalog_model_settings
+    field_complete = _model(
+        A, catalog_sky_weighting="field", completeness="complete", fixed_survey=None,
+        n0_units=None,
+    )
+    assert field_complete.redshift.count_ratio == "row"
+    assert "count_ratio" not in field_complete.parameters.catalog_model_settings
+    # One count-ratio catalog of a mixture is enough for the default to apply.
+    mixed = _model(
+        [A, B], catalog_sky_weighting="field", completeness=["incomplete", "complete"],
+        fixed_survey=None, n0_units=None,
+    )
+    assert mixed.redshift.count_ratio == "pooled"
+
+
+def test_a_window_alone_asks_for_the_pooled_estimator():
+    alone = _model(A, count_ratio_window=0.03)
+    assert alone.redshift.count_ratio == "pooled"
+    assert alone.redshift.count_ratio_window == 0.03
+    with pytest.raises(ValueError, match="applies only to the count-ratio completeness"):
+        _model(A, completeness="selection", selection=SEL, count_ratio_window=0.03)
+
+
+def test_resuming_a_run_made_under_the_old_default_names_the_fix():
+    stored = {"plan": {"labels": ["H0"]}}
+    current = {"plan": {"labels": ["H0"], "catalog_model": {
+        "completeness": "incomplete", "count_ratio": "pooled", "count_ratio_window": 0.02,
+    }}}
+    hints = _historical_setting_hints(stored, current)
+    assert len(hints) == 1 and 'count_ratio="row"' in hints[0]
+    # A run made with an explicit "pooled" before needs no hint.
+    assert _historical_setting_hints(current, current) == []
 
 
 @pytest.mark.parametrize("weighting", ["conditional", "field"])
 def test_the_plan_records_the_pooled_estimator_and_its_window(weighting):
-    row = _model(A, catalog_sky_weighting=weighting)
+    row = _model(A, catalog_sky_weighting=weighting, count_ratio="row")
     pooled = _pooled(A, catalog_sky_weighting=weighting)
     assert pooled.redshift.count_ratio == "pooled"
     assert pooled.redshift.count_ratio_window == WINDOW
@@ -420,8 +500,7 @@ def test_the_plan_records_the_pooled_estimator_and_its_window(weighting):
     "kwargs, error, message",
     [
         (dict(catalog=A, count_ratio="smooth"), ValueError, "count_ratio must be one of"),
-        (dict(catalog=A, count_ratio=None), ValueError, "count_ratio must be one of"),
-        (dict(catalog=A, count_ratio_window=0.02), ValueError,
+        (dict(catalog=A, count_ratio="row", count_ratio_window=0.02), ValueError,
          "count_ratio_window applies only to count_ratio='pooled'"),
         (dict(catalog=A, count_ratio="pooled", count_ratio_window=0.0), ValueError,
          "count_ratio_window must be finite and > 0"),
@@ -436,9 +515,10 @@ def test_the_plan_records_the_pooled_estimator_and_its_window(weighting):
         (dict(catalog=A, count_ratio="pooled", catalog_sky_weighting="field",
               completeness="complete", fixed_survey=None, n0_units=None),
          ValueError, "applies only to the count-ratio completeness"),
-        (dict(catalog=A, row_fraction=np.ones(48)), ValueError,
+        (dict(catalog=A, count_ratio="row", row_fraction=np.ones(48)), ValueError,
          "selection and row_fraction apply only to completeness='selection'"),
-        (dict(catalog=A, catalog_sky_weighting="field", row_fraction=np.ones(48)), ValueError,
+        (dict(catalog=A, count_ratio="row", catalog_sky_weighting="field",
+              row_fraction=np.ones(48)), ValueError,
          "selection and row_fraction apply only to completeness='selection'"),
         (dict(catalog=A, count_ratio="pooled", selection=SEL), ValueError,
          "selection and row_fraction apply only to completeness='selection'"),
@@ -499,7 +579,7 @@ def test_the_binding_carries_one_pooled_curve_and_the_view_rows_coverage():
 def test_the_pooled_likelihood_is_finite_and_is_not_the_row_one(catalog, weighting):
     stores = {"one": A, "deep": A_DEEP, "two": [A_DEEP, B]}[catalog]
     pooled = _values(_pooled(stores, catalog_sky_weighting=weighting))
-    row = _values(_model(stores, catalog_sky_weighting=weighting))
+    row = _values(_model(stores, catalog_sky_weighting=weighting, count_ratio="row"))
     assert np.all(np.abs(pooled - row) > 1.0e-6), (pooled, row)
 
 

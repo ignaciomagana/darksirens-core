@@ -276,10 +276,13 @@ def _analyses():
     return {
         "spectral": ds.model(cosmology=COSMOLOGY, population=POPULATION),
         "fixed": ds.model(cosmology=COSMOLOGY, population=FIXED),
-        "dark": ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=CATALOG_A),
+        # The legacy per-row count ratio: the toy catalogs are too sparse for
+        # the pooled one that ds.model uses by default since 2026-10-10.
+        "dark": ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=CATALOG_A,
+                         count_ratio="row"),
         "branches": ds.model(cosmology=COSMOLOGY, population=POPULATION,
                              catalog=[CATALOG_A, CATALOG_B], catalog_sky_weighting="field",
-                             per_catalog_population={2: [BETA]}),
+                             per_catalog_population={2: [BETA]}, count_ratio="row"),
     }
 
 

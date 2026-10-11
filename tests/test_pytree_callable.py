@@ -10,15 +10,23 @@ bit for bit ``bound(theta)``.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from darksirens import Population, model
+from darksirens import Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.runtime_binding import bind_analysis
 
 from test_partial_fixing import COSMOLOGY, MODEL, TAIL, _catalog, _stores
+
+# These tests check the pytree callable on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 LARGE = 64  # elements; every data operand of the fixture is larger, every legitimate literal smaller
 

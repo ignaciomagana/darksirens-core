@@ -342,8 +342,10 @@ def test_fingerprint_distinguishes_two_tables():
     assert a["catalog_model"]["selection"]["table_sha256"] != b["catalog_model"]["selection"]["table_sha256"]
     # Existing modes: the record is unchanged.
     assert c["catalog_model"]["selection"] == selection_to_mapping(SCHECHTER)
-    default = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=STORE)
-    assert "catalog_model" not in parameter_plan_semantic(default.parameters)
+    # The legacy per-row count ratio (ds.model's default before 2026-10-10)
+    # records nothing; the pooled default records its estimator.
+    row = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=STORE, count_ratio="row")
+    assert "catalog_model" not in parameter_plan_semantic(row.parameters)
 
 
 # ---------------------------------------------------------------------------

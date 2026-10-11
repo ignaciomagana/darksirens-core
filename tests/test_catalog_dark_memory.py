@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 from typing import Any, NamedTuple
 
 import jax
@@ -37,7 +38,8 @@ import numpy as np
 import pytest
 from jax.scipy.special import ndtri
 
-from darksirens import Cosmology, Population, model
+from darksirens import Cosmology, Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.analysis import ParameterPlan
 from darksirens.catalog import redshift as _redshift
 from darksirens.catalog import completeness as _completeness
@@ -89,6 +91,11 @@ from darksirens.selection.footprint import (
 )
 
 from _historical_settings import HISTORICAL_CATALOG, catalog_settings
+
+# These tests check the catalog layouts on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 jax.config.update("jax_enable_x64", True)
 

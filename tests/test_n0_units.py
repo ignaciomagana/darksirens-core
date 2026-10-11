@@ -12,18 +12,25 @@ default, so existing fingerprints are unchanged.
 
 from __future__ import annotations
 
+import functools
 import math
 
 import jax
 import numpy as np
 import pytest
 
-from darksirens import Population, model
+from darksirens import Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.catalog import H0_N0_REF, physical_n0
 from darksirens.inference.run_fingerprint import parameter_plan_semantic
 from darksirens.runtime_binding import _decode_theta, bind_analysis
 
 from test_partial_fixing import COSMOLOGY, MODEL, TAIL, _catalog, _stores
+
+# These tests check the n0 unit on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 
 def _analysis(n0_units=None, **kwargs):

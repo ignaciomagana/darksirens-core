@@ -339,7 +339,9 @@ def test_the_likelihood_refuses_operands_that_do_not_match_the_host_mass():
     )
     with pytest.raises(ValueError, match="needs the row weight sums of catalog 1"):
         dataclasses.replace(weighted, model_operands=stripped)(theta)
-    incomplete = _bind(_model([A, B], completeness="incomplete"))
+    # The legacy per-row count ratio: the toy catalogs are too sparse for the
+    # pooled one that ds.model uses by default since 2026-10-10.
+    incomplete = _bind(_model([A, B], completeness="incomplete", count_ratio="row"))
     forged = dataclasses.replace(
         incomplete.analysis,
         redshift=dataclasses.replace(incomplete.analysis.redshift, host_mass="weight"),
