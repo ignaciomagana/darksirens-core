@@ -289,7 +289,7 @@ def _missing_total(k, cosmology, params, component, completeness, normalizer,
             )
         )
     if isinstance(component.full_cache, PooledCountRatioCache):
-        # Opt-in pooled count ratio: the gathered form's row sums.
+        # Pooled count ratio (the ds.model default): the gathered form's row sums.
         return missing_total_from_curves(
             gathered_completion_curves(cosmology, params, full, component.full_cache)
         )

@@ -1,5 +1,6 @@
 import contextlib
 from dataclasses import replace
+import functools
 import json
 import warnings
 
@@ -8,7 +9,8 @@ import pytest
 
 from _historical_settings import historical_evaluation
 
-from darksirens import Cosmology, Population, model
+from darksirens import Cosmology, Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.catalog.geometry import ang2pix_ring
 from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
@@ -20,6 +22,11 @@ from darksirens.likelihood.hierarchical import (
     spectral_siren_log_likelihood,
 )
 from darksirens.runtime_binding import bind_analysis, required_fit_columns
+
+# These tests check the runtime binding on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 
 FIT = ("m1det", "q", "dL", "chieff")

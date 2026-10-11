@@ -31,8 +31,10 @@ _COMPLETE_CATALOG_PRIORS = (
 _UNIFORM = ("uniform", None, None)
 
 #: Settings of ``model(..., completeness=...)`` for a catalog analysis.
-#: ``"incomplete"`` (the default) is the frozen per-row count-ratio
-#: completeness; ``"complete"`` treats the catalog as containing every host;
+#: ``"incomplete"`` (the default) is the count-ratio completeness, its
+#: estimator set by ``model(..., count_ratio=...)`` (:data:`COUNT_RATIO_SETTINGS`;
+#: the pooled estimator by default, the frozen per-row one with
+#: ``count_ratio="row"``); ``"complete"`` treats the catalog as containing every host;
 #: ``"selection"`` builds the completeness from an explicit magnitude-selection
 #: model (``model(..., selection=...)``).
 COMPLETENESS_SETTINGS = ("incomplete", "complete", "selection")
@@ -71,12 +73,15 @@ FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
 #: so every galaxy carries its own weight in every row.
 HOST_MASS_SETTINGS = ("count", "weight")
 #: Settings of ``model(..., count_ratio=...)``: the estimator of the count-ratio
-#: completeness (``completeness="incomplete"``). ``"row"`` (the frozen default)
-#: divides each row's smoothed observed density by the smoothed expected one,
-#: with the fixed kernel width 0.05; ``"pooled"`` (opt-in) smooths the ratio
-#: itself, pools the catalog's rows before the clip and takes its kernel
-#: width from ``count_ratio_window``
-#: (:func:`darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
+#: completeness (``completeness="incomplete"``). ``"pooled"`` (the default
+#: since 2026-10-10) smooths the ratio itself, pools the catalog's rows before
+#: the clip and takes its kernel width from ``count_ratio_window``
+#: (:func:`darksirens.catalog.completeness.build_pooled_count_ratio_cache`);
+#: ``"row"`` (the legacy estimator, the frozen reference's and the default
+#: before) divides each row's smoothed observed density by the smoothed
+#: expected one, with the fixed kernel width 0.05. ``model(count_ratio=None)``
+#: (the default) resolves to ``"pooled"`` wherever a catalog runs the count
+#: ratio and to ``"row"`` (inert) everywhere else.
 COUNT_RATIO_SETTINGS = ("row", "pooled")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
@@ -108,7 +113,7 @@ class IncompleteCatalogRedshift:
 
     ``n0_units`` is the unit of ``log10n0`` (see :data:`N0_UNITS_SETTINGS`).
 
-    ``selection`` is ``None`` for the frozen per-row count-ratio completeness
+    ``selection`` is ``None`` for the count-ratio completeness
     (``completeness="incomplete"``), or the validated runtime
     magnitude-selection model (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`
     or :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`) of
@@ -122,7 +127,9 @@ class IncompleteCatalogRedshift:
     ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS` and applies without
     a ``selection``; ``count_ratio_window`` is the kernel width of
     ``"pooled"`` (``None`` for ``"row"``), whose rows may also carry a
-    ``row_fraction``.
+    ``row_fraction``. The field defaults are the legacy ``"row"`` estimator
+    of the frozen reference, for a record built directly; ``model`` resolves
+    its own default (``"pooled"``, window 0.02) and always sets both.
     """
 
     catalog: Any
@@ -401,6 +408,39 @@ def selection_family(model) -> str:
     return "gaussian" if isinstance(model, GaussianMagnitudeSelection) else "schechter"
 
 
+def _count_ratio_setting(count_ratio, window):
+    """Validate ``count_ratio`` and its window; return ``(count_ratio, window)``.
+
+    ``(None, None)`` for the default (both ``None``), which
+    :func:`_default_count_ratio` resolves once the analysis is known. A window
+    without a ``count_ratio`` asks for ``"pooled"``. Otherwise the window is
+    the kernel width of ``"pooled"`` (default
+    :data:`~darksirens.catalog.completeness.POOLED_WINDOW_DEFAULT`) and
+    ``None`` for ``"row"``.
+    """
+    if count_ratio is None:
+        if window is None:
+            return None, None
+        count_ratio = "pooled"
+    return count_ratio, _count_ratio_window(count_ratio, window)
+
+
+def _default_count_ratio(count_ratio, window, applies):
+    """Resolve the default ``count_ratio=None``: ``"pooled"`` where the count ratio applies.
+
+    ``applies`` is whether a catalog of the analysis runs the count-ratio
+    completeness; elsewhere the setting is inert and resolves to ``"row"``,
+    which no record carries, so those plans and fingerprints are unchanged.
+    """
+    if count_ratio is not None:
+        return count_ratio, window
+    if not applies:
+        return "row", None
+    from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
+
+    return "pooled", POOLED_WINDOW_DEFAULT
+
+
 def _count_ratio_window(count_ratio, window):
     """Validate ``count_ratio`` and return the kernel width of ``"pooled"`` (``None`` for ``"row"``)."""
     if count_ratio not in COUNT_RATIO_SETTINGS:
@@ -411,7 +451,7 @@ def _count_ratio_window(count_ratio, window):
         if window is not None:
             raise ValueError(
                 "count_ratio_window applies only to count_ratio='pooled': the "
-                "default estimator's kernel width is fixed at 0.05"
+                "legacy estimator's (count_ratio='row') kernel width is fixed at 0.05"
             )
         return None
     from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
@@ -450,9 +490,16 @@ def _resolve_redshift(
     counterpart_nside=None,
     selection=None,
     row_fraction=None,
-    count_ratio="row",
+    count_ratio=None,
     count_ratio_window=None,
 ):
+    count_ratio, count_ratio_window = _default_count_ratio(
+        count_ratio,
+        count_ratio_window,
+        catalog is not None
+        and counterparts is None
+        and completeness in (None, "incomplete"),
+    )
     pooled = count_ratio == "pooled"
     if pooled and (catalog is None or completeness not in (None, "incomplete")):
         raise ValueError(
@@ -608,7 +655,7 @@ def _per_catalog(value, n, what, single_types):
 
 def _resolve_mixture(
     catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer,
-    host_mass="count", count_ratio="row", count_ratio_window=None,
+    host_mass="count", count_ratio=None, count_ratio_window=None,
 ):
     """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
 
@@ -642,6 +689,9 @@ def _resolve_mixture(
                 f"{where}, got completeness={entry!r}"
             )
     resolved = tuple(entry or "incomplete" for entry in entries)
+    count_ratio, count_ratio_window = _default_count_ratio(
+        count_ratio, count_ratio_window, "incomplete" in resolved
+    )
     pooled = count_ratio == "pooled"
     if pooled and "incomplete" not in resolved:
         raise ValueError(
@@ -1278,8 +1328,11 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     string when every catalog shares it (the record of every analysis before
     per-catalog completeness) and a list with one entry per catalog otherwise.
     ``host_mass`` enters only when it is not the default ``"count"``, and
-    ``count_ratio`` with its window only when it is not the default ``"row"``,
-    so the record of every analysis without them is unchanged.
+    ``count_ratio`` with its window only when it is not ``"row"`` (the legacy
+    estimator, the default before 2026-10-10, and the inert value of every
+    analysis without a count-ratio catalog), so the record of every such
+    analysis is unchanged. The default count ratio since 2026-10-10 is
+    ``"pooled"``, so a default count-ratio plan records it.
     """
     pooled = (
         {}
@@ -1393,7 +1446,7 @@ def model(
     field_normalizer=None,
     per_catalog_population=None,
     host_mass="count",
-    count_ratio="row",
+    count_ratio=None,
     count_ratio_window=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
@@ -1567,30 +1620,37 @@ def model(
     records it (``ParameterPlan.catalog_model``) and a run fingerprint
     changes with it. The frozen reference has no such mode.
 
-    ``count_ratio="pooled"`` (opt-in; the default ``"row"`` changes nothing)
-    replaces the estimator of the count-ratio completeness
-    (``completeness="incomplete"``). ``"row"`` divides each row's smoothed
-    observed density by the smoothed expected density, with a fixed Gaussian
-    width of 0.05 in redshift, and clips the row's ratio at 1. Both densities
-    rise steeply with redshift, so that ratio is the completeness near
-    ``z + 2 w^2 / z``: too low where the completeness falls, which adds
-    missing hosts there (H0 higher by about 0.7 to 0.8 km/s/Mpc on the two
-    mocks it was measured on; see the README). ``"pooled"`` smooths the ratio
-    itself, each galaxy weighted by one over the expected density at its own
-    redshift, over all the rows of the catalog at once, clips the pooled
-    curve, and gives row ``p`` the completeness ``f_p C(z)``, with ``f_p``
-    the row's ``row_fraction`` (1 for every row without one), as
+    ``count_ratio`` is the estimator of the count-ratio completeness
+    (``completeness="incomplete"``, or ``completeness=None`` with a catalog).
+    ``"pooled"`` (the default since 2026-10-10) smooths the ratio itself, each
+    galaxy weighted by one over the expected density at its own redshift,
+    over all the rows of the catalog at once, clips the pooled curve, and
+    gives row ``p`` the completeness ``f_p C(z)``, with ``f_p`` the row's
+    ``row_fraction`` (1 for every row without one), as
     ``completeness="selection"`` does with a fitted curve
     (:func:`~darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
     ``count_ratio_window`` is its Gaussian width in redshift (default 0.02;
-    refused with ``"row"``). The catalog is one completeness cell: a catalog
-    whose depth varies over the sky must be given as one catalog per depth
-    (``catalog_sky_weighting="field"``, each with its ``row_fraction``).
-    Binding refuses a window that holds fewer than 100 effective galaxies at
-    the catalog's median redshift and warns below 1000. It is one value for
-    every catalog that runs ``"incomplete"`` and is refused without one. The
-    plan records it and the window (``ParameterPlan.catalog_model``) and a
-    run fingerprint changes with them. The frozen reference has no such mode.
+    refused with ``"row"``; a window alone asks for ``"pooled"``). The catalog
+    is one completeness cell: a catalog whose depth varies over the sky must
+    be given as one catalog per depth (``catalog_sky_weighting="field"``, each
+    with its ``row_fraction``). Binding refuses a window that holds fewer than
+    100 effective galaxies at the catalog's median redshift and warns below
+    1000. ``"row"`` is the legacy estimator (the frozen reference's, and the
+    default before 2026-10-10; kept for reproducibility and legacy parity):
+    it divides each row's smoothed observed density by the smoothed expected
+    density, with a fixed Gaussian width of 0.05 in redshift, and clips the
+    row's ratio at 1. Both densities rise steeply with redshift, so that
+    ratio is the completeness near ``z + 2 w^2 / z``: too low where the
+    completeness falls, which adds missing hosts there (H0 higher by about
+    0.7 to 0.8 km/s/Mpc on the two mocks it was measured on; see the README).
+    The default ``None`` resolves to ``"pooled"`` wherever a catalog runs the
+    count ratio and to an inert ``"row"`` everywhere else; an explicit
+    ``"pooled"`` is refused where no catalog runs it. It is one value for
+    every catalog that runs ``"incomplete"``. The plan records ``"pooled"``
+    and its window (``ParameterPlan.catalog_model``) and a run fingerprint
+    changes with them; ``"row"`` is not recorded, so an explicit
+    ``count_ratio="row"`` reproduces the plan and fingerprint of a run made
+    before the default changed.
 
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
@@ -1643,7 +1703,7 @@ def model(
         )
     if host_mass not in HOST_MASS_SETTINGS:
         raise ValueError(f"host_mass must be one of {HOST_MASS_SETTINGS}, got {host_mass!r}")
-    count_ratio_window = _count_ratio_window(count_ratio, count_ratio_window)
+    count_ratio, count_ratio_window = _count_ratio_setting(count_ratio, count_ratio_window)
     several = isinstance(catalog, (list, tuple))
     if catalog_sky_weighting == "field":
         if catalog is None:

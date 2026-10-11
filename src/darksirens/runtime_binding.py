@@ -1157,7 +1157,7 @@ def _bind_mixture(analysis, events, injections):
         compact = _with_kernel_window(analysis, compact, k)
         compact_cache = full_cache = None
         if count_ratio and redshift.count_ratio == "pooled":
-            # Opt-in: one pooled curve from every row of the store, and each
+            # Pooled (the default): one pooled curve from every row of the store, and each
             # view's row coverage.
             pooled = _pooled_count_ratio_cache(redshift, component)
             compact_cache = pooled._replace(
@@ -1411,7 +1411,7 @@ def bind_analysis(
             else None
         )
         if getattr(analysis.redshift, "count_ratio", "row") == "pooled":
-            # Opt-in: one pooled curve from every row of the store, and the
+            # Pooled (the default): one pooled curve from every row of the store, and the
             # compact rows' coverage.
             pooled = _pooled_count_ratio_cache(analysis.redshift, analysis.redshift)
             cache = pooled._replace(

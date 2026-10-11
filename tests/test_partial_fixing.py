@@ -13,6 +13,7 @@ with a warning and is part of the fingerprint too.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 import pickle
 import re
@@ -23,7 +24,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from darksirens import Cosmology, Population, model
+from darksirens import Cosmology, Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens import runtime_binding
 from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
@@ -37,6 +39,11 @@ from darksirens.inference.run_fingerprint import (
 )
 from darksirens.population import get_fixed_population_params, pop_model_prior_parser
 from darksirens.runtime_binding import _decode_theta, bind_analysis
+
+# These tests check partial fixing on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 
 FIT = ("m1det", "q", "dL", "chieff")

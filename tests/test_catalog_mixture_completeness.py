@@ -84,6 +84,9 @@ MU_G = POPULATION_LABELS[6]
 def _model(catalog, **kwargs):
     kwargs.setdefault("catalog_sky_weighting", "field")
     kwargs.setdefault("population", POPULATION)
+    # The toy catalogs are too sparse for the pooled count ratio that ds.model
+    # uses by default since 2026-10-10; these tests run the legacy per-row one.
+    kwargs.setdefault("count_ratio", "row")
     return ds.model(cosmology=COSMOLOGY, catalog=catalog, **kwargs)
 
 

@@ -122,7 +122,9 @@ def _write_ordinary_fixtures(directory: Path):
         for name, values in sel.items():
             f.create_dataset(name, data=values)
 
-    npix, ngal = 12, 3
+    # Enough galaxies for the pooled count ratio, ds.model's default since
+    # 2026-10-10 (it refuses fewer than 100 effective galaxies per window).
+    npix, ngal = 12, 400
     catalog = directory / "cat.h5"
     with h5py.File(catalog, "w") as f:
         f.attrs["nside"] = 1

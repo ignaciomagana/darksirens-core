@@ -1128,6 +1128,8 @@ z = 4.99, at the grid top, at z = 3 above a survey depth, at z = -0.002,
 
 ### Pooled count-ratio completeness (opt-in, default unchanged)
 
+(The default changed to this estimator on 2026-10-10; see the next section.)
+
 `ds.model(catalog=..., completeness="incomplete", count_ratio="pooled",
 count_ratio_window=0.02, row_fraction=None)` replaces the estimator of the
 count-ratio completeness. The default estimator (`count_ratio="row"`)
@@ -1201,3 +1203,88 @@ catalog before the clip and gives row `p` the completeness `f_p C(z)`, with
 - **Not covered.** `darksirens-lss` passes the bound cache to
   `completion_curves`, which accepts the pooled cache, but it has not been
   tested with it. The reference has no such mode.
+
+### Pooled count ratio by default (numerics change by default; declared divergence from legacy)
+
+`ds.model` now uses the pooled count-ratio estimator of the previous section
+by default. The signature default is `count_ratio=None`, which resolves to
+`"pooled"` with `count_ratio_window=0.02` wherever a catalog runs the
+count-ratio completeness, and to the inert `"row"` everywhere else. The
+legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
+
+- **Why.** The per-row estimator is biased where the completeness falls
+  (to first order `C + w^2 (C' dlnE/dz + C''/2)` at `w = 0.05`): H0 high by
+  +0.68 +- 0.14 km/s/Mpc on the clean-room toy and +0.78 +- 0.18 on the
+  examples mock (100 seeds). The pooled estimator recovers the toy at
+  -0.020 +- 0.030 km/s/Mpc at w = 0.02 and is -0.03 +- 0.05 km/s/Mpc from
+  the magnitude-selection completeness on the mock (100 seeds).
+- **What changes.** For every `ds.model` call with a catalog and
+  `completeness=None` or `"incomplete"` (either sky weighting; in a field
+  mixture, every catalog that runs `"incomplete"`) and no `count_ratio`:
+  - the likelihood (the pooled curve in place of the per-row one), and so
+    the posterior;
+  - the plan record and the run fingerprint: `ParameterPlan.catalog_model`
+    now records `count_ratio="pooled"` and the window. Resuming a
+    checkpoint written before the change is refused as a settings change,
+    and the refusal names the fix (`ds.model(..., count_ratio="row")`);
+  - binding: it builds one `(N_z, N_z)` pooled operator in place of the
+    per-row observed-density cache, and it now **refuses** a catalog with
+    fewer than 100 effective galaxies under the kernel at its median
+    redshift (small or toy catalogs), and warns below 1000, for more than
+    10% galaxy-free rows without a `row_fraction`, and for real galaxies at
+    `z <= 0`;
+  - `row_fraction` is now accepted with the count-ratio completeness (the
+    coverage of each row, as for `"pooled"` before); it is still refused
+    with `count_ratio="row"`;
+  - a `count_ratio_window` alone now asks for `"pooled"` (it was refused
+    without `count_ratio="pooled"`).
+  - The catalog is one completeness cell: every row shares the radial
+    curve, scaled by its coverage. A catalog whose depth or magnitude limit
+    varies over the sky should be split into one catalog per stratum
+    (`catalog_sky_weighting="field"`, each with its `row_fraction`).
+- **Who is affected.** Anyone calling `ds.model` with a catalog and
+  `completeness=None` or `"incomplete"` without `count_ratio`.
+  Unchanged: spectral and bright-siren analyses, `completeness="complete"`
+  and `"selection"`, an explicit `count_ratio`, and the low-level functions
+  (`completion_curves`, `build_completion_state`,
+  `build_observed_density_cache`, and the likelihoods given no cache or an
+  `ObservedDensityCache`), which keep the per-row estimator and select the
+  pooled one only when given a `PooledCountRatioCache`. A record built
+  directly (`IncompleteCatalogRedshift`, `FieldCatalogMixtureRedshift`)
+  keeps the field default `"row"`. `darksirens-lss` builds the
+  observed-density cache itself (`fixed_table.py`, `gridding.py`), so its
+  fixed-table default is still the per-row estimator; moving it to the
+  pooled one is a separate change in that repository.
+- **Getting the old behaviour.** Pass `count_ratio="row"`. It reproduces
+  the program of `main` before the change (427e53a) bit for bit: the plan
+  record (the per-row estimator is not recorded), the run fingerprint, the
+  binding (the observed-density cache) and the log-likelihood. The probes
+  below check the bit-for-bit part on their cells.
+- **Legacy parity (declared divergence).** The frozen reference has only the
+  per-row estimator, so the new default has no reference counterpart. The
+  parity probes that go through `ds.model` run the per-row estimator
+  explicitly and declare the default (`DECLARED_COUNT_RATIO_DEFAULT =
+  "pooled"`, checked against `ds.model`'s resolved default):
+  `tools/probe_catalog_mixture.py` (CI, phase 5, at rtol 1e-12) and
+  `tools/probe_catalog_population_blocks.py` (manual, against af896ca).
+  Their candidate outputs are byte-identical to those of 427e53a. The other
+  catalog probes (`probe_catalog_likelihood`, `probe_catalog_completeness`,
+  `probe_catalog_kernel`, `probe_catalog_marks`, `probe_catalog_selection`,
+  `probe_selection_completeness`) call the low-level functions or run the
+  selection completeness and are unaffected. The tests that compare a bound
+  count-ratio likelihood with a direct per-row evaluation, or that run
+  small toy catalogs too sparse for the pooled estimator, pass
+  `count_ratio="row"` (`test_kernel_pin`, `test_partial_fixing`,
+  `test_runtime_binding`, `test_runtime_binding_jit`, `test_compute_dtype`,
+  `test_n0_units`, `test_pytree_callable`, `test_catalog_dark_memory`,
+  `test_decode_parameters`, `test_catalog_mixture`,
+  `test_catalog_mixture_completeness`, `test_catalog_population_blocks`,
+  `test_host_mass_weight`, `test_input_checks`,
+  `test_pairing_per_point_hoist`, and the plan-record checks of
+  `test_selection_completeness` and `test_tabulated_completeness`). The
+  public example `examples/ordinary_catalog.py` keeps the default; its test
+  catalog grew from 3 to 400 galaxies per row so that the pooled estimator
+  binds without a warning.
+  `test_count_ratio_pooled` pins the default (pooled, window 0.02, bit for
+  bit the explicit setting), its inert resolution without a count-ratio
+  catalog, and that `"row"` keeps the previous record.

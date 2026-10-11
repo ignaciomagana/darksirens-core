@@ -83,7 +83,7 @@ def model(
     field_normalizer=None,
     per_catalog_population=None,
     host_mass="count",
-    count_ratio="row",
+    count_ratio=None,
     count_ratio_window=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""

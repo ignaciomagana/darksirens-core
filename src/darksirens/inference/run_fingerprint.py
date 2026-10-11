@@ -885,8 +885,19 @@ def _historical_setting_hints(stored, current, out=None):
                         f"{block}.{key}: the checkpointed run used the historical value "
                         f"(the default before {date}); set {fix} to resume it"
                     )
+    # ds.model's count ratio defaults to "pooled" since 2026-10-10 and the
+    # plan records it; a run made before under the default "row" records none.
+    model = current.get("catalog_model")
+    if isinstance(model, dict) and "count_ratio" in model:
+        old_model = stored.get("catalog_model")
+        if not (isinstance(old_model, dict) and "count_ratio" in old_model):
+            out.append(
+                "catalog_model.count_ratio: if the checkpointed run used the default "
+                "count ratio of a darksirens before 2026-10-10 (the legacy per-row "
+                "estimator), pass ds.model(..., count_ratio=\"row\") to resume it"
+            )
     for key, value in current.items():
-        if key not in ("normalization_grids", "catalog_evaluation"):
+        if key not in ("normalization_grids", "catalog_evaluation", "catalog_model"):
             _historical_setting_hints(stored.get(key), value, out)
     return out
 

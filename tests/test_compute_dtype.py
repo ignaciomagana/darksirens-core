@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import functools
 import pickle
 from dataclasses import replace
 
@@ -26,7 +27,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from darksirens import Cosmology, Population, model
+from darksirens import Cosmology, Population
+from darksirens import model as _model_with_default_count_ratio
 from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import GalaxyCatalog
@@ -52,6 +54,11 @@ from darksirens.population.utils import (
 from darksirens.runtime_binding import bind_analysis
 
 from _historical_settings import historical_evaluation
+
+# These tests check the float32 program on small toy catalogs, too sparse for the pooled
+# count ratio that ds.model uses by default since 2026-10-10; they run the
+# legacy per-row estimator, the one they were written against.
+model = functools.partial(_model_with_default_count_ratio, count_ratio="row")
 
 FIT = ("m1det", "q", "dL", "chieff")
 MODEL = "powerlaw+peak"

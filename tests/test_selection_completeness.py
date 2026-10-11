@@ -101,7 +101,9 @@ def _points(analysis, n=4, seed=7, **values):
 @pytest.mark.parametrize("selection", (GAUSSIAN, SCHECHTER), ids=("gaussian", "schechter"))
 def test_plan_keeps_the_incomplete_survey_block_and_fixes_the_nuisances(selection):
     analysis = _analysis(selection)
-    incomplete = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=STORE)
+    incomplete = ds.model(
+        cosmology=COSMOLOGY, population=POPULATION, catalog=STORE, count_ratio="row"
+    )
     plan = analysis.parameters
     assert isinstance(analysis.redshift, IncompleteCatalogRedshift)
     assert analysis.redshift.selection == selection
@@ -153,7 +155,8 @@ def test_survey_priors_sample_nuisances_and_set_bounds():
     "kwargs, error, match",
     [
         (dict(completeness=None, selection=GAUSSIAN), ValueError, "only to completeness='selection'"),
-        (dict(completeness="incomplete", row_fraction=np.ones(NPIX)), ValueError, "only to completeness"),
+        (dict(completeness="incomplete", count_ratio="row", row_fraction=np.ones(NPIX)),
+         ValueError, "only to completeness"),
         (dict(completeness="selection"), ValueError, "requires selection"),
         (dict(completeness="selection", selection=3.0), TypeError, "selection must be"),
         (dict(completeness="selection", selection={"family": "gaussian"}), ValueError, "format"),
@@ -384,8 +387,10 @@ def test_jit_vmap_and_grad_through_the_sampled_nuisances():
 
 
 def test_fingerprint_records_the_selection_model_only_when_set():
-    default = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=STORE)
-    assert "catalog_model" not in parameter_plan_semantic(default.parameters)
+    # The legacy per-row count ratio (ds.model's default before 2026-10-10)
+    # records nothing; the pooled default records its estimator.
+    row = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=STORE, count_ratio="row")
+    assert "catalog_model" not in parameter_plan_semantic(row.parameters)
     a = parameter_plan_semantic(_analysis(GAUSSIAN).parameters)
     b = parameter_plan_semantic(_analysis(GAUSSIAN._replace(m_lim=21.5)).parameters)
     c = parameter_plan_semantic(_analysis(GAUSSIAN, row_fraction=np.ones(NPIX)).parameters)

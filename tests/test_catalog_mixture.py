@@ -84,6 +84,9 @@ FRACTION_B = np.random.default_rng(2).uniform(0.0, 1.0, 192)
 
 def _model(catalog, **kwargs):
     kwargs.setdefault("catalog_sky_weighting", "field")
+    # The toy catalogs are too sparse for the pooled count ratio that ds.model
+    # uses by default since 2026-10-10; these tests run the legacy per-row one.
+    kwargs.setdefault("count_ratio", "row")
     return ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=catalog, **kwargs)
 
 
@@ -362,7 +365,7 @@ def test_the_normaliser_is_load_bearing():
     for theta in _points(analysis, n=2):
         assert abs(float(bound(theta)) - float(no_Z(jnp.asarray(theta)))) > 1e-3
     one = _model(A)
-    conditional = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=A)
+    conditional = ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=A, count_ratio="row")
     t1 = theta_of(one, {"log10n0": -2.0})
     assert abs(float(_bind(one)(t1)) - float(_bind(conditional)(t1))) > 1e-10
 
@@ -503,7 +506,9 @@ def test_decode_parameters_returns_each_catalog_and_the_weights():
 
 
 def test_fingerprint_records_the_mixture_only_when_set():
-    conditional = parameter_plan_semantic(ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=A).parameters)
+    conditional = parameter_plan_semantic(
+        ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=A, count_ratio="row").parameters
+    )
     field = parameter_plan_semantic(_model(A).parameters)
     pair = parameter_plan_semantic(_model([A, B]).parameters)
     assert "catalog_model" not in conditional

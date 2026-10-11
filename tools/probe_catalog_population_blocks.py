@@ -57,6 +57,11 @@ N_DRAW = 2.0 * N_SEL
 MAX_VARIANCE = 1.0e3
 OM0 = 0.3075
 N_RANDOM = 24
+#: Declared divergence from the reference (MIGRATION.md, "Pooled count ratio by
+#: default"): ``ds.model`` defaults to the pooled count-ratio estimator, which
+#: the reference does not have. The candidate arm runs the reference's per-row
+#: estimator (``count_ratio="row"``) and checks that the default is this one.
+DECLARED_COUNT_RATIO_DEFAULT = "pooled"
 
 #: (name, K, z_depth, base sampled population names, {catalog: names}).
 #: "a11": Analysis 11 (base mu_G, mu_chi and catalog 2's copies sampled);
@@ -235,13 +240,21 @@ def _candidate():
             for k, c in enumerate(_cell_catalogs(K, z_depth))
         ]
         fixed = {lab: float(v) for lab, nm, v in zip(labels, names, base) if nm not in base_sampled}
-        analysis = ds.model(
+        model_kwargs = dict(
             cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=OM0),
             population=ds.Population(POP_MODEL, fixed=fixed),
             catalog=stores,
             catalog_sky_weighting="field",
             per_catalog_population={k: list(v) for k, v in blocks.items()} or None,
         )
+        default = ds.model(**model_kwargs).redshift.count_ratio
+        if default != DECLARED_COUNT_RATIO_DEFAULT:
+            raise SystemExit(
+                f"{name}: ds.model's count ratio defaults to {default!r}, declared "
+                f"{DECLARED_COUNT_RATIO_DEFAULT!r}; update the declaration deliberately"
+            )
+        # The reference's per-row count ratio (DECLARED_COUNT_RATIO_DEFAULT).
+        analysis = ds.model(**model_kwargs, count_ratio="row")
         bound = bind_analysis(analysis, events=events, injections=injections,
                               max_likelihood_variance=MAX_VARIANCE)
         plan_labels = list(analysis.parameters.labels)
