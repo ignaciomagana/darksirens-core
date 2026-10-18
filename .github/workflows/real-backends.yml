@@ -51,6 +51,7 @@ jobs:
           python -m pytest -q -rs \
             tests/test_real_backends.py \
             tests/test_dynesty_checkpoint_state.py \
+            tests/test_dynesty_batched.py \
             tests/test_dynesty_diagnostics.py \
             tests/test_dynesty_diagnostics_integration.py \
             tests/test_numpyro_adapter.py \
