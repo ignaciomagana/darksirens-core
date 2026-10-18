@@ -174,14 +174,52 @@ def resolve_dynesty_walks(value, ndim):
     return int(value)
 
 
+def _require_matching_queue(sampler, batch, path):
+    """Refuse to resume a checkpoint written with another ``dynesty_batch``.
+
+    The queue size is part of the chain: a checkpoint written with
+    ``dynesty_batch=Q`` (dynesty ``queue_size=Q``) continues as the same chain
+    only with the same ``Q``, and one written without it only without it.
+    """
+    stored = getattr(sampler, "queue_size", 1)
+    stored = 1 if stored is None else int(stored)
+    wanted = 1 if batch is None else int(batch)
+    if stored != wanted:
+        def _name(q):
+            return "off (queue_size 1)" if q == 1 else f"{q}"
+
+        raise RuntimeError(
+            f"Checkpoint {path} was written with dynesty_batch {_name(stored)} but "
+            f"this run asks for dynesty_batch {_name(wanted)}; the queue size is part "
+            "of the chain, so a checkpoint resumes only with the dynesty_batch it was "
+            f"written with (pass dynesty_batch={None if stored == 1 else stored})."
+        )
+
+
 def run_dynesty(likelihood, prior_transform, labels, opts):
-    """Execute the frozen Dynesty sampling core and standardize its result."""
+    """Execute the frozen Dynesty sampling core and standardize its result.
+
+    ``opts.dynesty_batch`` (default ``None``, off) set to an integer ``Q >= 2``
+    runs dynesty with ``queue_size=Q`` and the lockstep batched pool of
+    :mod:`darksirens.inference.dynesty_batched`: the Q queued rwalk proposals
+    are evaluated together, one batched likelihood call per walk step. The
+    chain is dynesty's own ``queue_size=Q`` chain (bitwise when the batched
+    likelihood reproduces the single-point values bitwise). A checkpoint
+    resumes only with the ``dynesty_batch`` it was written with. Off, the
+    sampler is built and run exactly as before.
+    """
     import jax.numpy as jnp
     from dynesty import NestedSampler
     from dynesty.utils import resample_equal
 
     ndims = len(labels)
     walks = resolve_dynesty_walks(getattr(opts, "dynesty_walks", None), ndims)
+    batch = getattr(opts, "dynesty_batch", None)
+    pool = None
+    if batch is not None:
+        from darksirens.inference.dynesty_batched import resolve_dynesty_batch
+
+        batch = resolve_dynesty_batch(batch)
     eval_count = 0
     valid_count = 0
 
@@ -208,6 +246,11 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
     maxcall = getattr(opts, "max_samples", None)
     if maxcall is not None and maxcall <= 0:
         maxcall = None
+
+    def make_pool():
+        from darksirens.inference.dynesty_batched import make_batched_pool
+
+        return make_batched_pool(likelihood, prior_transform, dynesty_ptform, ndims, batch)
 
     plan = plan_from_opts(opts, "dynesty")
     if plan.resuming:
@@ -237,6 +280,12 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
                 f"dynesty_walks {walks}; the checkpoint's value wins.",
                 flush=True,
             )
+        _require_matching_queue(sampler, batch, plan.resume_from)
+        if batch is not None:
+            from darksirens.inference.dynesty_batched import attach_batched_pool
+
+            pool = make_pool()
+            attach_batched_pool(sampler, pool)
         dynesty_rstate = sampler.rstate
         print(
             f"[*] Resumed at iteration {getattr(sampler, 'it', 0)} "
@@ -254,6 +303,13 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
         if walks is not None:
             walks_kwargs["walks"] = walks
             print(f"[*] dynesty rwalk walks: {walks} per proposal (dynesty_walks)", flush=True)
+        if batch is not None:
+            # Only a batched run passes these, so a default run builds the
+            # sampler with exactly the arguments it always had.
+            pool = make_pool()
+            pool_kwargs = {"pool": pool, "queue_size": batch}
+        else:
+            pool_kwargs = {}
         sampler = NestedSampler(
             dynesty_loglike,
             dynesty_ptform,
@@ -263,6 +319,7 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             nlive=opts.nlive,
             rstate=dynesty_rstate,
             **walks_kwargs,
+            **pool_kwargs,
         )
 
     checkpoint_kwargs = {}
@@ -338,6 +395,18 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
     # frozen keys.
     if walks is not None:
         result["walks_actual"] = int(getattr(sampler, "walks", walks))
+    # Likewise only for a batched run: what the pool evaluated.
+    if pool is not None:
+        record = pool.record()
+        result["dynesty_batch"] = record
+        per_batch = record["likelihood_points"] / max(record["likelihood_batches"], 1)
+        print(
+            f"[*] dynesty batch: {record['likelihood_points']} likelihood points in "
+            f"{record['likelihood_batches']} batched calls ({per_batch:.1f} per call, "
+            f"queue {record['queue_size']}), {record['seconds_in_likelihood']:.1f} s "
+            "in the likelihood",
+            flush=True,
+        )
     return result
 
 

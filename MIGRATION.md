@@ -1288,3 +1288,90 @@ legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
   `test_count_ratio_pooled` pins the default (pooled, window 0.02, bit for
   bit the explicit setting), its inert resolution without a count-ratio
   catalog, and that `"row"` keeps the previous record.
+
+### Batched dynesty pool (opt-in, default unchanged)
+
+`ds.infer(..., sampler="dynesty", dynesty_batch=Q)` with an integer `Q >= 2`
+runs dynesty 2.1.4 with `queue_size=Q` and a pool
+(`darksirens.inference.dynesty_batched.BatchedRwalkPool`) whose `map`
+evaluates the queue in batches. Dynesty fills its queue with
+`pool.map(sample_rwalk, args)`: Q independent random walks, each with its own
+generator, start point and ellipsoid axes, and the shared `loglstar`, `scale`
+and `walks`. The pool runs the Q walks step by step together. At each step
+every walk proposes with its own generator (the same draws, in the same
+order, as dynesty's `generic_random_walk`), and the proposals that land in
+the unit cube go to one batched prior transform and one batched likelihood
+call. The unit-cube phase (`sample_unif`) and the initial live points are
+batched the same way. Any other function dynesty maps runs with the builtin
+`map`.
+
+- **The chain.** The result is dynesty's own `queue_size=Q` chain: bit for
+  bit when the batched likelihood reproduces the single-point values bit for
+  bit, and otherwise different only by the batched rounding. The queue
+  changes the chain against `dynesty_batch=None` (Q walks start from the same
+  `loglstar` before any is used), not the target. The tests compare each run
+  with dynesty's own queue chain, the pool's `map` replaced by the builtin
+  one, fresh and resumed.
+- **Batched likelihood.** In order of precedence: a likelihood's
+  `as_batched_callable()` hook (a callable of a float64 `(b, ndim)` array
+  that returns `b` values; any companion can offer it); its
+  `as_pytree_callable()` (a `BoundAnalysis`), or a likelihood that is itself
+  a `jax.tree_util.Partial`, evaluated as `jax.jit(jax.vmap(f))` with the
+  pytree as an argument, so the data are not constants of the program; else
+  point by point (no speedup). Batches are chunked by Q and padded with
+  copies of their first row to the next power of two (at most
+  `log2(Q) + 1` compiled shapes); padding results are dropped.
+- **Start-time probe.** Before sampling, the batched likelihood is compared
+  with the single-point one at Q prior draws from a fixed generator of its
+  own (the sampler's streams are untouched). A different finite pattern, or a
+  difference above `1e-9 * max(1, |logL|)`, raises `ValueError`. The probe
+  compiles the largest shape first, so a batch that does not fit in memory
+  fails at the start. Its record (finite draws, bit-identical draws, largest
+  difference) is printed and kept in the result.
+- **Batched prior transform.** A batched candidate (NumPy for the
+  all-uniform affine map, else `jax.jit`, unless
+  `prior_transform_dispatch="eager"`, then the eager JAX expression on the
+  batch) is used only when it reproduces dynesty's single-point dispatch
+  (`dynesty_transform`) bit for bit on a probe at every padded shape;
+  otherwise the transform runs point by point.
+- **Checkpoints and resume.** The pool never enters a checkpoint: dynesty
+  drops `sampler.pool` when it pickles, and `save_dynesty_checkpoint` now also
+  detaches `sampler.loglikelihood.pool` (it leaves the wrapper untouched when
+  it has no pool, so a default checkpoint is unchanged). A resume restores
+  the sampler, then sets its pool, `map` and `queue_size`. A checkpoint
+  resumes only with the `dynesty_batch` it was written with: the adapter
+  raises `RuntimeError` otherwise, a checkpoint written without it included.
+  For an `InferenceTarget` run, `dynesty_batch` is a sampler option, so it is
+  recorded in the run fingerprint's sampler block and a mismatching resume is
+  refused there first (`ResumeFingerprintError`).
+- **Result.** `result["dynesty_batch"]` (only when set): the queue size, the
+  likelihood and prior-transform forms, the padded shapes, the batched calls
+  and points, the time in the likelihood, the queue fills of each phase and
+  the probe. `ncall` stays dynesty's count of the proposals it used; the
+  points include the walks of the queue entries left unused at the end.
+- **Default unchanged.** Without `dynesty_batch` the adapter builds
+  `NestedSampler` with exactly the arguments it had (no pool, no
+  `queue_size`), returns the same keys and writes the same checkpoints. The
+  run fingerprint of a run without the option has no `dynesty_batch` key, so
+  existing fingerprints match. The legacy parity probes
+  (`probe_dynesty_adapter`, `probe_dynesty_checkpoint_state`,
+  `probe_sampler_dispatch`) are unchanged.
+- **Measured** (the scratch prototype this module is built from, on an H100,
+  Phase 12.5 targets): the 18-parameter spectral likelihood resumed from a
+  rwalk-phase checkpoint at Q = 32 took 0.84 ms per dynesty call against
+  5.9 ms with dynesty's own queue and single calls (7.0x), with a bitwise
+  identical chain over 301 iterations; the DESI step-1 likelihood with the
+  catalog kernel pin took 23.6 ms per point at a batch of 32 against 27.6 ms
+  at a batch of one (152 ms per single call unpinned), its vmapped values
+  within 1.8e-12 (2e-15 relative) of the single-point ones.
+- **Tests.** `tests/test_dynesty_batched.py` (in the `real-backends` job):
+  the option, padding and lazy import; the default sampler arguments; fresh
+  chains at Q = 2 and 8 and a point-by-point likelihood against dynesty's own
+  queue chain, bit for bit; a run killed in its rwalk phase and resumed,
+  bit for bit the uninterrupted chain; refused resumes across queue sizes
+  (fingerprint and adapter); the probe refusing a hook that returns its
+  values in the wrong order; the fingerprint key; a `jax.tree_util.Partial`
+  target and an ordinary analysis batched through the pytree form; the
+  batched prior transform against the single-point dispatch for uniform,
+  normal, lognormal and joint-constraint plans.
+  `tests/test_dynesty_checkpoint_state.py` pins the pool detach.
