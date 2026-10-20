@@ -377,3 +377,88 @@ def test_redshift_params_length_must_match_the_declared_plan():
     np.testing.assert_array_equal(
         np.asarray(call(np.array([0.5, -0.2, 0.9]))), np.asarray(expected)
     )
+
+
+def _volume_target(base=None, *, n_draw=None, **kwargs):
+    pe, selection, nsamp, nsel = _runtime_events()
+    return make_host_density_target(
+        _base_analysis() if base is None else base,
+        redshift_model=VolumeRedshiftModel(_plan(("eta",))),
+        gw_pe=pe,
+        gw_selection=selection,
+        pe_state=None,
+        selection_state=None,
+        n_events=1,
+        nsamp=nsamp,
+        n_draw=float(nsel) if n_draw is None else n_draw,
+        **kwargs,
+    )
+
+
+def test_target_fingerprint_records_the_base_analysis_sizes_and_options():
+    """The target's run fingerprint covers what core knows at the builder: the
+    base analysis's fixed values and models, the sample sizes and the
+    likelihood options. It covered only the sampled coordinates, so a resume
+    under another fixed Om0 or n_draw (logL 0.1089 -> 2.4185) was accepted."""
+    from darksirens.inference.run_fingerprint import inference_target_semantic
+
+    def block(target):
+        return inference_target_semantic(target, sampler="dynesty", options={})
+
+    reference = block(_volume_target())
+    assert reference["inference_target"]["provenance"]["samples"] == {
+        "n_events": 1, "nsamp": 4, "n_draw": 256.0,
+    }
+    other_om0 = model(
+        cosmology=Cosmology(H0=67.74, Om0=0.40),
+        population=Population("powerlaw+peak", fixed=True),
+    )
+    for changed in (
+        _volume_target(other_om0),
+        _volume_target(n_draw=2560.0),
+        _volume_target(max_likelihood_variance=20.0),
+        _volume_target(selection_neff_soft_guard=True),
+        _volume_target(provenance={"state": "abc"}),
+        _volume_target(identity={"package": "companion"}),
+    ):
+        assert block(changed) != reference
+    # Layout only: the same sums.
+    assert block(_volume_target(sel_batch_size=64, pe_event_block=1)) == reference
+    hook = block(_volume_target(provenance=lambda: {"state": "abc"}))
+    assert hook["inference_target"]["provenance"]["companion"] == {"state": "abc"}
+    assert hook == block(_volume_target(provenance={"state": "abc"}))
+    with pytest.raises(TypeError, match="provenance"):
+        _volume_target(provenance=3)
+
+
+def test_target_likelihood_is_jitted_once():
+    """One jitted program per target, reused by every call: evaluated eagerly,
+    every call re-traced the likelihood, and with sel_batch_size re-compiled
+    its scans (about 2.5 s a call on this toy, against 1 ms)."""
+    import jax
+
+    pe, selection, nsamp, nsel = _runtime_events()
+    redshift = VolumeRedshiftModel(_plan(("eta",)))
+    target = make_host_density_target(
+        _base_analysis(),
+        redshift_model=redshift,
+        gw_pe=pe,
+        gw_selection=selection,
+        pe_state=None,
+        selection_state=None,
+        n_events=1,
+        nsamp=nsamp,
+        n_draw=float(nsel),
+        sel_batch_size=64,
+        selection_neff_soft_guard=True,
+        max_likelihood_variance=MAX_VAR,
+    )
+    values = [float(target.log_likelihood(np.array([eta]))) for eta in (0.1, 0.2, 0.3)]
+    assert redshift.aux_calls == 1, redshift.aux_calls
+    np.testing.assert_allclose(np.diff(values), 0.1, rtol=1e-12)
+    expected = _direct_spectral(_base_analysis(), pe, selection, nsamp, nsel)
+    np.testing.assert_allclose(values[0], float(expected) + 0.1, rtol=1e-13)
+    grad = jax.grad(lambda x: target.log_likelihood(x))(jax.numpy.asarray([0.1]))
+    np.testing.assert_allclose(np.asarray(grad), [1.0], rtol=1e-12)
+    with pytest.raises(ValueError, match=r"theta must have shape \(1,\)"):
+        target.log_likelihood(np.array([0.1, 0.2]))
