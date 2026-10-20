@@ -842,23 +842,32 @@ def test_galaxies_in_a_row_outside_the_footprint_are_refused():
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    "kwargs, refused",
     [
-        dict(),
-        dict(catalog_sky_weighting="field"),
-        dict(completeness="selection", selection=SEL),
-        dict(completeness="selection", selection=SEL, catalog_sky_weighting="field"),
+        (dict(), True),
+        (dict(catalog_sky_weighting="field"), True),
+        (dict(completeness="selection", selection=SEL), False),
+        (dict(completeness="selection", selection=SEL, catalog_sky_weighting="field"), False),
     ],
 )
-def test_ds_model_refuses_galaxies_outside_the_row_fraction(kwargs):
-    """Under the pooled count ratio and under ``completeness="selection"``
-    alike (row 0 of ``A`` holds galaxies; row 3 is empty)."""
+def test_ds_model_refuses_galaxies_outside_the_row_fraction(kwargs, refused):
+    """Refused under the pooled count ratio; under ``completeness="selection"``,
+    whose values are the frozen reference's (which accepts them, the field
+    mixture's parity probe among them), a warning (row 0 of ``A`` holds
+    galaxies; row 3 is empty)."""
     fraction = np.ones(48)
     fraction[3] = 0.0
-    _model(A, row_fraction=fraction, **kwargs)
-    fraction[0] = 0.0
-    with pytest.raises(ValueError, match="row_fraction is 0 in 1 catalog rows"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("ignore", message="Fixed value for survey parameter")
         _model(A, row_fraction=fraction, **kwargs)
+    fraction[0] = 0.0
+    if refused:
+        with pytest.raises(ValueError, match="row_fraction is 0 in 1 catalog rows"):
+            _model(A, row_fraction=fraction, **kwargs)
+    else:
+        with pytest.warns(UserWarning, match="row_fraction is 0 in 1 catalog rows"):
+            _model(A, row_fraction=fraction, **kwargs)
 
 
 # ---------------------------------------------------------------------------

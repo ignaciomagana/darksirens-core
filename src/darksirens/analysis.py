@@ -472,22 +472,39 @@ def _count_ratio_window(count_ratio, window):
     return window
 
 
-def _resolve_row_fraction(row_fraction, store):
+def _resolve_row_fraction(row_fraction, store, *, refuse=True):
     """Host-validate a per-row coverage fraction; return (read-only array, sha256).
 
-    A row with fraction 0 must hold no real galaxy
-    (:func:`~darksirens.catalog.completeness.refuse_galaxies_outside_row_fraction`).
+    Real galaxies in a row with fraction 0 are counted twice
+    (:func:`~darksirens.catalog.completeness.galaxies_outside_row_fraction`):
+    refused (``refuse``, the pooled count ratio) or warned about
+    (``completeness="selection"``, whose values are the frozen reference's,
+    which accepts them).
     """
     import numpy as np
 
-    from darksirens.catalog.completeness import refuse_galaxies_outside_row_fraction
+    from darksirens.catalog.completeness import (
+        galaxies_outside_row_fraction,
+        refuse_galaxies_outside_row_fraction,
+    )
     from darksirens.selection.footprint import validate_selection_row_fraction
 
     n_rows = int(np.shape(store.catalog.zgals)[0])
     array = np.array(
         validate_selection_row_fraction(row_fraction, n_rows), dtype=np.float64
     )
-    refuse_galaxies_outside_row_fraction(array, store.catalog.ngals)
+    if refuse:
+        refuse_galaxies_outside_row_fraction(array, store.catalog.ngals)
+    else:
+        text = galaxies_outside_row_fraction(array, store.catalog.ngals)
+        if text is not None:
+            warnings.warn(
+                f"{text} (the frozen reference's values, which completeness="
+                "'selection' keeps). Give those rows their coverage fraction, or "
+                "remove their galaxies",
+                UserWarning,
+                stacklevel=5,
+            )
     array.setflags(write=False)
     return array, hashlib.sha256(array.tobytes()).hexdigest()
 
@@ -618,7 +635,7 @@ def _resolve_redshift(
         fraction, digest = (
             (None, None)
             if row_fraction is None
-            else _resolve_row_fraction(row_fraction, catalog)
+            else _resolve_row_fraction(row_fraction, catalog, refuse=False)
         )
         return (
             IncompleteCatalogRedshift(
@@ -798,7 +815,11 @@ def _resolve_mixture(
                 "row_fraction apply only to completeness='selection'; give None "
                 "for its entry"
             )
-        fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
+        fraction, digest = (
+            (None, None)
+            if frac is None
+            else _resolve_row_fraction(frac, store, refuse=comp != "selection")
+        )
         try:
             sel = None if sel is None else resolve_selection_model(sel, store.z_depth)
         except (TypeError, ValueError) as exc:

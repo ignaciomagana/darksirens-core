@@ -783,28 +783,41 @@ def build_pooled_count_ratio_cache(
     )
 
 
-def refuse_galaxies_outside_row_fraction(row_fraction, ngals) -> None:
-    """Refuse real galaxies in rows whose coverage fraction is 0.
+def galaxies_outside_row_fraction(row_fraction, ngals) -> str | None:
+    """Describe the real galaxies in rows whose coverage fraction is 0 (``None``: none).
 
     A row with ``row_fraction`` 0 lies outside the footprint, so the
     completeness there is 0 and the row's missing-host density is the full
     ``dN_exp``.  Galaxies stored in such a row (a coarser or misaligned
-    mask) would be counted as hosts on top of it, and under the pooled
-    count ratio also in the ratio of every row while adding nothing to the
-    summed coverage.  Raises ``ValueError`` naming the rows.
+    mask) are counted as hosts on top of it, and under the pooled count
+    ratio also in the ratio of every row while adding nothing to the summed
+    coverage.
     """
 
     fraction = np.asarray(row_fraction, dtype=np.float64).reshape(-1)
     held = np.asarray(ngals).reshape(-1)
     rows = np.flatnonzero((fraction == 0.0) & (held > 0))
-    if rows.size:
-        shown = ", ".join(str(int(r)) for r in rows[:8]) + (", ..." if rows.size > 8 else "")
+    if not rows.size:
+        return None
+    shown = ", ".join(str(int(r)) for r in rows[:8]) + (", ..." if rows.size > 8 else "")
+    return (
+        f"row_fraction is 0 in {rows.size} catalog rows that hold "
+        f"{int(held[rows].sum())} real galaxies (rows {shown}): a row outside the "
+        "footprint holds no galaxy, and these are counted as hosts on top of the "
+        "row's full missing-host density"
+    )
+
+
+def refuse_galaxies_outside_row_fraction(row_fraction, ngals) -> None:
+    """Raise ``ValueError`` for real galaxies in rows whose coverage fraction is 0.
+
+    The pooled count ratio refuses them (:func:`galaxies_outside_row_fraction`).
+    """
+
+    text = galaxies_outside_row_fraction(row_fraction, ngals)
+    if text is not None:
         raise ValueError(
-            f"row_fraction is 0 in {rows.size} catalog rows that hold "
-            f"{int(held[rows].sum())} real galaxies (rows {shown}): a row outside "
-            "the footprint holds no galaxy, and these would be counted as hosts on "
-            "top of the row's full missing-host density. Give those rows their "
-            "coverage fraction, or remove their galaxies"
+            f"{text}. Give those rows their coverage fraction, or remove their galaxies"
         )
 
 
@@ -1105,6 +1118,7 @@ __all__ = [
     "completion_curves",
     "gathered_completion_curves",
     "gathered_missing_count",
+    "galaxies_outside_row_fraction",
     "gathered_missing_density",
     "refuse_galaxies_outside_row_fraction",
     "smoothing_operator",
