@@ -246,7 +246,9 @@ class MissingHostExtension(Protocol):
         ``context.data``.
     ``missing_density(context, dN_miss)``
         The modulated ``(N_rows, N_z)`` missing-host density of the view's
-        rows (for example ``Q_k(p, z) * dN_miss``). Core recomputes each
+        rows (for example ``Q_k(p, z) * dN_miss``). Core clips it at 0 (a
+        host density is not negative; for example ``Q = 1 + b delta_g``
+        below 0 in a void gives no missing hosts there) and recomputes each
         row's ``N_miss`` from it by the trapezoid on the redshift grid, for
         the numerator's row masses and for ``Z_k`` alike. Return ``dN_miss``
         unchanged for no modulation.
@@ -274,7 +276,14 @@ class MissingHostExtension(Protocol):
 
 
 def modulated_curves(curves, dN_miss):
-    """``curves`` with ``dN_miss`` replaced and each row's ``N_miss`` recomputed."""
+    """``curves`` with ``dN_miss`` replaced and each row's ``N_miss`` recomputed.
+
+    A negative modulated density is clipped at 0 before the trapezoid: the
+    per-sample numerator reads no missing hosts where the density is not
+    positive, so the row masses and ``Z_k`` must integrate the same clipped
+    density (the frozen reference's ``max(1 + b delta_g, 0)`` modulation).
+    A NaN stays NaN and poisons the likelihood.
+    """
 
     if isinstance(curves, GatheredCompletionCurves):
         raise TypeError(
@@ -287,6 +296,7 @@ def modulated_curves(curves, dN_miss):
             "missing_density must return the shape it was given, "
             f"{tuple(curves.dN_miss.shape)}, got {tuple(dN_miss.shape)}"
         )
+    dN_miss = jnp.maximum(dN_miss, 0.0)
     return curves._replace(dN_miss=dN_miss, N_miss=jnp.trapezoid(dN_miss, zgrid, axis=-1))
 
 

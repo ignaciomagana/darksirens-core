@@ -804,3 +804,33 @@ def test_a_nan_branch_makes_the_mixture_likelihood_minus_inf_under_every_layout(
         poisoned = _target(analysis, _NaNExtension(ones))
         assert np.isfinite(float(identity.log_likelihood(theta)))
         assert float(poisoned.log_likelihood(theta)) == -np.inf
+
+
+class _BandExtension(_TableExtension):
+    """``Q(z)`` (one curve for every row) on catalog 1's missing-host density."""
+
+    def __init__(self, q):
+        super().__init__([])
+        self.data = {"q": jnp.asarray(q)}
+
+    def missing_density(self, ctx, dN_miss):
+        return dN_miss * ctx.data["q"][None, :] if ctx.catalog_index == 0 else dN_miss
+
+
+@pytest.mark.slow
+def test_a_negative_modulation_is_clipped_in_the_numerator_and_in_Z_alike():
+    """Q(z) = 1 + b delta below 0 (here -0.5 for 0.5 < z < 1.5): the
+    per-sample numerator reads no missing hosts where the density is not
+    positive, so Z_k must integrate the same clipped density. It used to
+    integrate the negative mass, so catalog 1's branch summed to more than 1
+    and the likelihood differed from the clipped modulation's."""
+    analysis = _model([A, B])
+    z = np.asarray(zgrid)
+    negative = np.where((z > 0.5) & (z < 1.5), -0.5, 1.0)
+    clipped = np.maximum(negative, 0.0)
+    with_negative = _target(analysis, _BandExtension(negative))
+    with_clipped = _target(analysis, _BandExtension(clipped))
+    plain = _bind(analysis)
+    for theta in _points(analysis, n=2):
+        _close(with_negative.log_likelihood(theta), with_clipped.log_likelihood(theta), 1e-12)
+        assert abs(float(with_clipped.log_likelihood(theta)) - float(plain(theta))) > 1e-6
