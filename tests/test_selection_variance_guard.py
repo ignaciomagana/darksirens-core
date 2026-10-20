@@ -28,6 +28,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from darksirens.selection.gw import selection_log_correction
 
@@ -57,6 +58,42 @@ def test_max_likelihood_variance_relaxes_the_criterion():
     val = selection_log_correction(
         jnp.asarray(0.0), jnp.asarray(300.0), n, max_likelihood_variance=10.0)
     assert np.isfinite(float(val))  # threshold max(250, 2500/10=250) = 250 < 300
+
+
+@pytest.mark.parametrize("neff", [1.0e11, 1.0e13, np.inf])
+def test_over_budget_pe_variance_is_rejected_whatever_neff_is(neff):
+    # The PE variance alone (3) is three times the cap (1). The saturated
+    # threshold N_obs^2 * 1e12 = 4e12 used to be the only barrier, so
+    # Neff = 1e13 (a no-selection campaign with near-uniform weights) and
+    # Neff = inf (exactly uniform weights) were admitted with a finite value.
+    kw = dict(max_likelihood_variance=1.0, pe_variance_sum=jnp.asarray(3.0))
+    hard = selection_log_correction(jnp.asarray(0.0), jnp.asarray(neff), 2, **kw)
+    assert float(hard) == -np.inf
+    soft = selection_log_correction(jnp.asarray(0.0), jnp.asarray(neff), 2, soft_guard=True, **kw)
+    # The soft wall stays at full depth instead of switching off.
+    assert np.isfinite(float(soft)) and float(soft) < -1.0e4
+
+
+def test_over_budget_soft_wall_keeps_attainable_values_and_finite_gradients():
+    # Every attainable Neff (< 1e9 detected injections) gives the value it gave
+    # before the exhausted-budget clamp: the gate argument stays below 1e-3.
+    kw = dict(max_likelihood_variance=1.0, soft_guard=True)
+    n = 2
+    log_mu, neff, pe = jnp.asarray(-1.0), jnp.asarray(1.0e8), jnp.asarray(3.0)
+    value = selection_log_correction(log_mu, neff, n, pe_variance_sum=pe, **kw)
+    threshold = n * n / 1e-12
+    x = 1.0e8 / threshold
+    gate = jax.nn.softplus(200.0 * (1.0 - x) - 10.0)
+    expected = n * 1.0 + n * (3.0 + n) / (2.0 * threshold) - gate * (
+        100.0 + 2.0 * n * jax.nn.softplus(1.0)
+    )
+    np.testing.assert_allclose(float(value), float(expected), rtol=1e-15, atol=0)
+    for neff in (jnp.asarray(1.0e13), jnp.asarray(jnp.inf)):
+        grads = jax.grad(
+            lambda lm, p: selection_log_correction(lm, neff, n, pe_variance_sum=p, **kw),
+            argnums=(0, 1),
+        )(log_mu, pe)
+        assert all(bool(jnp.isfinite(g)) for g in grads), grads
 
 
 def test_soft_guard_wall_follows_the_variance_threshold():

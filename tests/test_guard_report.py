@@ -37,6 +37,10 @@ def test_classify_guard_names_the_guard_that_fired():
     assert verdict(0.0, float("nan")) == "selection_neff"
     assert verdict(float("nan"), 1.0e6) == "pe_mc_variance"
     assert verdict(0.0, float("inf")) is None
+    # Over budget from the PE variance alone, whatever N_eff is.
+    assert verdict(3.0, 1.0e15) == "pe_mc_variance"
+    assert verdict(3.0, float("inf")) == "pe_mc_variance"
+    assert verdict(1.0, float("inf")) == "pe_mc_variance"
 
 
 def test_classify_guard_agrees_with_the_hard_guard():
