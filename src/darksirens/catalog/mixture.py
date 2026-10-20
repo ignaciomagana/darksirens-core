@@ -254,8 +254,10 @@ class MissingHostExtension(Protocol):
         unchanged for no modulation.
     ``missing_total(context)``
         ``None``, or ``sum_p N_miss,p`` of the modulated full-sky density
-        (a scalar), when the extension can compute it more cheaply than the
-        full-sky curves (for example from precomputed moments). ``None`` makes
+        (the clipped one), when the extension can compute it more cheaply
+        than the full-sky curves (for example from precomputed moments). It
+        is a 0-d scalar (any other shape is refused), and a non-finite or
+        negative value makes the likelihood ``-inf``. ``None`` makes
         core build the full-sky curves, modulate them with
         ``missing_density`` and sum them (the direct form). Called with the
         ``"full"`` context only, and only where ``Z_k`` is evaluated

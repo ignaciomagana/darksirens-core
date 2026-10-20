@@ -272,7 +272,14 @@ def _missing_total(k, cosmology, params, component, completeness, normalizer,
                        completeness, component.full_row_fraction, observed_total, full)
         total = extension.missing_total(ctx)
         if total is not None:
-            return jnp.asarray(total)
+            total = jnp.asarray(total)
+            if total.shape != ():
+                raise ValueError(
+                    "MissingHostExtension.missing_total must return sum_p N_miss,p, a "
+                    f"scalar, or None; got shape {tuple(total.shape)} for catalog {k + 1}"
+                )
+            # A non-finite or negative missing mass is no normaliser: NaN poisons.
+            return jnp.where(jnp.isfinite(total) & (total >= 0.0), total, jnp.nan)
         if completeness == "selection":
             base = selection_missing_host_curves(
                 cosmology, params, full, params.selection, component.full_row_fraction,

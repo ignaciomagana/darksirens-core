@@ -806,6 +806,43 @@ def test_a_nan_branch_makes_the_mixture_likelihood_minus_inf_under_every_layout(
         assert float(poisoned.log_likelihood(theta)) == -np.inf
 
 
+class _RowTotalExtension(_TableExtension):
+    """A supplied missing mass that is wrong: per row, or shifted by ``offset``."""
+
+    def __init__(self, tables, per_row=False, offset=0.0):
+        super().__init__(tables, supply_total=True)
+        self.per_row, self.offset = per_row, offset
+
+    def missing_total(self, ctx):
+        total = super().missing_total(ctx)
+        if self.per_row and ctx.catalog_index == 0:
+            # Every row's N_miss (here their mean) instead of their sum, for
+            # catalog 1, whose compact view holds every row of its sky.
+            rows = int(ctx.data["q"][ctx.catalog_index].shape[0])
+            return jnp.full((rows,), total / rows)
+        return total + self.offset
+
+
+@pytest.mark.slow
+def test_a_supplied_missing_total_must_be_a_finite_non_negative_scalar():
+    """missing_total is sum_p N_miss,p, a scalar. A per-row vector used to be
+    broadcast against the compact rows' normalisers (a finite, wrong
+    likelihood whenever the compact view held every row); it is refused. A
+    non-finite or negative total poisons the likelihood to -inf."""
+    analysis = _model([A_DEPTH, B_DEPTH], completeness="selection", selection=[SEL_A, SEL_B],
+                      row_fraction=[FRACTION_A, None])
+    tables = [_q_table(A_DEPTH, 3), _q_table(B_DEPTH, 4)]
+    theta = _points(analysis, n=1)[0]
+    good = _target(analysis, _TableExtension(tables, supply_total=True))
+    assert np.isfinite(float(good.log_likelihood(theta)))
+    assert int(_bind(analysis).model_operands.components[0].compact.zgals.shape[0]) == 48
+    with pytest.raises(ValueError, match="must return sum_p N_miss,p, a scalar"):
+        _target(analysis, _RowTotalExtension(tables, per_row=True)).log_likelihood(theta)
+    for offset in (-1.0e12, np.inf, np.nan):
+        bad = _target(analysis, _RowTotalExtension(tables, offset=offset))
+        assert float(bad.log_likelihood(theta)) == -np.inf, offset
+
+
 class _BandExtension(_TableExtension):
     """``Q(z)`` (one curve for every row) on catalog 1's missing-host density."""
 
