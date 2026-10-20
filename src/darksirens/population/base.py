@@ -911,16 +911,20 @@ class PairingModel(ABC):
             # PairingModel norm integrates over q for each m1 — sample-dependent,
             # cannot be lifted out of the per-sample loop.
             m1_a    = jnp.atleast_1d(m1)
-            # TWO Gauss-Legendre panels split at the taper shoulder (see
-            # _panel_nodes / _panel_norm): 2 x PAIRING_PANEL_NQ nodes per
-            # sample instead of the
-            # historical n_q = 200 uniform trapezoid, because the split removes
-            # the one corner the integrand has and leaves GL two analytic
-            # pieces.  That is 4x on the worst-case discretisation error and
-            # 100-170x on its H0-COHERENT part, which is the statistic the
-            # cosmology sees -- see _panel_nodes for both measurements and their
-            # configuration.
-            t_p, w_p = get_pairing_panel_quadrature()    # (16,) static nodes
+            # Taken under pairing_norm="per_sample", and under "auto" by a
+            # pairing that does not declare _kernel_power (both production
+            # pairings take the per-point rule above).  The q-support is split
+            # at the taper shoulder (see _panel_nodes / _panel_norm) instead of
+            # the historical n_q = 200 uniform trapezoid, because the split
+            # removes the one corner the integrand has and leaves two analytic
+            # pieces.  The taper panel takes PAIRING_PANEL_NQ Gauss-Legendre
+            # nodes per sample; the plateau panel takes as many again, or none
+            # for a pairing with a closed-form _plateau_integral (both
+            # production q**beta pairings).  That is 4x on the worst-case
+            # discretisation error and 100-170x on its H0-COHERENT part, which
+            # is the statistic the cosmology sees -- see _panel_nodes for both
+            # measurements and their configuration.
+            t_p, w_p = get_pairing_panel_quadrature()    # (PAIRING_PANEL_NQ,) static nodes
             t_p, w_p = _match_dtype(t_p, m1_a), _match_dtype(w_p, m1_a)
             n_sc, scale_p = self._panel_norm(m1_a, m_min, dm_min, theta, t_p, w_p)
             n_sc    = n_sc.reshape(jnp.shape(m1))
