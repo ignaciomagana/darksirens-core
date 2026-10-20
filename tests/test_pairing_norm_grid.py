@@ -20,7 +20,14 @@ Tests
    the MAX is REPORTED (documented) -- see the module note below.
 3. Zero-support samples (m1 below / above the mass support) agree with exact
    (density 0 / log_p_pop -inf) identically.
-4. (goldens: covered by tests/test_unified_k1_golden.py with the default path.)
+4. (goldens: not in this file, and core has no unified K1 golden test --
+   ``tests/test_unified_k1_golden.py`` is the frozen reference's. The
+   unified K1 golden, ``tests/reference/legacy/unified_k1_golden.json``, is
+   compared by ``tools/compare_catalog_likelihood_probe.py --golden`` in the
+   phase5, phase6 and phase8a CI jobs, on six probe cells that call the
+   low-level likelihoods rather than the ``ds.model`` defaults; the default
+   exact pairing path is pinned against the population golden by
+   ``tests/test_population_registry_golden.py``.)
 5. A likelihood-proxy check: |logL_proxy(grid) - logL_proxy(exact)| is small.
 
 NOTE on accuracy (measured, cpu/x64): log-log LINEAR interpolation is 2nd order,

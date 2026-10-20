@@ -511,8 +511,13 @@ def dark_siren_log_likelihood(
     reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
 
     ``catalog_params.selection`` selects the completeness. ``None`` (the
-    default) is the frozen per-row count ratio read from the observed-density
-    caches. A runtime magnitude-selection model is the opt-in
+    default) is the count ratio read from the observed-density caches, its
+    estimator chosen by the caches' type: an
+    :class:`~darksirens.catalog.completeness.ObservedDensityCache` gives the
+    frozen per-row ratio, a
+    :class:`~darksirens.catalog.completeness.PooledCountRatioCache` the
+    pooled one (what ``bind_analysis`` passes for the ``ds.model`` default,
+    ``count_ratio="pooled"``). A runtime magnitude-selection model is the opt-in
     ``completeness="selection"``: its radial curve, times ``row_fraction_pe``
     / ``row_fraction_sel`` (one coverage fraction per row of each catalog
     view) when given, is every row's completeness
