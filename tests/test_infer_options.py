@@ -195,6 +195,50 @@ def test_the_accepted_set_covers_every_option_a_backend_reads():
 
 
 # ---------------------------------------------------------------------------
+# Resuming an ordinary analysis
+
+
+def _sampled_analysis():
+    return ds.model(
+        cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=0.3075),
+        population=ds.Population("powerlaw+peak", fixed=True),
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        lambda ck: dict(sampler="dynesty", resume_from_resolved=str(ck)),
+        lambda ck: dict(sampler="tinyns", tinyns_resume_from=str(ck)),
+    ],
+)
+def test_an_unverified_ordinary_resume_warns(monkeypatch, tmp_path, options):
+    # The review's scenario: a checkpoint of a run made before the pooled
+    # count ratio became the default, resumed under it, mixed two likelihoods
+    # without a word, although several docs say such a resume is refused.
+    _fake_backend(monkeypatch)
+    checkpoint = tmp_path / "checkpoint.pkl"
+    checkpoint.write_bytes(b"")
+    with pytest.warns(UserWarning, match="without checking that it was written under"):
+        infer(_sampled_analysis(), events=object(), injections=object(), **options(checkpoint))
+
+
+def test_a_fresh_or_caller_gated_ordinary_run_does_not_warn(monkeypatch, tmp_path):
+    from darksirens.inference.run_fingerprint import FINGERPRINT_BASENAME
+
+    _fake_backend(monkeypatch)
+    checkpoint = tmp_path / "checkpoint.pkl"
+    checkpoint.write_bytes(b"")
+    (tmp_path / FINGERPRINT_BASENAME).write_text("{}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        infer(_sampled_analysis(), events=object(), injections=object(), sampler="dynesty",
+              guard_report=False)
+        infer(_sampled_analysis(), events=object(), injections=object(), sampler="dynesty",
+              guard_report=False, resume_from_resolved=str(checkpoint))
+
+
+# ---------------------------------------------------------------------------
 # The prior-volume correction of the evidence
 
 _GWTC5 = "gwtc5_fiducial_bpl2peaks"

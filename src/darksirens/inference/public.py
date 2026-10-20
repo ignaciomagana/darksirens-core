@@ -324,6 +324,38 @@ def _stamp_target_fingerprint(target, sampler, opts):
     return fingerprint["digest"]
 
 
+def _warn_unverified_resume(sampler, opts):
+    """Warn when an ordinary run resumes a checkpoint nothing has fingerprinted.
+
+    ``ds.infer`` fingerprints target runs only. A caller that gates an
+    ordinary run itself writes ``run_fingerprint.json`` beside the
+    checkpoint, which silences the warning.
+    """
+    _, resume_dir = _checkpoint_dirs(sampler, opts)
+    if resume_dir is None:
+        return
+    from darksirens.inference.run_fingerprint import FINGERPRINT_BASENAME
+
+    if os.path.isfile(os.path.join(resume_dir, FINGERPRINT_BASENAME)):
+        return
+    warnings.warn(
+        f"ds.infer resumes the checkpoint in {resume_dir!r} without checking "
+        "that it was written under this run's settings: ds.infer fingerprints "
+        "InferenceTarget runs only, not ordinary analyses. A setting that "
+        "changed in between (for example a default: the pooled count ratio "
+        "since 2026-10-10, pairing_norm and kernel_window since 2026-10-02) "
+        "makes the resumed run mix two likelihoods. To gate it, build a "
+        "fingerprint from parameter_plan_semantic(analysis.parameters), "
+        "core_numerics_semantic(ds.log_likelihood(...)) and your data "
+        "identity and pass it to gate_and_stamp_checkpoint_fingerprint "
+        "(darksirens.inference.run_fingerprint) before each run; the "
+        "run_fingerprint.json it writes beside the checkpoint silences this "
+        "warning.",
+        UserWarning,
+        stacklevel=4,  # the caller of infer()
+    )
+
+
 def _prior_transform(plan):
     from darksirens.inference.prior import make_prior_transform
 
@@ -344,6 +376,8 @@ def _execute_target(
     digest = (
         None if target is None else _stamp_target_fingerprint(target, sampler, opts)
     )
+    if target is None and len(plan.labels):
+        _warn_unverified_resume(sampler, opts)
 
     from darksirens.inference.sampling import run_sampler
 
@@ -507,7 +541,10 @@ def infer(
     unchanged. Ordinary analyses are not fingerprinted here: a caller that
     checkpoints one composes its fingerprint from
     ``parameter_plan_semantic``, ``core_numerics_semantic(bound)`` and its
-    own data identity.
+    own data identity. An ordinary run that resumes a checkpoint with no
+    ``run_fingerprint.json`` beside it therefore warns that nothing checked
+    the checkpoint's settings against this run's (a default that changed in
+    between would mix two likelihoods); the resume itself goes ahead.
 
     Sampler names are intentionally not validated here. The Phase-6 dispatcher
     must see the request first because a zero-free target has exact evidence and
