@@ -46,7 +46,15 @@ from .components import (
     component,
     mass_token,
 )
-from .utils import get_mass_grid, get_q_grid, sfilter_high, sfilter_low
+from .utils import (
+    GOLOMB_SPLIT_NODES,
+    get_golomb_top_quadrature,
+    get_mass_grid,
+    get_q_grid,
+    normalization_grid_settings,
+    sfilter_high,
+    sfilter_low,
+)
 
 
 @mass_token("powerlaw", plural="powerlaws", short="PL", params=(
@@ -1106,14 +1114,69 @@ class GolombRemnantMass1G(MassComponent):
         x = jnp.maximum(m_i / 20.0, _EPS)
         return jnp.where(m_i < 20.0, x ** (-a), x ** (-b))
 
+    def _progenitor_split_nodes(self, m_tr, delta_m):
+        """Progenitor masses and weights of ``golomb_quadrature="split"``.
+
+        The integral over ``M_I`` in ``[m_lo, m_hi]`` (the domain the default
+        trapezoid on the mass grid covers) in three panels whose edges are the
+        fixed IMF break at 20 Msun and the SAMPLED ``M_tr`` and
+        ``m_disrupt = M_tr + 2 Delta``, above which no remnant forms:
+
+        * ``[m_lo, 20]`` and ``[20, M_tr]``, where the remnant mass is
+          ``M_I`` and the kernel in ``ln M_I`` is a Gaussian of width
+          ``sigma``: trapezoid nodes uniform in ``ln M_I``;
+        * ``[M_tr, m_disrupt]``, the quadratic map up to its peak at the
+          disruption edge: Gauss-Legendre nodes in ``M_I``.
+
+        The nodes move with the edges, so ``phi_1G`` is smooth in ``M_tr``
+        and ``Delta`` (the fixed grid's nodes are crossed by the edge, where
+        the integrand drops from its maximum to zero), and the ln-spacing
+        resolves the narrowest kernel of the prior (the fixed grid sees a
+        kernel narrower than its 0.4 Msun spacing at one node only).  An edge
+        outside ``[m_lo, m_hi]`` is clipped into it, so an empty panel has
+        zero weight.
+        """
+        s = normalization_grid_settings()
+        lo, hi = s.m_lo, s.m_hi
+        n_lo, n_mid, _ = GOLOMB_SPLIT_NODES
+        e_tr = jnp.clip(m_tr, lo, hi)
+        e_brk = jnp.minimum(jnp.clip(20.0, lo, hi), e_tr)
+        e_dis = jnp.clip(m_tr + 2.0 * delta_m, e_tr, hi)
+
+        def log_trapezoid(a, b, n):
+            u = jnp.log(a) + jnp.linspace(0.0, 1.0, n) * (jnp.log(b) - jnp.log(a))
+            h = (jnp.log(b) - jnp.log(a)) / (n - 1)
+            ends = jnp.zeros(n).at[0].set(0.5).at[-1].set(0.5)
+            m_i = jnp.exp(u)
+            return m_i, h * (1.0 - ends) * m_i      # dM = M du
+
+        t_top, w_top = get_golomb_top_quadrature()
+        m_a, w_a = log_trapezoid(lo, e_brk, n_lo)
+        m_b, w_b = log_trapezoid(e_brk, e_tr, n_mid)
+        m_c = e_tr + t_top * (e_dis - e_tr)
+        w_c = w_top * (e_dis - e_tr)
+        return (jnp.concatenate([m_a, m_b, m_c]),
+                jnp.concatenate([w_a, w_b, w_c]))
+
     def _eval_1g_unnorm(self, m, t):
-        """Unnormalised 1G BH mass density phi_1G(m)."""
+        """Unnormalised 1G BH mass density phi_1G(m).
+
+        ``phi_1G(m) = int IMF(M_I) LN(m | ln mbar(M_I), sigma) dM_I`` over
+        ``M_I`` in ``[m_lo, m_hi]``, by default a trapezoid on the mass grid;
+        ``golomb_quadrature="split"`` (opt-in) uses
+        :meth:`_progenitor_split_nodes` instead (see
+        ``NormalizationGridSettings`` for what the default rule gets wrong).
+        """
         a, b, m_tr, delta_m, sigma = t
 
         m_shape = jnp.shape(m)
         m_eval = jnp.reshape(jnp.asarray(m), (-1, 1))
 
-        m_i_grid = get_mass_grid()
+        split = normalization_grid_settings().golomb_quadrature == "split"
+        if split:
+            m_i_grid, w_i = self._progenitor_split_nodes(m_tr, delta_m)
+        else:
+            m_i_grid = get_mass_grid()
         m_i = jnp.reshape(m_i_grid, (1, -1))
 
         mbar = self._mean_remnant_mass(m_i, m_tr, delta_m)
@@ -1136,7 +1199,10 @@ class GolombRemnantMass1G(MassComponent):
         kernel = jnp.where((m_eval > 0.0) & (mbar > 0.0) & (sigma > 0.0), kernel, 0.0)
 
         integrand = imf * kernel
-        phi = jnp.trapezoid(integrand, m_i_grid, axis=-1)
+        if split:
+            phi = jnp.sum(w_i * integrand, axis=-1)
+        else:
+            phi = jnp.trapezoid(integrand, m_i_grid, axis=-1)
 
         return jnp.reshape(phi, m_shape)
 

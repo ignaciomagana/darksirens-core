@@ -144,6 +144,24 @@ PAIRING_SCALES = ("node_max", "analytic")
 #: change bit for bit, or to resume its checkpoint.
 PAIRING_NORMS = ("per_sample", "per_point", "auto")
 
+#: How the Golomb 1G models integrate the progenitor IMF against the
+#: remnant-mass kernel (``GolombRemnantMass1G._eval_1g_unnorm``): ``"grid"``
+#: (default, the frozen reference's rule) is a trapezoid on the fixed mass
+#: grid; ``"split"`` (opt-in) puts the nodes relative to the sampled edges
+#: ``M_tr`` and ``M_tr + 2 Delta`` and spaces them in ``ln M_I`` finely
+#: enough for the narrowest kernel the prior allows (see
+#: :data:`GOLOMB_SPLIT_NODES`).
+GOLOMB_QUADRATURES = ("grid", "split")
+
+#: Node counts of ``golomb_quadrature="split"``: trapezoid nodes uniform in
+#: ``ln M_I`` on ``[m_lo, 20]`` (below the fixed IMF break) and on
+#: ``[20, M_tr]``, and Gauss-Legendre nodes in ``M_I`` on
+#: ``[M_tr, M_tr + 2 Delta]``, where the remnant map is the quadratic that
+#: peaks at the disruption edge.  The ln-spacing is at most 0.008 over the
+#: shipped prior (``M_tr <= 50``), about six nodes per kernel width at the
+#: ``sigma = 0.05`` prior floor.
+GOLOMB_SPLIT_NODES = (384, 128, 64)
+
 # Grid of the per-point taper table (``pairing_norm="per_point"``), in
 # lambda = log s, s = (m1 - m_edge)/(m_shoulder - m_edge) the primary mass's
 # position inside the secondary-mass taper window.  Three segments of
@@ -264,6 +282,21 @@ class NormalizationGridSettings:
     (one scalar per point plus the closed-form plateau), and inside the taper
     window it reads a table in support-relative coordinates, so no cell ever
     straddles the edge.  It needs no support sizing and no ``pairing_m_hi``.
+
+    ``golomb_quadrature`` (env ``DARKSIRENS_GW_GOLOMB_QUADRATURE``) is
+    ``"grid"`` (default) or the opt-in ``"split"`` (see
+    :data:`GOLOMB_QUADRATURES`).  Under ``"grid"`` the Golomb 1G density is a
+    trapezoid on the fixed mass grid (h = 0.4 Msun), which has two known
+    errors: the disruption edge ``M_tr + 2 Delta``, where the integrand drops
+    from its maximum to zero, is a sampled location the fixed nodes cross, so
+    ``log p_pop`` jumps by up to 2 nats per 30 bump samples whenever it
+    crosses a node (every 0.4 Msun of ``M_tr`` or ``2 Delta``) and is flat in
+    between; and below ``M_tr`` a kernel narrower than the node spacing
+    (``sigma m < h``) is seen at one node only, which inflates ``phi_1G`` at
+    low mass by about ``h / (sqrt(2 pi) sigma m)`` (3.4x at 1 Msun for
+    ``sigma = 0.05``).  ``"split"`` removes both: no node crosses a sampled
+    edge, and the narrowest kernel spans several nodes.  The mass grid the
+    density is then evaluated on and interpolated from is unchanged.
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
@@ -274,6 +307,7 @@ class NormalizationGridSettings:
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
     pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "auto")
+    golomb_quadrature: str = os.environ.get("DARKSIRENS_GW_GOLOMB_QUADRATURE", "grid")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -316,6 +350,11 @@ class NormalizationGridSettings:
             raise ValueError(
                 f"pairing_norm must be one of {PAIRING_NORMS}, got "
                 f"{self.pairing_norm!r} (env DARKSIRENS_GW_PAIRING_NORM)"
+            )
+        if self.golomb_quadrature not in GOLOMB_QUADRATURES:
+            raise ValueError(
+                f"golomb_quadrature must be one of {GOLOMB_QUADRATURES}, got "
+                f"{self.golomb_quadrature!r} (env DARKSIRENS_GW_GOLOMB_QUADRATURE)"
             )
         # The two options answer the same question differently: the m1 grid
         # interpolates the per-sample normaliser from static nodes, "per_point"
@@ -371,6 +410,10 @@ class NormalizationGridSettings:
         # per-sample normaliser, or the reverse.
         if out["pairing_norm"] == "per_sample":
             del out["pairing_norm"]
+        # The opt-in is recorded only when set: every run made without it
+        # evaluated the default, so their fingerprints keep matching.
+        if out["golomb_quadrature"] == "grid":
+            del out["golomb_quadrature"]
         return out
 
     def per_point_pairing_norm(self) -> bool:
@@ -409,6 +452,7 @@ def configure_normalization_grids(
     pairing_edge_tol: float | None = None,
     pairing_scale: str | None = None,
     pairing_norm: str | None = None,
+    golomb_quadrature: str | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -421,9 +465,10 @@ def configure_normalization_grids(
     should normally use that helper rather than setting the bound directly.
     ``pairing_scale`` is ``"analytic"`` (default) or ``"node_max"``; see
     :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"auto"`` (default),
-    ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`. Like every setting here they
-    are read when a likelihood is traced, so configure them before binding the
-    analysis.
+    ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`.
+    ``golomb_quadrature`` is ``"grid"`` (default) or the opt-in ``"split"``;
+    see :data:`GOLOMB_QUADRATURES`. Like every setting here they are read when
+    a likelihood is traced, so configure them before binding the analysis.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
@@ -434,7 +479,8 @@ def configure_normalization_grids(
                         "pairing_edge_nq": pairing_edge_nq,
                         "pairing_edge_tol": pairing_edge_tol,
                         "pairing_scale": pairing_scale,
-                        "pairing_norm": pairing_norm}.items():
+                        "pairing_norm": pairing_norm,
+                        "golomb_quadrature": golomb_quadrature}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:
@@ -699,6 +745,16 @@ def get_pairing_edge_quadrature():
     """
     s = normalization_grid_settings()
     return _gauss_legendre_01(s.pairing_edge_nq)
+
+
+def get_golomb_top_quadrature():
+    """Gauss-Legendre nodes/weights on (0, 1) for the top panel of ``golomb_quadrature="split"``.
+
+    ``GOLOMB_SPLIT_NODES[2]`` nodes on ``[M_tr, M_tr + 2 Delta]``, where the
+    remnant map is smooth and its kernel never narrower than
+    ``sigma M_tr`` (1 Msun at the shipped prior's floors).
+    """
+    return _gauss_legendre_01(GOLOMB_SPLIT_NODES[2])
 
 
 def sfilter_low_cap(dtype) -> float:
