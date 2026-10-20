@@ -375,6 +375,80 @@ def test_a_core_catalog_mixture_target_carries_its_analysis_correction(monkeypat
     assert result["logZ_corrected"] == pytest.approx(-7.0 - expected, rel=1e-15)
 
 
+_L1 = r"$\lambda_1$"
+
+
+def _two_catalog_analysis(per_catalog_population):
+    from _catalog_model_fixtures import catalog_store
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        analysis = ds.model(
+            cosmology=ds.Cosmology(H0=(50.0, 90.0), Om0=0.3075),
+            population=ds.Population(_GWTC5, fixed={_L0: 0.6}),
+            catalog=[catalog_store(11), catalog_store(12)],
+            catalog_sky_weighting="field",
+            count_ratio="row",
+            per_catalog_population=per_catalog_population,
+        )
+    texts = [str(w.message) for w in caught if "lambda_0" in str(w.message)]
+    return analysis, texts
+
+
+@pytest.mark.parametrize("copies", [[_L1], [_L0, _L1], [_L0]])
+def test_a_per_catalog_copy_of_a_partially_fixed_pair_has_no_constant_offset(copies):
+    # The verifier's scenario: with lambda_0 = 0.6 fixed and catalog 2's own
+    # lambda_1, the bound log L is -inf only where both copies leave
+    # [0, 0.4] (a 0.36 corner of the box), and finite but changed where one
+    # does, so the raw logZ carries no constant ln 0.4 offset. The plan
+    # recorded ln 0.4 and the warning said ds.infer adds it.
+    analysis, texts = _two_catalog_analysis({2: copies})
+    assert analysis.parameters.fixed_constraint_log_fraction == 0.0
+    (text,) = [t for t in texts if "has fixed member(s)" in t]
+    assert "per-catalog copy" in text
+    assert "log_prior_volume_fraction does not include" in text
+    assert "which ds.infer adds" not in text
+    # A shared population keeps the exact ln 0.4.
+    shared, (shared_text,) = _two_catalog_analysis(None)
+    assert shared.parameters.fixed_constraint_log_fraction == pytest.approx(
+        math.log(0.4), rel=1e-15
+    )
+    assert "which ds.infer adds" in shared_text
+
+
+def test_a_mixture_target_with_a_copied_pair_member_records_no_constraint_offset(monkeypatch):
+    from _catalog_model_fixtures import gw_stores
+    from darksirens.likelihood.mixture import make_catalog_mixture_target
+
+    analysis, _ = _two_catalog_analysis({2: [_L1]})
+    plan = analysis.parameters
+    events, injections = gw_stores()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        log_likelihood = ds.log_likelihood(
+            analysis, events=events, injections=injections, max_likelihood_variance=1e6
+        )
+        target = make_catalog_mixture_target(
+            analysis, events=events, injections=injections, max_likelihood_variance=1e6
+        )
+    theta = np.array([(lo + hi) / 2 for lo, hi in zip(plan.lower, plan.upper)])
+    i1, i2 = plan.labels.index(_L1), plan.labels.index(_L1 + "_c2")
+
+    def at(v1, v2):
+        t = theta.copy()
+        t[i1], t[i2] = v1, v2
+        return float(log_likelihood(t))
+
+    # The premise of a constant fraction fails: one copy out of [0, 0.4]
+    # leaves the likelihood finite.
+    assert math.isfinite(at(0.9, 0.3)) and math.isfinite(at(0.3, 0.9))
+    assert at(0.9, 0.9) == -math.inf
+    _fake_backend(monkeypatch, {"logZ": -7.0})
+    result = infer(target, sampler="dynesty")
+    assert result["log_prior_volume_fraction"] == 0.0
+    assert result["logZ_corrected"] == -7.0
+
+
 def test_a_companion_target_declares_its_own_correction(monkeypatch):
     _fake_backend(monkeypatch, {"logZ": -4.0})
     plain = ds.InferenceTarget(lambda theta: -1.0, _plan())

@@ -305,8 +305,10 @@ class ParameterPlan:
     none is): the pair's sampled member is sampled over its own bounds and
     the likelihood is zero outside the interval the fixed member leaves it,
     so the raw ``logZ`` carries this data-independent offset, which
-    ``ds.infer`` adds to ``log_prior_volume_fraction``. It derives from the
-    fixed values, so the fingerprint block does not record it.
+    ``ds.infer`` adds to ``log_prior_volume_fraction``. It is ``0.0`` too
+    when that offset is no known constant (a pair member with a per-catalog
+    copy, whose rejection acts per catalog; the warning says so). It derives
+    from the fixed values, so the fingerprint block does not record it.
     """
 
     labels: tuple[str, ...]
@@ -1154,7 +1156,7 @@ def _partner_support(kind, members, fixed, bounds):
     return free, lo, hi
 
 
-def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None) -> float:
+def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None, copied=()) -> float:
     """Check fixed values against the model's joint prior constraints.
 
     Fixed values that violate a constraint, or leave the pair's sampled member
@@ -1168,7 +1170,11 @@ def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None) -> float:
     a partially fixed pair is sampled over its own bounds, and only the
     interval the fixed member leaves it has support. It sums the pairs whose
     sampled member has a uniform prior (``kinds``) and appears in no other
-    partially fixed pair; another pair's offset is not known here and is
+    partially fixed pair, and none of whose members has a per-catalog copy
+    (``copied``, the base labels of ``model(per_catalog_population=...)``):
+    the rejection then acts per catalog, and the likelihood is zero only
+    where every catalog's copy leaves the support, which is no constant
+    fraction of the box. Another pair's offset is not known here and is
     named in its warning.
     """
     groups = [
@@ -1212,17 +1218,32 @@ def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None) -> float:
                     "the fixed value"
                 )
             kind_of_free = (kinds or {}).get(free, _UNIFORM)[0]
-            if kind_of_free == "uniform" and free_count[free] == 1:
+            if (
+                kind_of_free == "uniform"
+                and free_count[free] == 1
+                and not any(label in copied for label in members)
+            ):
                 b_lo, b_hi = bounds[free]
                 log_fraction += math.log((hi - lo) / (b_hi - b_lo))
                 known = True
-        offset = (
-            "logZ carries the log prior-fraction offset, which ds.infer adds "
-            "to log_prior_volume_fraction"
-            if known
-            else "logZ carries a log prior-fraction offset that "
-            "log_prior_volume_fraction does not include"
-        )
+        if known:
+            offset = (
+                "logZ carries the log prior-fraction offset, which ds.infer "
+                "adds to log_prior_volume_fraction"
+            )
+        elif any(label in copied for label in members):
+            offset = (
+                "a per-catalog copy of "
+                f"{[label for label in members if label in copied]} makes the "
+                "rejection act per catalog, so logZ carries an offset that is "
+                "no constant prior fraction and that log_prior_volume_fraction "
+                "does not include"
+            )
+        else:
+            offset = (
+                "logZ carries a log prior-fraction offset that "
+                "log_prior_volume_fraction does not include"
+            )
         if kind == "conditional_upper" and members[0] in fixed:
             # The declared pair is upper ~ U(lo, hi), lower | upper ~ U(lo,
             # upper): at a fixed lower member the upper one's conditional
@@ -1624,13 +1645,15 @@ def model(
     with likelihood-side rejection outside the interval the fixed value
     leaves it, so the raw ``logZ`` carries the log prior fraction that
     interval keeps (``ParameterPlan.fixed_constraint_log_fraction``, added
-    to ``ds.infer``'s ``log_prior_volume_fraction``). For ``ordered_le``,
-    ``simplex`` and a fixed upper member of ``conditional_upper`` that
-    uniform prior is the declared joint prior conditioned on the fixed
-    value. For a fixed lower member of ``conditional_upper`` (``m2_low`` of
-    the GWTC-5 pair) it is not: the declared conditional of the upper
-    member falls as ``1 / (m1_low - lower bound)``, so the posterior differs
-    as well, and the warning says so.
+    to ``ds.infer``'s ``log_prior_volume_fraction``; not added when a member
+    of the pair has a per-catalog copy, which makes the rejection act per
+    catalog). For ``ordered_le``, ``simplex`` and a fixed upper member of
+    ``conditional_upper`` that uniform prior is the declared joint prior
+    conditioned on the fixed value. For a fixed lower member of
+    ``conditional_upper`` (``m2_low`` of the GWTC-5 pair) it is not: the
+    declared conditional of the upper member falls as
+    ``1 / (m1_low - lower bound)``, so the posterior differs as well, and the
+    warning says so.
 
     ``kernel_pin="auto"`` (the default) lets an incomplete-catalog analysis
     that fixes ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` (``H0``
@@ -2044,6 +2067,7 @@ def model(
                 for label, lo, hi in zip(pop_labels, pop_lower, pop_upper)
             },
             {label: tuple(kind) for label, kind in zip(pop_labels, pop_kinds)},
+            {label for _, owned in catalog_population for label in owned},
         )
     if population_fixed and len(population_fixed) == len(pop_labels):
         fixed_population = tuple(population_fixed[label] for label in pop_labels)
