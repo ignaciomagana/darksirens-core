@@ -42,7 +42,8 @@ WA_GRID_LOWER = WA_PRIOR_LOWER - WA_GRID_PAD
 WA_GRID_UPPER = WA_PRIOR_UPPER + WA_GRID_PAD
 
 #: Closed support of each interpolated cosmology axis. H0 is absent on purpose:
-#: it rescales the table analytically instead of indexing into it.
+#: it rescales the table analytically instead of indexing into it (it must
+#: still be positive, which ``darksirens.Cosmology`` checks separately).
 GRID_SUPPORT: dict[str, tuple[float, float]] = {
     "Om0": (OM0_GRID_LOWER, OM0_GRID_UPPER),
     "w0": (W0_GRID_LOWER, W0_GRID_UPPER),

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import math
 import numbers
 from typing import TypeAlias
+import warnings
 
 from ._cosmology_support import GRID_SUPPORT
 
@@ -29,14 +30,33 @@ _GWTC5_COMPATIBLE_NAMES = frozenset(
     }
 )
 _POPULATION_FIDUCIAL_SETS = frozenset({"legacy", "in_prior_v2"})
+# The typed name of the GWTC-5 preset is also the registry name of a curated
+# grammar composition, a different model; only fixed="gwtc5" swaps it.
+_CURATED_BPL2G = "brokenpowerlaw+2peaks"
+_CURATED_BPL2G_WARNING = (
+    "Population('brokenpowerlaw+2peaks', fixed={fixed!r}) is the curated grammar "
+    "composition BPL+2G (stick-breaking weights v_1, v_2; a broken power law with "
+    "its own m_min, m_max and tapers at both ends; Gaussians without the shared "
+    "low-mass taper; no separate m2 taper; mu_G2 in U(25, 40)), not the GWTC-5 "
+    "BPL+2G model that fixed='gwtc5' pins. To sample or partly fix the GWTC-5 "
+    "model, name it: Population('gwtc5_fiducial_bpl2peaks', ...)."
+)
+
+
+def _is_real_number(value) -> bool:
+    """A real number, never a bool: a ``numbers.Real`` (NumPy scalars included)
+    or a 0-d array of integers or floats. Strings are not numbers."""
+    if isinstance(value, bool) or type(value).__name__ == "bool_":
+        return False
+    if isinstance(value, numbers.Real):
+        return True
+    dtype = getattr(value, "dtype", None)
+    return getattr(value, "ndim", None) == 0 and getattr(dtype, "kind", "") in ("i", "u", "f")
 
 
 def _normalize_parameter(name: str, value) -> ParameterValue:
     """Normalize one scalar-fixed or two-bound uniform parameter declaration."""
-    if isinstance(value, bool):
-        raise TypeError(f"{name} must be a finite scalar or a (lower, upper) pair")
-
-    if isinstance(value, (int, float)):
+    if _is_real_number(value):
         out = float(value)
         if not math.isfinite(out):
             raise ValueError(f"{name} must be finite, got {value!r}")
@@ -46,13 +66,10 @@ def _normalize_parameter(name: str, value) -> ParameterValue:
         if len(value) != 2:
             raise ValueError(f"{name} bounds must contain exactly two values")
         lo, hi = value
-        if isinstance(lo, bool) or isinstance(hi, bool):
-            raise TypeError(f"{name} bounds must be finite real numbers")
-        try:
-            lo = float(lo)
-            hi = float(hi)
-        except (TypeError, ValueError) as exc:
-            raise TypeError(f"{name} bounds must be finite real numbers") from exc
+        if not (_is_real_number(lo) and _is_real_number(hi)):
+            raise TypeError(f"{name} bounds must be finite real numbers, got {value!r}")
+        lo = float(lo)
+        hi = float(hi)
         if not math.isfinite(lo) or not math.isfinite(hi):
             raise ValueError(f"{name} bounds must be finite, got {(lo, hi)!r}")
         if not lo < hi:
@@ -100,6 +117,28 @@ def _fixed_population_values(fixed) -> FixedValues:
     return tuple(sorted(out.items()))
 
 
+def _nonpositive_hubble_constant(value: ParameterValue) -> str | None:
+    """Describe an ``H0`` declaration that reaches ``H0 <= 0``.
+
+    Every distance scales as ``1 / H0``: infinite at 0 and negative below, so
+    the likelihood is -inf there, and a prior reaching it would be silently
+    truncated to ``H0 > 0``.
+    """
+    if isinstance(value, tuple):
+        if value[0] <= 0.0:
+            return (
+                f"H0 prior [{value[0]}, {value[1]}] reaches H0 <= 0, where every "
+                "distance is infinite or negative and the likelihood is -inf, which "
+                "would silently truncate the prior; its lower bound must be > 0"
+            )
+    elif value <= 0.0:
+        return (
+            f"H0 fixed at {value} must be > 0: every distance is infinite or "
+            "negative there, which would make every sample -inf"
+        )
+    return None
+
+
 def _outside_distance_grid(name: str, value: ParameterValue) -> str | None:
     """Describe an axis the tabulated distance grid cannot represent.
 
@@ -135,8 +174,12 @@ class Cosmology:
     background parameters at the frozen Planck-2015 fiducials used by core.
 
     ``Om0``, ``w0`` and ``wa`` must stay inside the closed support of the
-    tabulated distance grid (``darksirens._cosmology_support.GRID_SUPPORT``);
-    ``H0`` is unrestricted because it rescales that table analytically.
+    tabulated distance grid (``darksirens._cosmology_support.GRID_SUPPORT``).
+    ``H0`` rescales that table analytically, so it has no grid bound, but it
+    must be positive: fixed above 0, and a prior's lower bound above 0.
+
+    A value is a real number (Python or NumPy, or a 0-d array), never a bool
+    or a string.
     """
 
     H0: ParameterValue = (20.0, 140.0)
@@ -152,6 +195,8 @@ class Cosmology:
             for name in _COSMOLOGY_ORDER
             if (problem := _outside_distance_grid(name, getattr(self, name)))
         ]
+        if (problem := _nonpositive_hubble_constant(self.H0)) is not None:
+            problems.insert(0, problem)
         if problems:
             raise ValueError("; ".join(problems))
 
@@ -186,7 +231,11 @@ class Population:
     ``fixed='gwtc5'`` is the conventional public shorthand promised by the
     reconstruction architecture: for BPL+2G it resolves to the existing
     published-median ``gwtc5_fiducial_bpl2peaks`` registry model. No population
-    parameters are duplicated here.
+    parameters are duplicated here. Only that preset swaps the model: with any
+    other ``fixed``, ``'brokenpowerlaw+2peaks'`` is the curated grammar
+    composition BPL+2G, a different model, and constructing it warns
+    (``UserWarning``). The GWTC-5 model is sampled or partly fixed under its own
+    name, ``Population('gwtc5_fiducial_bpl2peaks', ...)``.
 
     ``fixed={parameter: value, ...}`` fixes only the named parameters, at the
     given values, and samples the rest. A key is the parameter's label as
@@ -217,6 +266,17 @@ class Population:
             if not isinstance(getattr(self, field), bool):
                 raise TypeError(f"{field} must be bool")
 
+        self._normalize_fixed()
+        if self.name == _CURATED_BPL2G and self.fixed != "gwtc5":
+            warnings.warn(
+                _CURATED_BPL2G_WARNING.format(
+                    fixed=self.fixed_values if isinstance(self.fixed, tuple) else self.fixed
+                ),
+                UserWarning,
+                stacklevel=3,
+            )
+
+    def _normalize_fixed(self) -> None:
         fixed = self.fixed
         if fixed is False:
             object.__setattr__(self, "fixed", None)
@@ -241,7 +301,9 @@ class Population:
         if fixed == "gwtc5" and self.name not in _GWTC5_COMPATIBLE_NAMES:
             raise ValueError(
                 "fixed='gwtc5' is the published GWTC-5 BPL+2G preset and is "
-                "only compatible with Population('brokenpowerlaw+2peaks', ...)"
+                "only compatible with Population('brokenpowerlaw+2peaks', ...) or "
+                "the GWTC-5 model's own names ('gwtc5_fiducial_bpl2peaks', "
+                "'gwtc5_fiducial_brokenpowerlaw+2peaks', 'gwtc5_brokenpowerlaw+2peaks')"
             )
         object.__setattr__(self, "fixed", fixed)
 
