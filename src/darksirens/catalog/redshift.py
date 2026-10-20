@@ -919,6 +919,22 @@ def _host_blocks(value):
         yield np.ascontiguousarray(np.asarray(block))
 
 
+def _host_rows(value, rows: slice) -> np.ndarray:
+    """Rows ``rows`` of a 2-D ``value`` on the host, as float64.
+
+    A host array is sliced in place.  A device array is sliced on the device
+    first, so the host copy ``np.asarray`` caches belongs to the slice and is
+    freed with it (see :func:`_host_blocks`).
+    """
+
+    if _host_resident(value):
+        return np.asarray(np.asarray(value)[rows], dtype=np.float64)
+    n_rows = int(value.shape[0])
+    start = min(rows.start or 0, n_rows)
+    stop = n_rows if rows.stop is None else min(rows.stop, n_rows)
+    return np.asarray(lax.slice_in_dim(value, start, stop), dtype=np.float64)
+
+
 def _digest_array(h, name: str, value) -> None:
     array_like = value if hasattr(value, "dtype") else np.asarray(value)
     dtype = np.dtype(array_like.dtype)
@@ -1336,14 +1352,18 @@ def kernel_window_applies(catalog: GalaxyCatalog, sigma_kde: float) -> bool:
 
     if not np.isfinite(abs(float(sigma_kde))):
         return False
-    z = np.asarray(catalog.zgals, dtype=np.float64)
     ngals = np.asarray(catalog.ngals).astype(np.int64)
-    if z.ndim != 2:
+    if np.ndim(catalog.zgals) != 2:
         return False
-    real = np.arange(z.shape[1])[None, :] < ngals[:, None]
-    if not bool(np.all(np.isfinite(z[real]))):
-        return False
-    return bool(_rows_sorted(z, ngals))
+    n_rows, n_max = (int(n) for n in np.shape(catalog.zgals))
+    cols = np.arange(n_max)[None, :]
+    for rows in row_blocks(n_rows, n_max):
+        z = _host_rows(catalog.zgals, rows)
+        if not bool(np.all(np.isfinite(z[cols < ngals[rows, None]]))):
+            return False
+        if not bool(_rows_sorted(z, ngals[rows])):
+            return False
+    return True
 
 
 def kernel_window(
@@ -1416,34 +1436,44 @@ def kernel_window(
     sigma = abs(float(sigma_kde))
     if not np.isfinite(sigma):
         raise ValueError(f"the kernel window sigma_kde must be finite, got {sigma_kde!r}")
-    z = np.asarray(catalog.zgals, dtype=np.float64)
-    dz = np.asarray(catalog.dzgals, dtype=np.float64)
     ngals = np.asarray(catalog.ngals).astype(np.int64)
-    if z.ndim != 2 or dz.shape != z.shape:
+    if np.ndim(catalog.zgals) != 2 or np.shape(catalog.dzgals) != np.shape(catalog.zgals):
         raise ValueError("zgals and dzgals must be (N_rows, N_max)")
-    n_rows, n_max = z.shape
+    n_rows, n_max = (int(n) for n in np.shape(catalog.zgals))
     if ngals.shape != (n_rows,) or np.any(ngals < 0) or np.any(ngals > n_max):
         raise ValueError("ngals must be (N_rows,) counts in [0, N_max]")
-    real = np.arange(n_max)[None, :] < ngals[:, None]
-    if not bool(np.all(np.isfinite(z[real]))):
-        raise ValueError("the kernel window needs finite real-galaxy redshifts")
-    if not bool(_rows_sorted(z, ngals)):
-        raise ValueError(
-            "the kernel window needs each row's galaxies sorted by redshift: load the "
-            "catalog with sort_rows_by_z=True (the default of load_catalog)"
-        )
-    sig = np.where(
-        real, np.maximum(np.sqrt(dz**2 + sigma**2), SIGMA_EFF_FLOOR), 0.0
-    )
-    sig_max = sig.max(axis=1) if n_max else np.zeros(n_rows)
+    # Row blocks: the temporaries are one block's size, and a device catalog
+    # keeps no host copy of its arrays (see ``_host_rows``).
+    cols = np.arange(n_max)[None, :]
+    blocks = list(row_blocks(n_rows, n_max))
+    sig_max = np.zeros(n_rows)
+    for rows in blocks:
+        z = _host_rows(catalog.zgals, rows)
+        real = cols < ngals[rows, None]
+        if not bool(np.all(np.isfinite(z[real]))):
+            raise ValueError("the kernel window needs finite real-galaxy redshifts")
+        if not bool(_rows_sorted(z, ngals[rows])):
+            raise ValueError(
+                "the kernel window needs each row's galaxies sorted by redshift: load "
+                "the catalog with sort_rows_by_z=True (the default of load_catalog)"
+            )
+        if n_max:
+            dz = _host_rows(catalog.dzgals, rows)
+            sig = np.where(
+                real, np.maximum(np.sqrt(dz**2 + sigma**2), SIGMA_EFF_FLOOR), 0.0
+            )
+            sig_max[rows] = sig.max(axis=1)
     half_width = _window_k(ngals, eps) * sig_max * (1.0 + _WINDOW_WIDTH_MARGIN)
     half_width = np.where(ngals > 0, half_width, 0.0)
     span = 2.0 * half_width * (1.0 + 1.0e-9) + 2.0 * _WINDOW_Z_SLACK
     size = 1
-    for row in np.flatnonzero(ngals > 0):
-        zz = z[row, : ngals[row]]
-        upper = np.searchsorted(zz, zz + span[row], side="right")
-        size = max(size, int(np.max(upper - np.arange(zz.size))))
+    for rows in blocks:
+        z = _host_rows(catalog.zgals, rows)
+        start = rows.start or 0
+        for row in np.flatnonzero(ngals[rows] > 0):
+            zz = z[row, : ngals[start + row]]
+            upper = np.searchsorted(zz, zz + span[start + row], side="right")
+            size = max(size, int(np.max(upper - np.arange(zz.size))))
     size = min(size, max(n_max, 1))
     if isinstance(catalog.zgals, jax.Array):
         half_width = jnp.asarray(half_width)

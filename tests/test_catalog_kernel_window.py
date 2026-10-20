@@ -244,6 +244,61 @@ def test_window_refuses_unsorted_rows_traced_catalogs_and_bad_arguments():
     assert state.window_ok is None
 
 
+def test_window_sizing_reads_the_catalog_in_row_blocks(monkeypatch):
+    # The default-on sizing built (N_rows, N_max) float64 temporaries over
+    # the whole catalog (2.1 times one padded array at its peak) and, on a
+    # device catalog, left host copies of zgals and dzgals cached on the
+    # arrays for the life of the binding.
+    import tracemalloc
+
+    from darksirens.catalog import redshift, types
+
+    sigma = 0.002
+    want = kernel_window(CATALOG, EPS, sigma)
+    monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 5 * CATALOG.zgals.shape[1])
+    host = CATALOG._replace(
+        zgals=np.asarray(CATALOG.zgals), dzgals=np.asarray(CATALOG.dzgals),
+        ngals=np.asarray(CATALOG.ngals),
+    )
+    for catalog in (host, CATALOG):
+        got = kernel_window(catalog, EPS, sigma)
+        assert got.size == want.size
+        assert np.asarray(got.half_width).tobytes() == np.asarray(want.half_width).tobytes()
+        assert redshift.kernel_window_applies(catalog, sigma)
+    unsorted = np.array(host.zgals)
+    unsorted[-2, [0, 1]] = unsorted[-2, [1, 0]] + np.array([0.0, 1e-3])
+    assert not redshift.kernel_window_applies(host._replace(zgals=unsorted), sigma)
+
+    # Host peak: a few row blocks, not the whole catalog.
+    rng = np.random.default_rng(7)
+    n_rows, n_max = 4000, 500
+    big = GalaxyCatalog(
+        apix=1.0, zgals=np.sort(rng.uniform(0.0, 1.0, (n_rows, n_max)), axis=1),
+        dzgals=np.full((n_rows, n_max), 1e-3), wgals=np.ones((n_rows, n_max)),
+        ngals=np.full(n_rows, n_max, dtype=np.int32),
+    )
+    monkeypatch.setattr(types, "_CHECK_BLOCK_SLOTS", 2**16)
+    tracemalloc.start()
+    try:
+        kernel_window(big, EPS, sigma)
+        assert redshift.kernel_window_applies(big, sigma)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 0.25 * big.zgals.nbytes, peak
+
+    # A device catalog is read slice by slice: no host copy stays cached on it.
+    monkeypatch.setattr(redshift, "_host_resident", lambda value: not isinstance(value, jax.Array))
+    device = CATALOG._replace(
+        zgals=jnp.asarray(np.array(CATALOG.zgals)), dzgals=jnp.asarray(np.array(CATALOG.dzgals))
+    )
+    got = kernel_window(device, EPS, sigma)
+    assert redshift.kernel_window_applies(device, sigma)
+    assert np.asarray(got.half_width).tobytes() == np.asarray(want.half_width).tobytes()
+    assert getattr(device.zgals, "_npy_value", None) is None
+    assert getattr(device.dzgals, "_npy_value", None) is None
+
+
 # ---------------------------------------------------------------------------
 # The bound against the full sum
 
