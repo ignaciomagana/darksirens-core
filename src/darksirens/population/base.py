@@ -929,24 +929,46 @@ class PairingModel(ABC):
             n_sc, scale_p = self._panel_norm(m1_a, m_min, dm_min, theta, t_p, w_p)
             n_sc    = n_sc.reshape(jnp.shape(m1))
             scale_m = scale_p.reshape(jnp.shape(m1))
-            return jnp.where(
-                in_support & (n_sc > 0),
-                (p / scale_m) / jnp.where(n_sc > 0, n_sc, 1.0),
-                0.0,
-            )
+            safe_sc = jnp.where(n_sc > 0, n_sc, 1.0)
+            ratio = p / scale_m
+            if jnp.result_type(ratio) == jnp.float64:
+                dens = ratio / safe_sc
+            else:
+                # Opt-in float32: under jit XLA rewrites (p / scale) / n_sc
+                # into p / (scale * n_sc), and in the taper toe that product
+                # (scale on float32's taper floor exp(-79.85), times the
+                # support width) is below float32's smallest normal number
+                # and flushes to zero, so the density came out +inf (measured
+                # on PowerLawPairing, m_min = 5, dm_min = 3: +inf for every
+                # m1 below m_min + 1.9e-3).  A product with the reciprocal
+                # is not rewritten into that form; float64 inputs keep the
+                # division above.
+                dens = ratio * (1.0 / safe_sc)
+            return jnp.where(in_support & (n_sc > 0), dens, 0.0)
         # GRID path: the q-support depends on m1 only through the m2 = q*m1 cut,
         # so N(m1) = ∫ p_unnorm(m1, q) dq is a smooth 1-D function.  Precompute it
         # ONCE per proposal on the static log-spaced m1 grid (N_grid x N_Q work,
         # theta-traced) and interpolate log N in log m1 per sample.
-        m1_grid = get_pairing_m1_grid()                     # (N_grid,) static nodes
+        # The static nodes are cast to the per-sample dtype, as in the exact
+        # branch: the taper's floor depends on the dtype, and N must normalise
+        # the same kernel p is evaluated with.  Built from float64 nodes, the
+        # opt-in float32 path normalised a float32-floored p by a
+        # float64-floored N, and every m1 within about 1.2% of the taper
+        # window above m_min came out exp(130 - 79.85) = exp(50.15) too dense
+        # (measured on PowerLawPairing, m_min = 5, dm_min = 3, beta = 0.5).
+        # The products I = scale * n_sc are formed in float64, where they
+        # cannot underflow; float64 inputs make every cast here a no-op.
+        m1_grid = _match_dtype(get_pairing_m1_grid(), m1)   # (N_grid,) static nodes
         log_m1_grid = jnp.log(m1_grid)
         # Same scale-factored, SUPPORT-RELATIVE 2-panel quadrature as the exact
         # branch, per grid node, so the grid normaliser never underflows while
         # forming I = scale * n_sc and agrees with the exact branch node-for-node.
         t_p, w_p = get_pairing_panel_quadrature()
+        t_p, w_p = _match_dtype(t_p, m1_grid), _match_dtype(w_p, m1_grid)
         n_sc_g, scale_g = self._panel_norm(m1_grid, m_min, dm_min, theta,
                                            t_p, w_p)
-        I_grid  = scale_g * n_sc_g                           # (N_grid,) normaliser
+        I_grid  = (_match_dtype(scale_g, jnp.float64)
+                   * _match_dtype(n_sc_g, jnp.float64))      # (N_grid,) normaliser
         # SUPPORT-EDGE HANDLING.  Nodes with no support have I == 0 exactly (for
         # every q, p_unnorm == 0 -- e.g. m1 <= m_min, so m2 = q*m1 <= m_min).  The
         # historical code floored those to log(1e-300) and interpolated THROUGH
@@ -1041,8 +1063,9 @@ class PairingModel(ABC):
         # deficit (it pinned the normaliser to dq p(m1,1)/2, killing the
         # m1 / m_min / beta dependence: d log p / d m_min came out -7.7e3 against
         # a true +1.67e7) is gone.
-        t_e, w_e = get_pairing_edge_quadrature()             # (K,) static nodes
         m1_a     = jnp.atleast_1d(m1)
+        t_e, w_e = get_pairing_edge_quadrature()             # (K,) static nodes
+        t_e, w_e = _match_dtype(t_e, m1_a), _match_dtype(w_e, m1_a)
         # The SAME panel split as the exact branch, with pairing_edge_nq nodes
         # per panel instead of PAIRING_PANEL_NQ.  Sharing the split is what makes
         # "the grid branch is never worse than the exact branch it approximates"
@@ -1055,14 +1078,18 @@ class PairingModel(ABC):
         # asserted by tests/test_pairing_norm_grid.py, in
         # test_support_edge_cell_is_bounded_and_one_sided and its dense sweep.
         n_sc_e, scale_e = self._panel_norm(m1_a, m_min, dm_min, theta, t_e, w_e)
-        I_edge   = (n_sc_e * scale_e).reshape(jnp.shape(m1))
+        I_edge   = (_match_dtype(n_sc_e, jnp.float64)
+                    * _match_dtype(scale_e, jnp.float64)).reshape(jnp.shape(m1))
         edge_ok  = I_edge > 0
         # Safe log: an empty support gives I_edge == 0, and there p == 0 too, so
         # keep the interpolated value rather than build a -inf whose VJP is
         # 0 * inf = NaN.
         log_I_edge = jnp.log(jnp.where(edge_ok, I_edge, 1.0))
         log_I   = jnp.where(resolved | (~edge_ok), log_I, log_I_edge)
-        dens    = p * jnp.exp(-log_I)
+        # Back in the per-sample dtype (float32: exp(-log_I) alone can pass
+        # float32's largest number in the taper toe, so the product is taken
+        # in float64 first).
+        dens    = _match_dtype(p * jnp.exp(-log_I), p)
         return jnp.where(any_sup & in_support, dens, jnp.zeros_like(dens))
 
 
