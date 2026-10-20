@@ -432,6 +432,24 @@ def _row_marked_kernel_state(
     return log_kw, sig_eff, log_N_host, log_depth_mass
 
 
+def _without_auto_kernel_window(catalog):
+    """``catalog`` without a window attached under ``kernel_window="auto"``.
+
+    The marked host kernel sums every galaxy, the historical evaluation: an
+    explicit (strict) window is refused, an ``"auto"`` one dropped.
+    """
+
+    window = getattr(catalog, "kernel_window", None)
+    if window is None:
+        return catalog
+    if getattr(window, "strict", True):
+        raise ValueError(
+            "the marked host kernel does not take the kernel window: build it "
+            "from a catalog without one (catalog._replace(kernel_window=None))"
+        )
+    return catalog._replace(kernel_window=None)
+
+
 def build_marked_catalog_kernel_state(
     cosmo,
     params: CatalogParameters,
@@ -440,18 +458,17 @@ def build_marked_catalog_kernel_state(
     marks: CenteredHostMarks,
     eta,
 ):
-    """Build the marked observed-host kernel and row host amplitudes."""
+    """Build the marked observed-host kernel and row host amplitudes.
 
-    window = getattr(catalog, "kernel_window", None)
-    if window is not None:
-        if getattr(window, "strict", True):
-            raise ValueError(
-                "the marked host kernel does not take the kernel window: build it "
-                "from a catalog without one (catalog._replace(kernel_window=None))"
-            )
-        # A window attached under the kernel_window="auto" default: the
-        # marked kernel sums every galaxy, the historical evaluation.
-        catalog = catalog._replace(kernel_window=None)
+    A window attached under ``kernel_window="auto"`` is dropped and an
+    explicit one refused.  The per-sample evaluator reads the window from the
+    catalog it is handed, so evaluate the state against the catalog without
+    its window (``catalog._replace(kernel_window=None)``), as
+    :func:`darksirens.likelihood.marked.marked_dark_siren_log_likelihood`
+    does.
+    """
+
+    catalog = _without_auto_kernel_window(catalog)
     model._check_names(marks.names)
     if marks.values.shape[:2] != catalog.zgals.shape:
         raise ValueError(
@@ -608,7 +625,9 @@ def build_marked_incomplete_catalog_prior_state(
     magnitude-selection model on ``params.selection``
     (``completeness="selection"``) is refused, not ignored.
     ``mu_miss_estimator`` is passed to :func:`missing_host_efficiency_grid`
-    (``"count"``, the default, or the opt-in ``"weighted"``).
+    (``"count"``, the default, or the opt-in ``"weighted"``).  The kernel
+    window convention is that of :func:`build_marked_catalog_kernel_state`:
+    evaluate the state against the catalog without its window.
     """
 
     if getattr(params, "selection", None) is not None:

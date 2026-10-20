@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from darksirens.catalog.hosts import (
+    _without_auto_kernel_window,
     build_marked_incomplete_catalog_prior_state,
     require_shared_host_view,
 )
@@ -54,6 +55,12 @@ def marked_dark_siren_log_likelihood(
     (:func:`darksirens.catalog.hosts.missing_host_efficiency_grid`).
     """
 
+    # The marked host kernel sums every galaxy.  The per-sample evaluator reads
+    # the window from the catalog it is handed, so drop an "auto" window (and
+    # refuse an explicit one) on the catalogs it is handed too, not only on
+    # the ones the states are built from.
+    catalog_pe = _without_auto_kernel_window(catalog_pe)
+    catalog_sel = _without_auto_kernel_window(catalog_sel)
     require_shared_host_view(catalog_pe, host_marks_pe, catalog_sel, host_marks_sel)
 
     state_pe = build_marked_incomplete_catalog_prior_state(
