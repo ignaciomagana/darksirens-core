@@ -173,3 +173,24 @@ def test_generic_builder_refuses_non_completion_state():
             _catalog(),
             object(),
         )
+
+
+@pytest.mark.parametrize("z_depth", (None, 0.25))
+def test_a_nan_missing_host_budget_poisons_every_row(z_depth):
+    # A companion's curves with one NaN row (as a NaN modulation of dN_miss
+    # gives): the row's normaliser used to read as log Z = 0, a finite row
+    # with about e^10 times its neighbours' host density, which no poison
+    # check saw. Every row's log Z is now NaN, as for a failed pin probe, and
+    # so is every sample's prior (the sample weights turn it into -inf).
+    catalog, params = _catalog(), _params(z_depth)
+    curves = completion_curves(COSMO, params, catalog, build_observed_density_cache(catalog))
+    clean = build_incomplete_catalog_prior_state_from_curves(COSMO, params, catalog, curves)
+    assert np.all(np.isfinite(np.asarray(clean.log_Z)))
+    bad = curves._replace(
+        dN_miss=curves.dN_miss.at[1].set(jnp.nan), N_miss=curves.N_miss.at[1].set(jnp.nan)
+    )
+    state = build_incomplete_catalog_prior_state_from_curves(COSMO, params, catalog, bad)
+    assert np.all(np.isnan(np.asarray(state.log_Z)))
+    z = jnp.asarray([0.1, 0.1, 0.2])
+    rows = jnp.asarray([0, 1, 2], dtype=jnp.int32)
+    assert np.all(np.isnan(np.asarray(eval_incomplete_catalog_prior_state_vmap(z, rows, state, catalog))))

@@ -461,20 +461,22 @@ def field_mixture_log_likelihood(
         pieces.append(_CatalogPieces(kernels, pin_ok, curves, obs, obs_poison))
 
     # A failed pin probe, galaxy list or kernel window poisons its catalog's
-    # normaliser with NaN. With two or more catalogs the mixture's logsumexp
-    # would drop that branch as a non-finite term and return a finite value
-    # from the others, so the poison of every branch is also added to every
-    # term (0 when nothing failed; NaN makes every term non-finite and the
-    # likelihood -inf). Static: only when some catalog carries such a check,
-    # so a mixture without one keeps its program.
-    may_poison = n >= 2 and any(
+    # normaliser with NaN, and so does a NaN missing-host budget (a
+    # missing-host extension's density). With two or more catalogs the
+    # mixture's logsumexp would drop that branch as a non-finite term and
+    # return a finite value from the others, so the poison of every branch is
+    # also added to every term (0 when nothing failed; NaN makes every term
+    # non-finite and the likelihood -inf). Static: only when some catalog
+    # carries such a check or an extension shapes the missing hosts, so a
+    # mixture without either keeps its program.
+    may_poison = n >= 2 and (extension is not None or any(
         piece.pin_ok is not None
         or getattr(piece.kernels, "layout_ok", None) is not None
         or getattr(piece.kernels, "window_ok", None) is not None
         or component.full_pin is not None
         or getattr(component.full, "galaxy_index", None) is not None
         for piece, component in zip(pieces, components)
-    )
+    ))
 
     def evaluate(member):
         views = []

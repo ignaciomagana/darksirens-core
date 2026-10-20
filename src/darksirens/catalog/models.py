@@ -133,7 +133,8 @@ def assemble_incomplete_catalog_prior_state(
     states from it (for example one per missing-host curve of a member
     ensemble): the finite-depth observed count, the row normaliser
     ``N_obs + N_miss`` and the poison of a failed pin probe (``pin_ok``
-    ``False``), galaxy list or kernel window.  ``pin_ok`` is ``None`` without
+    ``False``), galaxy list or kernel window, or of a NaN row normaliser
+    (every row's ``log_Z`` is then NaN).  ``pin_ok`` is ``None`` without
     a pin.
     """
 
@@ -142,6 +143,10 @@ def assemble_incomplete_catalog_prior_state(
     log_Nobs = jnp.where(Nobs > 0.0, jnp.log(jnp.maximum(Nobs, 1.0e-300)), -jnp.inf)
     Z = Nobs + curves.N_miss
     log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
+    # A NaN missing-host budget (from a companion's curves or a missing-host
+    # extension's density) reads as log Z = 0 above: a finite row with an
+    # inflated density. It poisons every row instead, as a failed pin does.
+    log_Z = log_Z + jnp.where(jnp.any(jnp.isnan(Z)), jnp.nan, 0.0)
     if pin_ok is not None:
         log_Z = log_Z + jnp.where(pin_ok, 0.0, jnp.nan)
     if kernels.layout_ok is not None:
