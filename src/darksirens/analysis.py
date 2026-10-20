@@ -291,7 +291,11 @@ class ParameterPlan:
     copy of those parameters (labels ``<label>_c{k}``); ``()`` (the default)
     when every catalog shares the one population. ``n_catalog_population``
     counts those coordinates, which sit after the catalogs' survey blocks and
-    before the mixture weights.
+    before the mixture weights. ``angular_model`` records ``model(...,
+    angular=...)``: two angular models can declare the same coordinates
+    (``"sphere_gp_z"`` and ``"overdensity_gp"`` do), and
+    :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
+    records the name of those.
     """
 
     labels: tuple[str, ...]
@@ -316,6 +320,7 @@ class ParameterPlan:
     catalog_model: str = ""
     catalog_population: tuple[tuple[int, tuple[str, ...]], ...] = ()
     n_catalog_population: int = 0
+    angular_model: str = "isotropic"
 
     @property
     def catalog_model_settings(self) -> dict:
@@ -1332,7 +1337,9 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     estimator, the default before 2026-10-10, and the inert value of every
     analysis without a count-ratio catalog), so the record of every such
     analysis is unchanged. The default count ratio since 2026-10-10 is
-    ``"pooled"``, so a default count-ratio plan records it.
+    ``"pooled"``, so a default count-ratio plan records it. A conditional
+    complete catalog records its ``empty_policy`` only when it is the
+    opt-in ``"volume"``.
     """
     pooled = (
         {}
@@ -1363,6 +1370,13 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
                 for c in redshift.components
             ],
         })
+    if isinstance(redshift, CompleteCatalogRedshift):
+        # Only the opt-in policy enters, so a default complete plan is unchanged.
+        if redshift.empty_policy == "zero":
+            return ""
+        return _canonical_json(
+            {"completeness": "complete", "empty_policy": redshift.empty_policy}
+        )
     selection = getattr(redshift, "selection", None)
     if selection is None:
         if not pooled:
@@ -1463,7 +1477,13 @@ def model(
 
     ``empty_policy`` is legal only with ``completeness='complete'`` and selects
     the galaxy-free-row branch of that likelihood: ``'zero'`` (the default) or
-    the ``'volume'`` robustness approximation.
+    the ``'volume'`` robustness approximation. The plan records ``'volume'``
+    (``ParameterPlan.catalog_model``) and a run fingerprint changes with it.
+
+    ``ParameterPlan.angular_model`` records ``angular``. The two angular
+    models whose coordinates are the same (``'sphere_gp_z'`` and
+    ``'overdensity_gp'``) enter a run fingerprint by name; every other
+    model is told apart by its coordinates.
 
     ``n0_units`` is legal only for an incomplete-catalog analysis and sets the
     unit of ``log10n0``. ``'physical'`` (the default, the frozen legacy
@@ -2001,6 +2021,7 @@ def model(
         catalog_model=_catalog_model_record(redshift, labels, kernel_pin),
         catalog_population=catalog_population,
         n_catalog_population=n_catalog_population,
+        angular_model=str(angular),
     )
     return Analysis(
         cosmology=cosmology,
