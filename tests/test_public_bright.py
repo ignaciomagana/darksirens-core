@@ -188,3 +188,59 @@ def test_bright_binding_requires_one_counterpart_per_event():
     )
     with pytest.raises(ValueError, match="one counterpart per GW event"):
         bind_analysis(analysis, events=events, injections=injections)
+
+
+@pytest.mark.parametrize("pixel_type", [int, np.int64])
+def test_bright_gate_keeps_pixel_ids_above_the_int32_range(pixel_type):
+    """At ``counterpart_nside = 65536`` a southern RING id exceeds 2**31. The
+    ids were stored as int32, so a NumPy int64 counterpart pixel (what
+    ``ang2pix_ring`` returns) never matched and every PE sample was gated to
+    ``-inf``; a Python int matched only by wrapping modulo 2**32."""
+    nside = 65536
+    events, injections = _stores()
+    pixel = ang2pix_ring(nside, events.columns["ra"][0], events.columns["dec"][0])
+    assert int(pixel) > np.iinfo(np.int32).max
+    cp = ds.Counterpart(z=0.105, dz=0.02, pixel=pixel_type(pixel))
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=(cp,),
+        counterpart_nside=nside,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+    ids = np.asarray(bound.catalog.unique_pixels)
+    assert ids.dtype == np.int64
+    np.testing.assert_array_equal(
+        ids[np.asarray(bound.gw_pe.pixels)],
+        ang2pix_ring(nside, events.columns["ra"], events.columns["dec"]),
+    )
+    value = float(bound(np.array([67.74])))
+    assert np.isfinite(value)
+    # The gate still compares: a counterpart in the next pixel, which no PE
+    # sample shares, leaves the event no support.
+    elsewhere = ds.Counterpart(z=0.105, dz=0.02, pixel=pixel_type(pixel) + 1)
+    other = bind_analysis(
+        ds.model(
+            cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+            population=_fixed_pop(),
+            counterparts=(elsewhere,),
+            counterpart_nside=nside,
+        ),
+        events=events,
+        injections=injections,
+    )
+    assert float(other(np.array([67.74]))) == -np.inf
+
+
+def test_bright_gate_keeps_int32_pixel_ids_on_small_skies():
+    events, injections = _stores()
+    nside = 8192
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=(_counterpart(events, nside=nside),),
+        counterpart_nside=nside,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+    assert np.asarray(bound.catalog.unique_pixels).dtype == np.int32
+    assert np.isfinite(float(bound(np.array([67.74]))))

@@ -124,7 +124,23 @@ def _sky_vectors(columns):
     return cos_dec * np.cos(ra), cos_dec * np.sin(ra), np.sin(dec)
 
 
-def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
+def _pixel_ids(unique_pixels, nside: int | None = None):
+    """Global HEALPix ids as int32, or as int64 where an id may not fit.
+
+    A RING id reaches ``12 nside^2 - 1``, above the int32 range from
+    ``nside = 13378``: such ids (or, given ``nside``, any id of that sky) are
+    kept in int64, so the bright sky gate compares the real id with the
+    counterpart's. Every smaller sky keeps the int32 ids, and its program.
+    """
+    ids = np.asarray(unique_pixels, dtype=np.int64)
+    limit = np.iinfo(np.int32).max
+    wide = (nside is not None and 12 * int(nside) ** 2 - 1 > limit) or (
+        ids.size > 0 and int(ids.max()) > limit
+    )
+    return jnp.asarray(ids, dtype=jnp.int64 if wide else jnp.int32)
+
+
+def _jax_catalog(catalog: GalaxyCatalog, *, nside: int | None = None) -> GalaxyCatalog:
     return GalaxyCatalog(
         apix=jnp.asarray(catalog.apix),
         zgals=jnp.asarray(catalog.zgals),
@@ -134,7 +150,7 @@ def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
         unique_pixels=(
             None
             if catalog.unique_pixels is None
-            else jnp.asarray(catalog.unique_pixels, dtype=jnp.int32)
+            else _pixel_ids(catalog.unique_pixels, nside)
         ),
         galaxy_index=(
             None
@@ -167,7 +183,9 @@ def _bright_pixel_view(nside: int, global_pe):
         ngals=np.zeros(n_rows, dtype=np.int32),
         unique_pixels=unique_pixels,
     )
-    return _jax_catalog(catalog), np.asarray(sample_to_row, dtype=np.int32)
+    # The counterpart's own pixel may be above the int32 range even when no
+    # PE sample's is, so the id width follows the sky's.
+    return _jax_catalog(catalog, nside=nside), np.asarray(sample_to_row, dtype=np.int32)
 
 
 def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
