@@ -4,11 +4,13 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from darksirens.catalog.redshift import (
     SIGMA_EFF_FLOOR,
     build_catalog_kernel_state,
     eval_log_catalog_prior_state_vmap,
+    log_catalog_prior,
     log_catalog_prior_vmap,
     log_galaxy_measure_grid,
 )
@@ -111,6 +113,31 @@ def test_state_and_direct_scalar_kernel_agree_before_underflow_edge():
     direct = np.asarray(log_catalog_prior_vmap(z, row, COSMO, params, cat))
     cached = np.asarray(eval_log_catalog_prior_state_vmap(z, row, state, cat))
     np.testing.assert_allclose(cached, direct, rtol=1e-12, atol=0.0)
+
+
+def test_direct_kernel_refuses_a_survey_depth():
+    # The direct prior has no depth (legacy's has none either). It used to
+    # drop params.z_depth without a word: at z_depth = 0.4 it was 1.08 nats
+    # off the state evaluator below the depth and finite above it.
+    cat = _catalog()
+    params = CatalogParameters(delta=0.6, sigma_kde=0.02, z_depth=0.4)
+    z = jnp.asarray([0.03, 0.19, 0.55])
+    row = jnp.zeros(z.shape, dtype=jnp.int32)
+    with pytest.raises(ValueError, match="without a survey depth"):
+        log_catalog_prior_vmap(z, row, COSMO, params, cat)
+    with pytest.raises(ValueError, match="without a survey depth"):
+        log_catalog_prior(z[0], row[0], COSMO, params, cat)
+    untruncated = params._replace(z_depth=None)
+    np.testing.assert_allclose(
+        np.asarray(log_catalog_prior_vmap(z, row, COSMO, untruncated, cat)),
+        np.asarray(
+            eval_log_catalog_prior_state_vmap(
+                z, row, build_catalog_kernel_state(COSMO, untruncated, cat), cat
+            )
+        ),
+        rtol=1e-12,
+        atol=0.0,
+    )
 
 
 def test_state_evaluator_preserves_legacy_far_tail_underflow():

@@ -1660,6 +1660,16 @@ def _log_catalog_prior_impl(
     params: CatalogParameters,
     catalog: GalaxyCatalog,
 ):
+    if params.z_depth is not None:
+        # The legacy direct prior has no depth (legacy passes it to the state
+        # builder only); refuse one rather than return the untruncated kernel.
+        raise ValueError(
+            "log_catalog_prior and log_catalog_prior_vmap evaluate the catalog "
+            "kernel without a survey depth, and params.z_depth is "
+            f"{params.z_depth!r}: for a depth-limited catalog use "
+            "build_catalog_kernel_state with eval_log_catalog_prior_state, or pass "
+            "params._replace(z_depth=None) for the untruncated kernel"
+        )
     zs = catalog.zgals[row]
     dzs = catalog.dzgals[row]
     ws = catalog.wgals[row]
@@ -1688,7 +1698,13 @@ def log_catalog_prior(
     catalog: GalaxyCatalog,
     distance_table=None,
 ):
-    """Direct scalar catalog prior; empty rows return exactly ``-inf``."""
+    """Direct scalar catalog prior; empty rows return exactly ``-inf``.
+
+    It has no survey depth: ``params.z_depth`` must be ``None`` (a depth
+    raises ``ValueError``; :func:`eval_log_catalog_prior_state` on a state
+    from :func:`build_catalog_kernel_state` evaluates a depth-limited
+    catalog).
+    """
 
     return _log_catalog_prior_impl(z, row, cosmo, params, catalog)
 
@@ -1702,7 +1718,10 @@ def log_catalog_prior_vmap(
     catalog: GalaxyCatalog,
     distance_table=None,
 ):
-    """Distance-table-aware vector boundary over paired ``(z, row)`` values."""
+    """Distance-table-aware vector boundary over paired ``(z, row)`` values.
+
+    As :func:`log_catalog_prior`, ``params.z_depth`` must be ``None``.
+    """
 
     return vmap(
         lambda zi, ri: _log_catalog_prior_impl(zi, ri, cosmo, params, catalog)
