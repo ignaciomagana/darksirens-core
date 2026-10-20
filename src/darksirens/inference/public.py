@@ -41,6 +41,101 @@ _SAMPLER_DEFAULTS = {
 }
 
 
+# Sampler options a backend reads besides _SAMPLER_DEFAULTS (and TinyNS's
+# ``tinyns_<setting>`` names, see _known_sampler_options). The backends read
+# options with getattr and a default, so infer refuses every other keyword:
+# a misspelt or foreign name would otherwise be dropped without a word.
+_BACKEND_OPTIONS = frozenset({
+    # The resume gate of a target run (run_fingerprint).
+    "resume_force",
+    # Dynesty, and the directory of its optional diagnostics.
+    "dynesty_walks",
+    "dynesty_diagnostics",
+    "run_dir",
+    "save_path",
+    # NumPyro NUTS.
+    "nuts_init_tries",
+    "nuts_init_seed_offset",
+    "nuts_target_accept",
+    "nuts_max_tree_depth",
+    "nuts_warmup",
+    "nuts_samples",
+    "nuts_chains",
+    "nuts_chain_method",
+    # TinyNS.
+    "tinyns_preset",
+})
+
+# infer's own keywords, offered as close matches of an unknown one.
+_INFER_KEYWORDS = (
+    "events",
+    "injections",
+    "sampler",
+    "selection_neff_guard",
+    "max_likelihood_variance",
+    "sel_batch_size",
+    "pe_event_block",
+    "compute_dtype",
+    "guard_report",
+)
+
+# Names another darksirens surface spells differently.
+_OPTION_HINTS = {
+    "selection_neff_soft_guard": (
+        "this is bind_analysis's name for the soft guard; ds.infer takes "
+        "selection_neff_guard='soft' (for an ordinary analysis: an "
+        "InferenceTarget's likelihood is built with the guard instead)"
+    ),
+    "resume": (
+        "a command-line name; ds.infer resumes the checkpoint named by "
+        "resume_from_resolved (or tinyns_resume_from)"
+    ),
+    "resume_from": (
+        "ds.infer resumes the checkpoint named by resume_from_resolved (or "
+        "tinyns_resume_from)"
+    ),
+    "checkpoint_interval": (
+        "a command-line name; ds.infer checkpoints with "
+        "checkpoint_interval_seconds and checkpoint_file_resolved"
+    ),
+}
+
+
+def _known_sampler_options():
+    from darksirens.inference.tinyns_config import BASE_DEFAULTS
+
+    return (
+        set(_SAMPLER_DEFAULTS)
+        | _BACKEND_OPTIONS
+        | {f"tinyns_{name}" for name in BASE_DEFAULTS}
+    )
+
+
+def _check_sampler_options(options):
+    """Refuse a keyword that neither infer nor any sampler backend reads."""
+    import difflib
+
+    known = _known_sampler_options()
+    unknown = sorted(name for name in options if name not in known)
+    if not unknown:
+        return
+    candidates = sorted(known | set(_INFER_KEYWORDS))
+    notes = []
+    for name in unknown:
+        hint = _OPTION_HINTS.get(name)
+        if hint is None:
+            close = difflib.get_close_matches(name, candidates, n=1)
+            hint = (
+                f"did you mean {close[0]!r}?"
+                if close
+                else "no sampler backend reads it"
+            )
+        notes.append(f"{name!r}: {hint}")
+    raise TypeError(
+        "ds.infer got unknown keyword argument(s): " + "; ".join(notes)
+    )
+
+
 def _sampler_namespace(sampler, options):
     """Map public sampler keywords onto the frozen attribute-based contract."""
     values = dict(_SAMPLER_DEFAULTS)
@@ -347,7 +442,10 @@ def infer(
     Ordinary analyses retain the existing API and require both standardized GW
     stores. An :class:`InferenceTarget` already owns its likelihood, so stores
     and the five likelihood options below must be omitted. Backend-specific
-    options keep their existing names.
+    options keep their existing names. A keyword that neither ``infer`` nor
+    any sampler backend reads (a misspelling, or another surface's name such
+    as ``bind_analysis``'s ``selection_neff_soft_guard``) raises
+    ``TypeError`` before anything is bound or run.
 
     ``sampler`` is ``'dynesty'``, ``'tinyns'`` or ``'numpyro'``. ``None``
     (the default) is ``'dynesty'``, the optional extra
@@ -394,6 +492,7 @@ def infer(
     must see the request first because a zero-free target has exact evidence and
     returns before any backend validation or optional-backend import.
     """
+    _check_sampler_options(sampler_options)
     # ``auto`` is soft for NumPyro only, so the default (Dynesty) resolves
     # exactly as None does; the default is resolved after the argument checks.
     soft_guard = _resolve_selection_neff_soft_guard(selection_neff_guard, sampler)
