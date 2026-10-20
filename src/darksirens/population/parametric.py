@@ -697,9 +697,11 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         conditional below on the low-mass pair); the ``valid`` mask in
         ``log_p_pop`` remains as a backstop for samplers that build their own
         prior (numpyro) and for overridden bounds.  That backstop is a
-        SUPPORT statement only -- it cannot restore a density -- so a numpyro
-        run of this model samples the uniform triangle, not Table 5's
-        conditional (``run_sampler`` says so at startup).
+        SUPPORT statement only -- it cannot restore a density -- so the
+        numpyro backend does not lean on it for the low-mass pair: it samples
+        ``m2_low ~ U(lo, m1_low)`` as a dependent site, which is Table 5's
+        conditional (``run_sampler`` says so at startup), and keeps rejection
+        for the weight simplex only.
 
         The low-mass pair uses ``conditional_upper``, NOT ``ordered_le``,
         because Table 5 quotes a CONDITIONAL prior --

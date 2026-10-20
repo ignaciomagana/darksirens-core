@@ -1140,14 +1140,23 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
                     f"(interval [{lo}, {hi}]); fix {free!r} as well or move "
                     "the fixed value"
                 )
-        warnings.warn(
+        message = (
             f"joint prior constraint {kind}{tuple(members)} has fixed "
             f"member(s) {fixed_members}; the sampled member(s) keep its "
             "likelihood-side rejection (the invalid region keeps zero "
-            "likelihood, and logZ carries the log prior-fraction offset).",
-            RuntimeWarning,
-            stacklevel=4,
+            "likelihood, and logZ carries the log prior-fraction offset)."
         )
+        if kind == "conditional_upper" and members[0] in fixed:
+            # Fixing the upper member leaves U(lo, fixed): the declared
+            # conditional. Fixing the bounded one does not.
+            message += (
+                f" Fixing the bounded member {members[0]!r} also changes the "
+                f"prior on {members[1]!r}: rejection keeps it flat above the "
+                "fixed value, where the declared joint prior conditioned on "
+                "that value falls as 1/(value - lower bound), so the posterior "
+                "shape differs, not only logZ."
+            )
+        warnings.warn(message, RuntimeWarning, stacklevel=4)
 
 
 def per_catalog_population_label(label: str, catalog_number: int) -> str:
