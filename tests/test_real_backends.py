@@ -315,6 +315,30 @@ def test_numpyro_enforces_a_target_s_joint_priors(capsys):
     assert np.ptp(samples[:, 0]) > 0.5 and np.ptp(samples[:, 5]) > 0.5
 
 
+def test_numpyro_lognormal_prior_stays_inside_its_bounds():
+    """The lognormal site's support was (0, inf): NUTS left [1, 10] on half the
+    draws (0.04 to 25) on the untruncated density, median 1.02."""
+    pytest.importorskip("numpyro")
+    import jax.numpy as jnp
+    from scipy.stats import truncnorm
+
+    plan = ds.ParameterPlan(
+        labels=("x",), lower=(1.0,), upper=(10.0,),
+        prior_kinds=(("lognormal", 0.0, 1.0),), joint_constraints=(),
+    )
+    target = ds.InferenceTarget(lambda theta: 0.0 * jnp.sum(theta), plan)
+    result = ds.infer(
+        target, sampler="numpyro", show_progress=False, seed=1,
+        nuts_warmup=300, nuts_samples=2000,
+    )
+    x = np.asarray(result["samples"])[:, 0]
+    # exp(log 10) is 10 to an ulp, the nested transform's top edge too.
+    assert np.all(x >= 1.0) and np.all(x <= 10.0 * (1.0 + 1e-12))
+    # The flat likelihood leaves the prior: lognormal(0, 1) truncated to [1, 10].
+    median = float(np.exp(truncnorm.median(0.0, np.log(10.0))))
+    assert abs(np.median(x) - median) < 0.15, (np.median(x), median)
+
+
 def test_dynesty_diagnostics_names_the_extra_when_matplotlib_is_missing(monkeypatch):
     # `pip install darksirens[dynesty]` now supplies matplotlib; an environment
     # that lacks it must say which extra to install, not fail on a bare import.

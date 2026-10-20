@@ -77,17 +77,27 @@ def run_numpyro(
         if kind == "lognormal":
             loc = 0.0 if kloc is None else float(kloc)
             sc = 1.0 if kscale is None else float(kscale)
+            # The nested transform's floor, so both backends draw one prior.
+            log_lo = jnp.log(jnp.clip(lower[i], 1e-300, None))
+            log_hi = jnp.log(jnp.clip(upper[i], 1e-300, None))
             base = dist.TruncatedNormal(
                 loc=loc,
                 scale=sc,
-                low=jnp.log(lower[i]),
-                high=jnp.log(upper[i]),
+                low=log_lo,
+                high=log_hi,
             )
+            # The truncation must also be the site's support: with
+            # ExpTransform's default real domain the support is (0, inf),
+            # NUTS maps it with exp, and the truncated base keeps a finite
+            # log_prob outside [log_lo, log_hi] (no validate_args), so the
+            # chain left [lower, upper] on the untruncated density.
             return numpyro.sample(
                 name,
                 dist.TransformedDistribution(
                     base,
-                    dist.transforms.ExpTransform(),
+                    dist.transforms.ExpTransform(
+                        domain=dist.constraints.interval(log_lo, log_hi)
+                    ),
                 ),
             )
         if kind == "beta":
