@@ -619,6 +619,8 @@ def selection_budget_audit(
     n_occupied=None,
     n_pix_total=None,
     distance_table=None,
+    budget: str = "frozen",
+    row_fraction=None,
 ) -> dict[str, float]:
     """Host-side check of the selection missing budget against the catalog counts.
 
@@ -630,17 +632,33 @@ def selection_budget_audit(
 
         N_obs_total  ~  n_occupied * integral C_sel(z) dN_exp(z) dz,
 
-    at the given ``(cosmo, params, model)``.  A ``model_over_observed`` far from
-    1 means the budget amplitude disagrees with the catalog it completes and the
-    in-/out-of-catalog odds are set by the ``n0`` prior, not by the data.
+    at the given ``(cosmo, params, model)``.
 
     It is a diagnostic only: nothing here feeds any likelihood value.  The
-    definitions are those of the frozen legacy ``selection_budget_audit``
-    (single-curve branch): ``C_sel`` is the raw clipped selection curve, not
-    relaxed above ``z_depth``, and the integral runs over the whole redshift
-    grid.  Defaults: ``N_obs_total`` is the catalog's real-galaxy count,
-    ``n_occupied`` the number of rows holding at least one galaxy, and
-    ``n_pix_total`` the whole sky, ``round(4 pi / apix)``.
+    default ``budget="frozen"`` keeps the definitions of the frozen legacy
+    ``selection_budget_audit`` (single-curve branch): ``C_sel`` is the raw
+    clipped selection curve, not relaxed above ``z_depth``, and the integral
+    runs over the whole redshift grid.  That is not the count the likelihood
+    predicts once the catalog has a ``z_depth`` (its completeness is 0 above
+    it) or a ``row_fraction``, so a ``model_over_observed`` far from 1 then
+    does not mean the budget disagrees with the catalog: with
+    ``GaussianMagnitudeSelection(22, -20.2, 1)`` and ``z_depth=0.25`` it is
+    18.6 times the likelihood's own prediction, and a table of the same curve
+    that ends at the depth gives the likelihood's value.
+
+    ``budget="likelihood"`` (opt-in) predicts the count the likelihood
+    implies: ``C_sel`` is 0 above ``z_depth``, the footprint is the summed
+    ``row_fraction`` (one value per catalog row, in [0, 1]) when one is given
+    and ``n_occupied`` otherwise, and the default ``N_obs_total`` is the
+    likelihood's observed count, each row's galaxy count times its catalog
+    kernel's mass below the depth.  Under it a ``model_over_observed`` far
+    from 1 means the budget amplitude disagrees with the catalog it completes
+    and the in-/out-of-catalog odds are set by the ``n0`` prior, not by the
+    data.  ``row_fraction`` is refused with ``budget="frozen"``.
+
+    Defaults: ``N_obs_total`` is the catalog's real-galaxy count (see above
+    for ``"likelihood"``), ``n_occupied`` the number of rows holding at least
+    one galaxy, and ``n_pix_total`` the whole sky, ``round(4 pi / apix)``.
 
     Returns a flat float dict (legacy key in brackets):
 
@@ -656,22 +674,44 @@ def selection_budget_audit(
     """
 
     validate_catalog_selection(model)
+    if budget not in ("frozen", "likelihood"):
+        raise ValueError(f"budget must be 'frozen' or 'likelihood', got {budget!r}")
+    likelihood = budget == "likelihood"
+    if row_fraction is not None and not likelihood:
+        raise ValueError(
+            "row_fraction applies only to budget='likelihood': the frozen budget "
+            "has no row coverage"
+        )
     ng = np.asarray(catalog.ngals).reshape(-1)
-    if N_obs_total is None:
-        N_obs_total = int(ng.sum())
     if n_occupied is None:
         n_occupied = int((ng > 0).sum())
+    footprint = float(n_occupied)
+    if row_fraction is not None:
+        from darksirens.selection.footprint import validate_selection_row_fraction
+
+        footprint = float(validate_selection_row_fraction(row_fraction, ng.size).sum())
     if n_pix_total is None:
         n_pix_total = int(np.round(4.0 * np.pi / float(np.asarray(catalog.apix))))
-    N_obs_total = float(N_obs_total)
 
     with bound_distance_table(distance_table):
         state = build_completion_state(cosmo, params, catalog)
         C = jnp.clip(_selection_curve_impl(zgrid, cosmo, model), 0.0, 1.0)
+        if likelihood and params.z_depth is not None:
+            C = jnp.where(zgrid <= params.z_depth, C, 0.0)
         obs_per_pix = float(jnp.trapezoid(C * state.dN_exp, zgrid))
         exp_per_pix = float(jnp.trapezoid(state.dN_exp, zgrid))
+        if N_obs_total is None and likelihood and params.z_depth is not None:
+            from darksirens.catalog.redshift import build_catalog_kernel_state
 
-    model_footprint = float(n_occupied) * obs_per_pix
+            depth_mass = np.exp(
+                np.asarray(build_catalog_kernel_state(cosmo, params, catalog).log_depth_mass)
+            )
+            N_obs_total = float(np.sum(ng * np.broadcast_to(depth_mass, ng.shape)))
+    if N_obs_total is None:
+        N_obs_total = int(ng.sum())
+    N_obs_total = float(N_obs_total)
+
+    model_footprint = footprint * obs_per_pix
     model_sky = float(n_pix_total) * obs_per_pix
     N_exp_sky = float(n_pix_total) * exp_per_pix
     return {
