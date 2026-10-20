@@ -37,8 +37,17 @@ branch instead of multiplying the collapsed mixture:
     log w = logsumexp_k [ log w_k + log p_pop(theta | L_k) + log n_k - log Z_k ]
             - log J - log pi,
 
-for the PE samples and the injections alike, so the expected detected
-fraction is ``mu = sum_k w_k alpha_k(L_k)``.
+for the PE samples and the injections alike, so the selection integral is
+``mu = sum_k w_k alpha_k(L_k)`` with ``alpha_k`` the integral of ``p_det``
+against ``p_pop(. | L_k) n_k / Z_k``. Neither is a fraction: the
+population's redshift factor (``(1 + z)^(gamma - 1)``, or the
+Madau-Dickinson ``psi(z) / (1 + z)``) is not normalised over redshift, so
+``alpha_k`` can exceed 1. ``w_k`` is catalog k's share of the host density
+(each host counted alike); its share of the mergers, or of the detections,
+also carries the population's redshift factor integrated over its host
+density, which differs between branches whose populations differ (a
+per-catalog ``gamma`` or Madau-Dickinson parameter, for example), so it is
+not ``w_k`` there.
 
 :func:`field_mixture_log_likelihood` evaluates it from bind-time operands
 (:class:`CatalogMixtureOperands`); ``ds.model(..., catalog_sky_weighting=

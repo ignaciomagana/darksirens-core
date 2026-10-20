@@ -1742,10 +1742,17 @@ def model(
     weights (the frozen reference's order), catalog by catalog, each in model
     order. A joint prior constraint of the model whose members are all
     copied applies to the copies too. The selection term uses the same
-    per-catalog kernel, so the expected detected fraction is ``mu = sum_k
-    w_k alpha_k(L_k)``, ``alpha_k`` the detectable fraction of branch k's
-    population over branch k's host density (``p_det`` integrated against
-    ``p_pop(. | L_k) n_k / Z_k``), estimated from the same injections. The
+    per-catalog kernel, so the selection integral is ``mu = sum_k w_k
+    alpha_k(L_k)``, ``alpha_k`` the integral of ``p_det`` against ``p_pop(.
+    | L_k) n_k / Z_k``, estimated from the same injections. Neither is a
+    fraction: the population's redshift factor (``(1 + z)^(gamma - 1)``, or
+    the Madau-Dickinson ``psi(z) / (1 + z)``) is not normalised over
+    redshift, so ``alpha_k`` can exceed 1. The weight ``fcat_k`` is catalog
+    k's share of the host density (each host counted alike), not its share of
+    the mergers: that also carries each branch's redshift factor integrated
+    over its host density, so with a copied rate parameter (``gamma``, or a
+    Madau-Dickinson parameter) the merger share of catalog k at fixed
+    ``fcat_k`` moves with it. The
     plan records the blocks (``ParameterPlan.catalog_population``) and a run
     fingerprint changes with them; ``ds.decode_parameters`` returns the K
     vectors as ``catalog.populations``. Without it (the default) one
