@@ -83,8 +83,10 @@ def _rewarm_default_grids():
 @pytest.fixture(autouse=True)
 def _restore_grid_settings():
     saved = U._NORMALIZATION_GRID_SETTINGS
+    saved_sizing = U._PAIRING_SIZING
     yield
     U._NORMALIZATION_GRID_SETTINGS = saved
+    U._PAIRING_SIZING = saved_sizing
     U._clear_grid_caches()
     _rewarm_default_grids()
 
@@ -393,13 +395,14 @@ def test_undersized_grid_request_cannot_inflate_the_edge_cell_density():
 
 
 # ---------------------------------------------------------------------------
-# (6) PHY-5: the opt-in pairing grid must be sized to the SELECTED model's m1
+# (6) PHY-5: the opt-in pairing grid is sized to the SELECTED model's m1
 #     support.  gwtc5_fiducial_bpl2peaks supports m1 up to a FIXED 300-Msun edge
-#     -- above the historical 200-node ceiling -- so a grid capped at 200 silently
-#     clamps (jnp.interp) the pairing normaliser for every valid 200 < m1 <= 300
-#     sample.  The registry exposes the support (population_m1_support_max); the
-#     CLI sizes the grid to it (size_pairing_grid_to_support) and validates
-#     coverage (assert_pairing_grid_covers_support).
+#     -- above the historical 200-node ceiling -- so a grid capped at 200 used to
+#     clamp (jnp.interp) the pairing normaliser for every valid 200 < m1 <= 300
+#     sample; those samples now take the per-sample rule.  The registry exposes
+#     the support (population_m1_support_max); ensure_pairing_grid_covers sizes
+#     the grid to it (size_pairing_grid_to_support) and validates coverage
+#     (assert_pairing_grid_covers_support).
 # ---------------------------------------------------------------------------
 
 GWTC5 = get_model("gwtc5_fiducial_bpl2peaks")
@@ -433,8 +436,9 @@ def test_population_m1_support_max_values():
 def test_gwtc5_pairing_grid_sized_agrees_over_full_support():
     """The FIX.  With the pairing grid sized to the model's 300-Msun support the
     grid path matches the exact per-sample q-integration across the WHOLE m1 =
-    190..300 range; left at the pre-fix 200 ceiling the SAME grid clamps badly
-    above 200.
+    190..300 range.  Left at the 200 ceiling, the samples above it take the
+    per-sample rule and agree too; jnp.interp used to clamp them to the m1 = 200
+    normaliser (0.41 nats off here).
 
     A SMOOTH secondary-mass taper (delta_m2=0.5) is used so the pairing
     normaliser N(m1) is smooth: it isolates the clamp defect from the unrelated
@@ -456,12 +460,14 @@ def test_gwtc5_pairing_grid_sized_agrees_over_full_support():
     fin = np.isfinite(exact)
     assert fin.sum() > 1000
 
-    # Pre-fix: the historical 200-node ceiling clamps every 200 < m1 <= 300 sample.
+    # The 200 ceiling: the 200 < m1 <= 300 samples lie above the grid and take
+    # the per-sample rule instead of the clamped m1 = 200 normaliser.
     _set_pairing_grid(2048, m_hi=200.0)
     unsized = lp()
     m1n = np.asarray(m1)
     hi = fin & (m1n > 200.0)
-    assert np.abs(unsized[hi] - exact[hi]).max() > 0.1, "expected large pre-fix clamp error"
+    assert hi.sum() > 1000
+    assert np.abs(unsized[hi] - exact[hi]).max() < 1.0e-6
 
     # Post-fix: size the grid to the model support (exactly what the CLI does).
     _set_pairing_grid(2048, m_hi=200.0)
@@ -473,22 +479,14 @@ def test_gwtc5_pairing_grid_sized_agrees_over_full_support():
     assert max_err < 1.0e-3, max_err
 
 
-def test_gwtc5_pairing_grid_clamp_error_reproduces_phy5():
-    """Reproduces PHY-5 with the instruction's exact adverse params (beta_q=-2,
-    m2_low=5, delta_m2=0): at the pre-fix 200 ceiling a valid sample at m1=299 --
-    inside the 300-Msun support -- silently uses the m1=200 normaliser, a
-    log-density error that grows toward the top of the support.  Sizing the grid
-    to the support removes the clamp.
-
-    The 2026-08-28 support-edge fix SOFTENS this failure without removing it: an
-    out-of-grid sample inherits the end node's trust flag, and for this adverse
-    beta_q = -2 the node normalisers at the top of the grid are noisy enough
-    (their own second difference is 3e-2, far outside pairing_edge_tol) that the
-    sample falls onto the per-sample Gauss-Legendre rule at its OWN m1 instead.
-    Measured at m1 = 299: 0.554 nats before the fix, 0.023 after.  The bound
-    below is loosened accordingly -- the point of the test is that an undersized
-    ceiling is still WRONG and that sizing the grid fixes it, which is what
-    assert_pairing_grid_covers_support enforces."""
+def test_gwtc5_undersized_pairing_grid_does_not_clamp_phy5():
+    """PHY-5 with the instruction's adverse params (beta_q=-2, m2_low=4,
+    delta_m2=0): at a 200 Msun ceiling, valid samples at m1 = 201 / 250 / 299
+    -- inside the 300-Msun support -- used the m1=200 normaliser, 0.005 / 0.23 /
+    0.41 nats off and growing toward the top of the support.  They now lie
+    above the grid and take the per-sample rule, so an undersized ceiling costs
+    no accuracy; sizing the grid to the support keeps them on the interpolant,
+    which agrees as well."""
     theta = _gwtc5_adverse_theta(0.0)
     m1 = jnp.asarray([201.0, 250.0, 299.0])
     q = jnp.full(3, 0.9)
@@ -503,14 +501,11 @@ def test_gwtc5_pairing_grid_clamp_error_reproduces_phy5():
     assert np.all(np.isfinite(exact))
 
     _set_pairing_grid(2048, m_hi=200.0)
-    clamp_err = np.abs(lp() - exact)
-    assert clamp_err[-1] > 0.01, clamp_err           # m1 = 299, deep in the gap
-    assert clamp_err[-1] > clamp_err[0]              # worse further past 200
+    np.testing.assert_allclose(lp(), exact, rtol=0.0, atol=1.0e-6)
 
     _set_pairing_grid(2048, m_hi=200.0)
     size_pairing_grid_to_support(300.0)
-    sized_err = np.abs(lp() - exact)
-    assert sized_err[-1] < clamp_err[-1]             # sizing removes the clamp
+    np.testing.assert_allclose(lp(), exact, rtol=0.0, atol=1.0e-6)
 
 
 def test_pairing_grid_validation_rejects_undersized_grid():
@@ -658,6 +653,37 @@ def test_pairing_grid_does_not_depend_on_what_was_sized_before():
     ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
     U.configure_normalization_grids(pairing_edge_tol=2.0e-4)
     assert normalization_grid_settings().pairing_m_hi == 200.0
+
+
+def test_held_density_is_not_clamped_after_a_narrower_model_is_resolved():
+    """The grid is sized for the model resolved LAST, so a density held from
+    get_model / pop_model_parser and traced after a narrower model was resolved
+    runs on that model's 200 Msun grid.  Before samples above the grid took the
+    per-sample rule, that put log p_pop 0.09 / 0.21 / 0.38 nats high at m1 =
+    220 / 250 / 299 for gwtc5_fiducial_bpl2peaks (beta_q = -1.9, m2_low = 3.05,
+    delta_m2 = 9.5), with no guard firing."""
+    from darksirens.population.registry import ensure_pairing_grid_covers, pop_model_parser
+
+    theta = np.asarray(get_fixed_population_params("gwtc5_fiducial_bpl2peaks")).copy()
+    theta[_GW_BETA], theta[_GW_M2LOW], theta[_GW_DM2] = -1.9, 3.05, 9.5
+    theta = jnp.asarray(theta)
+    m1 = jnp.asarray([150.0, 199.0, 201.0, 220.0, 250.0, 299.0])
+    q, z, chi = jnp.full(6, 0.5), jnp.full(6, 0.3), jnp.zeros(6)
+
+    def ev(f):
+        return np.asarray(jax.jit(lambda t: f(m1, q, z, chi, t))(theta))
+
+    _set_pairing_grid(None)
+    exact = ev(GWTC5.log_p_pop)
+    assert np.all(np.isfinite(exact))
+    _set_pairing_grid(1024, m_hi=200.0)
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
+    held_model = get_model("gwtc5_fiducial_bpl2peaks").log_p_pop
+    held_parser = pop_model_parser("gwtc5_fiducial_bpl2peaks")
+    pop_model_parser("powerlaw+peak")
+    assert normalization_grid_settings().pairing_m_hi == 200.0
+    for f in (held_model, held_parser):
+        np.testing.assert_allclose(ev(f), exact, rtol=0.0, atol=1.0e-6)
 
 
 def test_binding_fingerprint_records_its_own_pairing_grid():

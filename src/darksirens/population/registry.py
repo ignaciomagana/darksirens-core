@@ -854,8 +854,8 @@ def population_m1_support_max(model) -> float:
     """Largest primary mass at which ``model`` can have non-zero support.
 
     Sizes the opt-in pairing normalisation grid (see
-    :func:`~darksirens.population.utils.size_pairing_grid_to_support`) so it
-    never clamps inside the model's support.  Handles the three model layouts in
+    :func:`~darksirens.population.utils.size_pairing_grid_to_support`) so its
+    interpolant covers the model's support.  Handles the three model layouts in
     the registry: grammar mixtures (``model.mixture.mass_components``), the
     bespoke single-mass models (``model.mass_component`` -- e.g. the GWTC-5
     fiducial BPL+2peaks, which reaches 300 Msun, and the Golomb models), and any
@@ -883,16 +883,19 @@ def ensure_pairing_grid_covers(
 
     ``DARKSIRENS_GW_PAIRING_M1_GRID`` replaces the exact per-sample pairing
     normaliser with an interpolant on a static log grid ending at
-    ``pairing_m_hi`` (default 200), and ``jnp.interp`` CLAMPS above that end.
-    One registered model, ``gwtc5_fiducial_bpl2peaks`` (also reachable under
-    its two legacy alias names), has support to 300 Msun, so with the knob on
-    every 200 < m1 <= 300 sample silently reuses the m1 = 200 normaliser:
-    measured 0.41 in log density, one-signed across the whole high-mass tail,
-    at a sampler-reachable theta.  The two helpers that prevent it
+    ``pairing_m_hi`` (default 200).  One registered model,
+    ``gwtc5_fiducial_bpl2peaks`` (also reachable under its two legacy alias
+    names), has support to 300 Msun.  Samples above the grid take the
+    per-sample normaliser (``PairingModel.__call__``), so they are never
+    clamped; before 2026-10-20 ``jnp.interp`` clamped every 200 < m1 <= 300
+    sample to the m1 = 200 normaliser (measured 0.41 in log density,
+    one-signed across the whole high-mass tail, at a sampler-reachable theta).
+    The two helpers
     (:func:`~darksirens.population.utils.size_pairing_grid_to_support` and
-    :func:`~darksirens.population.utils.assert_pairing_grid_covers_support`) run
-    here, and this runs wherever a likelihood resolves its population model by
-    name: :func:`~darksirens.runtime_binding.bind_analysis` and
+    :func:`~darksirens.population.utils.assert_pairing_grid_covers_support`)
+    size the grid so the interpolant covers the model's support, and run here.
+    This runs wherever a likelihood resolves its population model by name:
+    :func:`~darksirens.runtime_binding.bind_analysis` and
     :func:`pop_model_parser`, which every hierarchical likelihood primitive
     calls when it is traced (so a direct call of, e.g.,
     ``spectral_siren_log_likelihood`` is covered too).
@@ -900,7 +903,10 @@ def ensure_pairing_grid_covers(
     Idempotent, and a no-op when the grid is disabled (the default).  The
     sizing starts from the configured grid every time, not from a grid an
     earlier model grew, so the grid a model gets does not depend on what was
-    resolved before it in the process.
+    resolved before it in the process.  A density held from :func:`get_model`
+    or :func:`pop_model_parser` traces with whatever grid is current when it
+    is traced; a narrower grid than its model's costs it no accuracy (the
+    samples above the grid take the per-sample rule).
     """
     from .utils import (
         assert_pairing_grid_covers_support,
@@ -1078,8 +1084,9 @@ def pop_model_parser(
 ):
     # The likelihood primitives resolve their density here, so the opt-in
     # pairing m1 grid is sized for THIS model before its log_p_pop is traced
-    # (bind_analysis does the same; a direct primitive call skipped it and
-    # clamped a 300 Msun model at 200).  A no-op when the grid is off.
+    # (bind_analysis does the same; a direct primitive call used to skip it,
+    # and the grid then clamped a 300 Msun model at 200).  A no-op when the
+    # grid is off.
     ensure_pairing_grid_covers(
         pop_model,
         shared_beta=shared_beta,

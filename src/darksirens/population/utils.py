@@ -240,10 +240,13 @@ class NormalizationGridSettings:
     the pairing grid to a mass model whose primary-mass support extends past
     ``m_hi`` (e.g. ``gwtc5_fiducial_bpl2peaks`` with a fixed high-mass edge at
     300 Msun) never perturbs the mass-normalisation grid of any other model.
-    ``jnp.interp`` clamps queries outside the grid ends, so a ceiling BELOW a
-    model's support would silently bias the pairing normaliser inside the
-    support; :func:`size_pairing_grid_to_support` /
-    :func:`assert_pairing_grid_covers_support` keep it truthful.
+    A sample above the ceiling takes the per-sample normaliser instead of the
+    interpolant (``PairingModel.__call__``; ``jnp.interp`` would clamp it to
+    the end node, which biased the normaliser inside a wider model's support),
+    so a ceiling below a model's support costs accuracy nowhere;
+    :func:`size_pairing_grid_to_support` /
+    :func:`assert_pairing_grid_covers_support` keep the interpolant covering
+    the support.
 
     ``pairing_norm`` (env ``DARKSIRENS_GW_PAIRING_NORM``) is ``"auto"``
     (default since 2026-10-02), ``"per_point"`` or ``"per_sample"``.
@@ -523,12 +526,13 @@ def assert_pairing_grid_covers_support(
 ) -> None:
     """Fail loudly if the opt-in pairing grid does not cover an m1 support.
 
-    Defense in depth against a silent ``jnp.interp`` clamp INSIDE the mass
-    model's support: with the grid enabled, any sample at
-    ``pairing_m_hi < m1 <= m1_support_max`` would reuse the endpoint normaliser
-    (measured up to ~0.4 in log density for ``gwtc5_fiducial_bpl2peaks`` at
-    m1=299 with a 200-node ceiling).  Raises ``ValueError``.  No-op when the
-    grid is disabled.
+    The check that the grid was sized for the model: with the grid enabled,
+    samples at ``pairing_m_hi < m1 <= m1_support_max`` lie above the
+    interpolant.  They take the per-sample normaliser (``PairingModel.__call__``),
+    so they are not biased; before 2026-10-20 ``jnp.interp`` clamped them to the
+    endpoint normaliser (measured up to ~0.4 in log density for
+    ``gwtc5_fiducial_bpl2peaks`` at m1=299 with a 200 Msun ceiling).  Raises
+    ``ValueError``.  No-op when the grid is disabled.
     """
     s = normalization_grid_settings()
     if s.pairing_m1_grid is None:
@@ -541,9 +545,9 @@ def assert_pairing_grid_covers_support(
             f"pairing-normalisation grid upper bound pairing_m_hi={s.pairing_m_hi} "
             f"does not cover the primary-mass support{who} "
             f"(m1_support_max={support}): samples with "
-            f"{s.pairing_m_hi} < m1 <= {support} would be clamped to the grid "
-            "endpoint by jnp.interp, silently biasing the pairing normaliser "
-            "inside the model support. Size the grid to the model "
+            f"{s.pairing_m_hi} < m1 <= {support} lie above the interpolation "
+            "grid and take the per-sample normaliser instead. Size the grid to "
+            "the model "
             "(darksirens.population.ensure_pairing_grid_covers(name), or "
             "size_pairing_grid_to_support(m1_support_max)) or disable it "
             "(DARKSIRENS_GW_PAIRING_M1_GRID=none, or "
@@ -611,14 +615,14 @@ def get_pairing_m1_grid():
 
     Spans ``[m_lo, pairing_m_hi]``; log spacing clusters nodes at low m1 where
     the pairing normaliser I(m1) turns on fastest.  Callers evaluate I on these
-    nodes once per proposal and interpolate per sample; ``jnp.interp`` CLAMPS m1
-    outside the bounds to the grid ends.  Clamping is harmless ONLY where the
-    mass model has no support (p(m1)=0 makes the normaliser there irrelevant),
-    so ``pairing_m_hi`` MUST cover the selected mass model's primary-mass
-    support -- otherwise a valid sample inside the support silently uses the
-    endpoint normaliser.  The CLI sizes ``pairing_m_hi`` to the model via
-    :func:`size_pairing_grid_to_support`; :func:`assert_pairing_grid_covers_support`
-    guards against an undersized grid.  Only meaningful when ``pairing_m1_grid``
+    nodes once per proposal and interpolate per sample inside the span; a
+    sample outside it takes the per-sample normaliser (``jnp.interp`` would
+    clamp it to the grid end, which is wrong wherever the mass model still has
+    support).  :func:`~darksirens.population.ensure_pairing_grid_covers`, which
+    :func:`~darksirens.population.registry.pop_model_parser` and
+    :func:`~darksirens.runtime_binding.bind_analysis` call, sizes
+    ``pairing_m_hi`` to the model (:func:`size_pairing_grid_to_support`) so the
+    interpolant covers its support.  Only meaningful when ``pairing_m1_grid``
     is configured (not None).
     """
     s = normalization_grid_settings()
