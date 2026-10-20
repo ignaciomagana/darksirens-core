@@ -102,19 +102,94 @@ def _negotiate_spin_basis(f, path, required_fit_columns, reexport_hint):
 
 
 def chi_eff_prior_logprob(chieff, m1src, m2src, amax=0.99):
-    """Evaluate gwcat's canonical chi_eff prior lazily when a store needs it."""
+    """Evaluate gwcat's canonical chi_eff prior lazily when a store needs it.
+
+    The value is ``-inf`` outside the prior's support ``|chi_eff| <= amax``.
+    gwcat's plain ``chi_eff_prior_logprob`` does not mask the support: past
+    ``amax`` its grid clamp returns a finite density near 1e-12, an inverse
+    weight about 1e12 times too large in a denominator. Its support-gated
+    ``chi_eff_prior_logprob_in_support`` is used instead.
+    """
     try:
-        from gwcat.spin import ChiEffPrior, chi_eff_prior_logprob as implementation
+        from gwcat import spin as gwcat_spin
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "gwcat is required only when a store needs the chi_eff prior folded "
             "into p_pe/pdraw; install gwcat or use a fully preprocessed store"
         ) from exc
-    if not hasattr(ChiEffPrior, "support"):
+    implementation = getattr(gwcat_spin, "chi_eff_prior_logprob_in_support", None)
+    if implementation is None:
         raise ImportError(
-            "the installed gwcat predates the -inf out-of-support chi_eff convention; upgrade gwcat"
+            "the installed gwcat predates chi_eff_prior_logprob_in_support, the "
+            "chi_eff prior with its support applied; upgrade gwcat"
         )
-    return implementation(chieff, m1src, m2src, amax=amax)
+    logp, _ = implementation(chieff, m1src, m2src, amax=amax)
+    return logp
+
+
+def _require_fold_ceiling(amax, path, what):
+    if not (np.isfinite(amax) and amax > 0.0):
+        raise RuntimeError(
+            f"{what} file {path!r} needs the chi_eff prior folded in, but its "
+            f"chi_eff_amax={amax} is not a positive finite spin ceiling"
+        )
+
+
+def _pe_fold_ceiling(attrs, n_events, path):
+    """The one symmetric ceiling the PE chi_eff fold uses, after checking it.
+
+    gwcat records the ceilings each event's prior was evaluated at
+    (``chi_eff_amax_1_per_event``, ``chi_eff_amax_2_per_event``) and writes a
+    NaN ``chi_eff_amax`` when the events do not share one. The fold evaluates
+    one symmetric prior, so it refuses a store whose per-event ceilings differ
+    from it rather than folding the wrong prior (or a NaN one) into p_pe.
+    """
+    amax = float(attrs["chi_eff_amax"])
+    a1 = attrs.get("chi_eff_amax_1_per_event")
+    a2 = attrs.get("chi_eff_amax_2_per_event")
+    if a1 is not None and a2 is not None:
+        a1 = np.atleast_1d(np.asarray(a1, dtype=float))
+        a2 = np.atleast_1d(np.asarray(a2, dtype=float))
+        if a1.shape == a2.shape == (n_events,) and not (np.all(a1 == amax) and np.all(a2 == amax)):
+            pairs = list(dict.fromkeys(zip(a1.tolist(), a2.tolist())))
+            listed = ", ".join(f"({p1:g}, {p2:g})" for p1, p2 in pairs[:6])
+            raise RuntimeError(
+                f"PE file {path!r} declares chi_eff_in_p_pe=False, so the loader folds "
+                f"the chi_eff prior into p_pe with one symmetric ceiling "
+                f"chi_eff_amax={amax}, but its events record the per-body spin "
+                f"ceilings (amax_1, amax_2) {listed}"
+                + (" ..." if len(pairs) > 6 else "")
+                + ". Re-export with the chi_eff prior included in p_pe "
+                "(chi_eff_in_p_pe=True), which evaluates each event's own ceilings."
+            )
+    _require_fold_ceiling(amax, path, "PE")
+    return amax
+
+
+def _event_label(event_names, index):
+    if event_names is not None and index < len(event_names):
+        return event_names[index]
+    return f"event {index}"
+
+
+def _require_pe_chi_eff_support(logp, n_events, nsamp, amax, path, event_names):
+    outside = (~np.isfinite(logp)).reshape(n_events, nsamp)
+    n_out = int(outside.sum())
+    if not n_out:
+        return
+    hit = np.flatnonzero(outside.any(axis=1))
+    listed = ", ".join(
+        f"{_event_label(event_names, i)} ({int(outside[i].sum())})" for i in hit[:5]
+    )
+    raise RuntimeError(
+        f"PE file {path!r}: {n_out} posterior sample(s) in {hit.size} event(s) "
+        f"[{listed}{' ...' if hit.size > 5 else ''}] fall outside the chi_eff "
+        f"prior support (amax={amax}) the loader folds into p_pe. Their p_pe "
+        "would be exactly zero although the PE sampler drew them, so the "
+        "declared ceiling is not the prior the posterior was sampled under. "
+        "Re-export with the chi_eff prior included in p_pe, or with the "
+        "ceiling the PE runs used."
+    )
 
 
 def _chi_eff_errstate():
@@ -240,6 +315,70 @@ def _report_pe_weight_health(p_pe_2d, fmt, n_events, nsamp, f_attrs=None):
     return total
 
 
+def _require_positive_events(p_pe_2d, path, event_names):
+    """Refuse an event with no positive p_pe; warn about zero-weighted samples.
+
+    An all-zero event cannot be normalised (0/0 gives NaN prior weights, which
+    the likelihood masks out, so every theta has ln L = -inf). A zero p_pe
+    sample is legal but carries zero weight while still counting in nsamp.
+    """
+    zero = ~(p_pe_2d > 0.0)
+    per_event = zero.sum(axis=1)
+    empty = np.flatnonzero(per_event == p_pe_2d.shape[1])
+    if empty.size:
+        listed = ", ".join(_event_label(event_names, i) for i in empty[:5])
+        raise RuntimeError(
+            f"PE file {path!r}: {empty.size} event(s) [{listed}"
+            f"{' ...' if empty.size > 5 else ''}] have p_pe == 0 for every sample; "
+            "their prior weights cannot be normalised and the likelihood would be "
+            "-inf at every parameter value. Re-export the event or drop it."
+        )
+    if per_event.any():
+        worst = int(np.argmax(per_event))
+        warnings.warn(
+            f"PE store {path!r}: {int(per_event.sum())} sample(s) in "
+            f"{int(np.count_nonzero(per_event))} event(s) have p_pe == 0 and carry "
+            "zero weight while still counting in nsamp (largest share "
+            f"{per_event[worst] / p_pe_2d.shape[1]:.3g} in "
+            f"{_event_label(event_names, worst)}).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _warn_resampled_events(attrs, n_events, nsamp, path, event_names):
+    """Warn about events gwcat bootstrapped up to nsamp rows with replacement.
+
+    Repeated rows are not independent draws, but the per-event PE Monte-Carlo
+    variance and ESS treat them as such. For n distinct samples resampled to
+    nsamp rows the variance of ln Z is about (1 + nsamp/n) times the estimate.
+    """
+    n_unique = attrs.get("n_unique_samples_per_event")
+    if n_unique is None:
+        return
+    n_unique = np.atleast_1d(np.asarray(n_unique))
+    if n_unique.shape != (n_events,):
+        return
+    short = np.flatnonzero(n_unique < nsamp)
+    if not short.size:
+        return
+    listed = ", ".join(
+        f"{_event_label(event_names, i)} ({int(n_unique[i])})" for i in short[:5]
+    )
+    factor = 1.0 + nsamp / max(int(n_unique[short].min()), 1)
+    warnings.warn(
+        f"PE store {path!r}: {short.size} event(s) were bootstrapped with "
+        f"replacement to nsamp={nsamp} rows from fewer distinct posterior samples "
+        f"[{listed}{' ...' if short.size > 5 else ''}]. Their per-event PE "
+        "Monte-Carlo variance (and the ESS above) counts the repeated rows as "
+        "independent, so the variance entering the max_likelihood_variance guard "
+        "and the ln L variance is too small for them, by a factor of about "
+        f"1 + nsamp/n_unique (up to {factor:.3g}).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
 def _require_x64(operation: str):
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
@@ -294,14 +433,18 @@ def load_gw_store(gw_path, fit_columns=None) -> GWStore:
     if is_mock:
         print("This is using mock data.")
     if not chi_in_ppe:
+        chi_amax = _pe_fold_ceiling(attrs, n_events, gw_path)
         with _chi_eff_errstate():
             logp = chi_eff_prior_logprob(
                 raw_columns["chieff"], raw_columns["m1src"], raw_columns["m2src"], amax=chi_amax
             )
+        _require_pe_chi_eff_support(logp, n_events, nsamp, chi_amax, gw_path, event_names)
         p_pe = p_pe * np.exp(logp)
 
     p_pe = p_pe.reshape(n_events, nsamp)
     _report_pe_weight_health(p_pe, fmt, n_events, nsamp, f_attrs=pe_attrs)
+    _require_positive_events(p_pe, gw_path, event_names)
+    _warn_resampled_events(attrs, n_events, nsamp, gw_path, event_names)
     p_pe = (p_pe / p_pe.sum(axis=1, keepdims=True)).flatten()
 
     return GWStore(
@@ -384,6 +527,7 @@ def load_selection_store(file, allow_invalid_spin_swap=False, fit_columns=None) 
                     f"Selection file {file!r} declares chi_eff_swap_applied=False but carries no chi_eff_amax"
                 )
             amax = float(f.attrs["chi_eff_amax"])
+            _require_fold_ceiling(amax, file, "Selection")
             with _chi_eff_errstate():
                 log_p_chi = chi_eff_prior_logprob(
                     raw_columns["chieff"], raw_columns["m1src"], raw_columns["m2src"], amax=amax

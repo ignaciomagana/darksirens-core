@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import h5py
 import jax
 import numpy as np
@@ -138,7 +140,8 @@ def test_zero_ppe_is_legal_but_zero_pdraw_is_not(tmp_path):
     p = PE["p_pe"].copy()
     p[0] = 0.0
     write_pe(pe, p_pe=p)
-    store = load_gw_store(pe)
+    with pytest.warns(RuntimeWarning, match="p_pe == 0"):
+        store = load_gw_store(pe)
     assert store.prior_wt[0] == 0.0
 
     sel = tmp_path / "sel_zero.h5"
@@ -194,3 +197,139 @@ def test_declared_unswapped_chieff_density_is_folded_in(tmp_path, monkeypatch):
     )
     store = load_selection_store(path)
     np.testing.assert_allclose(store.prior_wt, 2.0 * SEL["pdraw"])
+
+
+# ---------------------------------------------------------------------------
+# The chi_eff fold with gwcat's real prior (the test above replaces it with a
+# constant, so it cannot see the support). gwcat's plain logprob returns a
+# finite ~1e-12 density past amax; the fold must treat that as outside.
+
+def _write_unfolded_pe(path, chieff=None, p_pe=None, **attrs):
+    write_pe(path, p_pe=p_pe)
+    with h5py.File(path, "a") as f:
+        f.attrs.modify("chi_eff_in_p_pe", False)
+        for name, value in attrs.items():
+            f.attrs[name] = value
+        if chieff is not None:
+            f["chieff"][...] = chieff
+    return path
+
+
+def test_selection_fold_refuses_an_injection_beyond_amax(tmp_path):
+    pytest.importorskip("gwcat.spin")
+    # At m1 = 50, m2 = 25 gwcat's unmasked grid returns 2.7e-12 here, not zero.
+    chieff, m1src, m2src = SEL["chieff"].copy(), SEL["m1src"].copy(), SEL["m2src"].copy()
+    chieff[-1], m1src[-1], m2src[-1] = 0.995, 50.0, 25.0
+    path = tmp_path / "unswapped_out.h5"
+    write_sel(path, swap=False)
+    with h5py.File(path, "a") as f:
+        f["chieff"][...] = chieff
+        f["m1src"][...] = m1src
+        f["m2src"][...] = m2src
+    with pytest.raises(RuntimeError, match="1 detected injection.*outside the chi_eff prior support"):
+        load_selection_store(path)
+
+
+def test_selection_fold_refuses_a_non_finite_ceiling(tmp_path):
+    path = tmp_path / "unswapped_nan.h5"
+    write_sel(path, swap=False)
+    with h5py.File(path, "a") as f:
+        f.attrs.modify("chi_eff_amax", np.nan)
+    with pytest.raises(RuntimeError, match="not a positive finite spin ceiling"):
+        load_selection_store(path)
+
+
+def test_chi_eff_prior_is_minus_inf_beyond_amax():
+    pytest.importorskip("gwcat.spin")
+    logp = gw_samples.chi_eff_prior_logprob(
+        np.array([0.1, 0.985, 0.995]), np.full(3, 50.0), np.full(3, 25.0), amax=0.99
+    )
+    assert np.isfinite(logp[:2]).all()
+    assert logp[2] == -np.inf
+
+
+def test_pe_fold_matches_the_support_gated_gwcat_prior(tmp_path):
+    spin = pytest.importorskip("gwcat.spin")
+    store = load_gw_store(_write_unfolded_pe(tmp_path / "pe_fold.h5"))
+    logp, inside = spin.chi_eff_prior_logprob_in_support(
+        PE["chieff"], PE["m1src"], PE["m2src"], amax=0.99
+    )
+    assert inside.all()
+    expected = (PE["p_pe"] * np.exp(logp)).reshape(NOBS, NSAMP)
+    expected = (expected / expected.sum(axis=1, keepdims=True)).ravel()
+    np.testing.assert_allclose(store.prior_wt, expected, rtol=1e-15, atol=0)
+
+
+def test_pe_fold_refuses_a_sample_beyond_amax(tmp_path):
+    pytest.importorskip("gwcat.spin")
+    chieff = PE["chieff"].copy()
+    chieff[4] = 0.995
+    path = _write_unfolded_pe(tmp_path / "pe_out.h5", chieff=chieff)
+    with h5py.File(path, "a") as f:
+        f["m1src"][4], f["m2src"][4] = 50.0, 25.0
+    with pytest.raises(RuntimeError, match=r"1 posterior sample\(s\) in 1 event\(s\) \[event 1 \(1\)\]"):
+        load_gw_store(path)
+
+
+@pytest.mark.parametrize(
+    "scalar, a1, a2",
+    [
+        (np.nan, [0.99, 0.99], [0.99, 0.05]),  # mixed ceilings: gwcat writes a NaN scalar
+        (0.99, [0.99, 0.99], [0.05, 0.05]),  # one asymmetric (NSBH-like) pair
+    ],
+)
+def test_pe_fold_refuses_per_event_ceilings_it_cannot_fold(tmp_path, scalar, a1, a2):
+    path = _write_unfolded_pe(
+        tmp_path / "pe_ceilings.h5",
+        chi_eff_amax_1_per_event=np.asarray(a1),
+        chi_eff_amax_2_per_event=np.asarray(a2),
+    )
+    with h5py.File(path, "a") as f:
+        f.attrs.modify("chi_eff_amax", scalar)
+    with pytest.raises(RuntimeError, match=r"per-body spin ceilings \(amax_1, amax_2\)"):
+        load_gw_store(path)
+
+
+def test_pe_fold_keeps_one_shared_symmetric_ceiling(tmp_path):
+    pytest.importorskip("gwcat.spin")
+    plain = load_gw_store(_write_unfolded_pe(tmp_path / "plain.h5"))
+    recorded = load_gw_store(_write_unfolded_pe(
+        tmp_path / "recorded.h5",
+        chi_eff_amax_1_per_event=np.full(NOBS, 0.99),
+        chi_eff_amax_2_per_event=np.full(NOBS, 0.99),
+    ))
+    np.testing.assert_array_equal(recorded.prior_wt, plain.prior_wt)
+
+
+def test_pe_event_with_no_positive_p_pe_is_refused(tmp_path):
+    p = PE["p_pe"].copy()
+    p[NSAMP:] = 0.0
+    path = tmp_path / "pe_empty_event.h5"
+    write_pe(path, p_pe=p)
+    with pytest.raises(RuntimeError, match=r"1 event\(s\) \[event 1\] have p_pe == 0 for every sample"):
+        load_gw_store(path)
+
+
+def test_zero_weighted_pe_samples_are_reported(tmp_path):
+    p = PE["p_pe"].copy()
+    p[0] = 0.0
+    path = tmp_path / "pe_partial.h5"
+    write_pe(path, p_pe=p)
+    with pytest.warns(RuntimeWarning, match=r"1 sample\(s\) in 1 event\(s\) have p_pe == 0"):
+        load_gw_store(path)
+
+
+def test_bootstrapped_pe_events_are_reported(tmp_path):
+    path = tmp_path / "pe_bootstrap.h5"
+    write_pe(path)
+    with h5py.File(path, "a") as f:
+        f.attrs["n_unique_samples_per_event"] = np.array([NSAMP, 2])
+        f.attrs["resampled_with_replacement"] = True
+    with pytest.warns(RuntimeWarning, match=r"1 event\(s\) were bootstrapped.*event 1 \(2\).*up to 2\.5"):
+        load_gw_store(path)
+
+    with h5py.File(path, "a") as f:
+        f.attrs.modify("n_unique_samples_per_event", np.array([NSAMP, NSAMP]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        load_gw_store(path)
