@@ -359,3 +359,109 @@ def test_marked_guards_refuse_traced_tables_instead_of_skipping():
         COSMO, PARAMS, cat, cache, MODEL, marks, eta
     ))(jnp.asarray([1.5]))
     assert np.all(np.isfinite(np.asarray(state.log_Z)))
+
+
+def _nan_mark_fixture():
+    """Three ragged rows of centred marks, as in the 2026-10-20 review."""
+    rng = np.random.default_rng(2)
+    ng = np.array([50, 30, 10], dtype=np.int32)
+    z = np.full((3, 50), 100.0)
+    for r in range(3):
+        z[r, : ng[r]] = np.sort(rng.uniform(0.05, 0.6, ng[r]))
+    cat = GalaxyCatalog(
+        apix=np.pi / (3 * 64 * 64),
+        zgals=jnp.asarray(z),
+        dzgals=jnp.asarray(np.full_like(z, 1.0e-3)),
+        wgals=jnp.asarray(np.ones_like(z)),
+        ngals=jnp.asarray(ng),
+    )
+    real = np.arange(50)[None, :] < ng[:, None]
+    values = np.where(real[..., None], rng.normal(0.0, 0.3, (3, 50, 1)), 0.0)
+    params = CatalogParameters(n0=0.01, delta=0.0, sigma_kde=0.01, z_depth=None)
+    return cat, real, values, params
+
+
+def _state_and_prior(cat, params, values, eta):
+    marks = CenteredHostMarks(("logmstar",), jnp.asarray(values))
+    state = build_marked_incomplete_catalog_prior_state(
+        COSMO, params, cat, build_observed_density_cache(cat), MODEL, marks,
+        jnp.asarray([eta]),
+    )
+    zq = jnp.linspace(0.1, 0.5, 5)
+    out = [
+        np.asarray(eval_incomplete_catalog_prior_state_vmap(
+            zq, jnp.full(5, row, dtype=jnp.int32), state, cat))
+        for row in range(3)
+    ]
+    return state, np.stack(out)
+
+
+def test_nan_padded_marks_give_the_zero_padded_prior():
+    """Padding is ignored whatever it holds: NaN padding used to give log_Z = 0."""
+    cat, real, values, params = _nan_mark_fixture()
+    nan_padded = np.where(real[..., None], values, np.nan)
+    check_centered_marks(MODEL, CenteredHostMarks(("logmstar",), jnp.asarray(nan_padded)), cat)
+    want_state, want = _state_and_prior(cat, params, values, 0.5)
+    got_state, got = _state_and_prior(cat, params, nan_padded, 0.5)
+    assert np.all(np.isfinite(np.asarray(want_state.log_Z)))
+    assert np.all(np.asarray(want_state.log_Z) > 1.0)
+    np.testing.assert_array_equal(np.asarray(got_state.log_Z), np.asarray(want_state.log_Z))
+    np.testing.assert_array_equal(got, want)
+
+    cache = build_observed_density_cache(cat)
+
+    def grad_log_Z(table):
+        marks = CenteredHostMarks(("logmstar",), jnp.asarray(table))
+        return np.asarray(jax.grad(lambda e: jnp.sum(
+            build_marked_incomplete_catalog_prior_state(
+                COSMO, params, cat, cache, MODEL, marks, e).log_Z))(jnp.asarray([0.5])))
+
+    grad_nan, grad_zero = grad_log_Z(nan_padded), grad_log_Z(values)
+    assert np.all(np.isfinite(grad_nan))
+    np.testing.assert_array_equal(grad_nan, grad_zero)
+
+
+def test_non_finite_real_mark_is_refused():
+    """One real galaxy with a NaN mark used to give finite garbage in every row."""
+    cat, real, values, params = _nan_mark_fixture()
+    for bad in (np.nan, np.inf):
+        table = values.copy()
+        table[1, 3, 0] = bad
+        marks = CenteredHostMarks(("logmstar",), jnp.asarray(table))
+        with pytest.raises(ValueError, match=r"non-finite host mark \(first: row 1, slot 3"):
+            check_centered_marks(MODEL, marks, cat)
+        with pytest.raises(ValueError, match="non-finite host mark"):
+            _state_and_prior(cat, params, table, 0.5)
+    # Two equal tables built as separate objects reach the finiteness error,
+    # not a misleading "different views" one.
+    cat_v, marks_v = _view(2, [0, 1], 0.6)
+    table = np.array(marks_v.values)
+    table[0, 1, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite host mark"):
+        _marked_likelihood(
+            cat_v, CenteredHostMarks(("logmstar",), jnp.asarray(table)),
+            cat_v, CenteredHostMarks(("logmstar",), jnp.asarray(table.copy())),
+        )
+
+
+def test_non_finite_reference_row_is_refused():
+    cat, _ = _catalog()
+    ref_z, ref_values = _reference_table()
+    for z_bad, m_bad in ((False, True), (True, False)):
+        z = np.array(ref_z)
+        m = np.array(ref_values)
+        if z_bad:
+            z[4] = np.nan
+        if m_bad:
+            m[4, 0] = np.nan
+        marks = CenteredHostMarks(("logmstar",), _marks().values, jnp.asarray(z), jnp.asarray(m))
+        with pytest.raises(ValueError, match="reference row 4"):
+            check_centered_marks(MODEL, marks, cat)
+
+
+def test_nan_normaliser_poisons_the_marked_row():
+    """A NaN Z (here a NaN eta) must not read as log_Z = 0."""
+    cat, _, values, params = _nan_mark_fixture()
+    state, prior = _state_and_prior(cat, params, values, np.nan)
+    assert np.all(np.isnan(np.asarray(state.log_Z)))
+    assert not np.any(np.isfinite(prior))

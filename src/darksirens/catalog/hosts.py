@@ -176,6 +176,19 @@ def _real_mask(catalog: GalaxyCatalog):
     )[:, None]
 
 
+def _aligned_log_h(model: LogLinearHostModel, marks: CenteredHostMarks, catalog, eta):
+    """Clipped ``log h`` of the aligned table, padded slots read as zero marks.
+
+    Padding is ignored whatever it holds (``GalaxyCatalog``): zeroing it before
+    the product keeps a NaN or infinite pad out of every sum and its gradient
+    (``0 * nan`` is NaN).  Real slots are bit-for-bit ``model.log_h``.
+    """
+
+    model._check_names(marks.names)
+    values = jnp.where(_real_mask(catalog)[..., None], marks.values, 0.0)
+    return jnp.clip(model.log_h_values(values, eta), -LOG_H_CLIP, LOG_H_CLIP)
+
+
 def _host_array(array, *, what: str):
     """Return a concrete host view of a build-time table.
 
@@ -202,7 +215,9 @@ def _same_table(a, b, *, what: str) -> bool:
     b = _host_array(b, what=what)
     if a is None or b is None:
         return a is None and b is None
-    return a.shape == b.shape and bool(np.array_equal(a, b))
+    # NaN == NaN here: two equal tables with a NaN (padding, or a real mark
+    # that check_centered_marks then refuses) are the same table.
+    return a.shape == b.shape and bool(np.array_equal(a, b, equal_nan=True))
 
 
 def require_shared_host_view(
@@ -285,6 +300,10 @@ def check_centered_marks(
     ``mu_miss`` through the same clip, so an uncentered reference table kills
     eta in the missing branch exactly as an uncentered aligned table does in the
     observed branch.
+
+    A real galaxy, or a reference row, with a non-finite mark (or reference
+    redshift) is refused: it would turn ``mu_miss`` and the row normalisers
+    into NaN.  Padded slots are not read, whatever they hold.
     """
 
     model._check_names(marks.names)
@@ -295,8 +314,18 @@ def check_centered_marks(
         )
     values = _host_array(marks.values, what=f"{where}: mark table")
     ngals = _host_array(catalog.ngals, what=f"{where}: catalog row lengths")
-    abs_sum = np.sum(np.abs(values), axis=-1)
     real = np.arange(values.shape[1])[None, :] < ngals[:, None]
+    bad = real[..., None] & ~np.isfinite(values)
+    if np.any(bad):
+        row, slot, k = (int(i) for i in np.argwhere(bad)[0])
+        raise ValueError(
+            f"{where}: {int(np.sum(np.any(bad, axis=-1)))} real galaxies carry a "
+            f"non-finite host mark (first: row {row}, slot {slot}, "
+            f"{marks.names[k]} = {values[row, slot, k]!r}). A missing host "
+            "property is a data error: drop the galaxy or impute its mark "
+            "survey-side before building CenteredHostMarks."
+        )
+    abs_sum = np.sum(np.abs(values), axis=-1)
     n_real = int(np.sum(real))
     sat = (model.eta_bound * abs_sum >= LOG_H_CLIP) & real
     frac = float(np.sum(sat) / n_real) if n_real > 0 else 0.0
@@ -314,6 +343,15 @@ def check_centered_marks(
     )
     if reference is None or reference.shape[0] == 0:
         return
+    reference_z = _host_array(marks.reference_z, what=f"{where}: reference redshifts")
+    bad_ref = ~np.all(np.isfinite(reference), axis=-1) | ~np.isfinite(reference_z)
+    if np.any(bad_ref):
+        raise ValueError(
+            f"{where}: {int(np.sum(bad_ref))} survey-wide reference galaxies "
+            "carry a non-finite redshift or host mark (first: reference row "
+            f"{int(np.argmax(bad_ref))}). Every reference row is a real galaxy; "
+            "drop it or impute its mark survey-side."
+        )
     # Every reference row is a real galaxy, so the saturated fraction is a
     # plain mean over rows.
     ref_abs_sum = np.sum(np.abs(reference), axis=-1)
@@ -417,7 +455,7 @@ def build_marked_catalog_kernel_state(
             f"mark table rows {marks.values.shape[:2]} do not match catalog "
             f"{catalog.zgals.shape}"
         )
-    log_h = jnp.clip(model.log_h(marks, eta), -LOG_H_CLIP, LOG_H_CLIP)
+    log_h = _aligned_log_h(model, marks, catalog, eta)
     log_g_grid = log_galaxy_measure_grid(cosmo, params)
     z, dz, w, ng = catalog.zgals, catalog.dzgals, catalog.wgals, catalog.ngals
     log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
@@ -462,7 +500,8 @@ def _mu_miss_from_flat(zs, h, real):
         0,
         MU_MISS_NBINS - 1,
     )
-    sum_h = jnp.zeros(MU_MISS_NBINS).at[b].add(h * real)
+    # where, not ``h * real``: a non-finite h in a padded slot times 0 is NaN.
+    sum_h = jnp.zeros(MU_MISS_NBINS).at[b].add(jnp.where(real > 0.0, h * real, 0.0))
     cnt = jnp.zeros(MU_MISS_NBINS).at[b].add(real)
     mu_global = jnp.where(
         jnp.sum(cnt) > 0.0,
@@ -506,9 +545,7 @@ def missing_host_efficiency_grid(
         return _mu_miss_from_flat(zs, h, real)
 
     if aligned_log_h is None:
-        aligned_log_h = jnp.clip(
-            model.log_h(marks, eta), -LOG_H_CLIP, LOG_H_CLIP
-        )
+        aligned_log_h = _aligned_log_h(model, marks, catalog, eta)
     zs = jnp.asarray(catalog.zgals).reshape(-1)
     h = jnp.exp(jnp.asarray(aligned_log_h)).reshape(-1)
     real = _real_mask(catalog).reshape(-1).astype(h.dtype)
@@ -549,7 +586,13 @@ def build_marked_incomplete_catalog_prior_state(
         jnp.isfinite(log_N_host_depth), jnp.exp(log_N_host_depth), 0.0
     )
     Z = N_host_obs + N_host_miss
-    log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
+    # A NaN normaliser poisons its row (NaN, which the sample weights turn into
+    # -inf) instead of reading as log_Z = 0 and dropping the normalisation.
+    log_Z = jnp.where(
+        Z > 0.0,
+        jnp.log(jnp.maximum(Z, 1.0e-300)),
+        jnp.where(jnp.isnan(Z), jnp.nan, 0.0),
+    )
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_N_host_depth,
