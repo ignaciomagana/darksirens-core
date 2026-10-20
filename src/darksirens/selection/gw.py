@@ -487,6 +487,15 @@ def compute_selection_term(
     log Monte-Carlo variance of μ, used by the strong-lensing cluster path; the
     standard single-event likelihood ignores it).
 
+    The estimate is unbiased only if the campaign's draw distribution covers
+    the detectable population, ``supp(p_det p_pop(. | Lambda)) ⊂ supp(p_draw)``,
+    at every ``Lambda`` the sampler visits. In the detector frame the
+    campaign's support is fixed while the detectable population reaches
+    further out as ``H0`` grows, so a campaign that stops inside the detection
+    horizon of part of the prior under-counts μ there; ``N_eff`` cannot see it
+    (the missing injections take their weight with them). The guard report of
+    ``ds.infer`` measures it (:func:`darksirens.inference.guard_report.selection_coverage`).
+
     Parameters
     ----------
     gw_sel : GWEvent

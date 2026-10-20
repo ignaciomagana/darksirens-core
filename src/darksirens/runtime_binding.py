@@ -633,6 +633,14 @@ class BoundAnalysis:
         ``missing_density`` of ``configure_catalog_evaluation`` changed them
         raises ``RuntimeError`` (rebind, or restore them).
         """
+        return self._diagnostics_at(theta, self.gw_selection)
+
+    def _diagnostics_at(self, theta, gw_selection):
+        """:meth:`diagnostics` with another selection operand of the same shapes.
+
+        The same compiled program (the guard report's injection-coverage
+        check passes the injections with some marked invalid).
+        """
         fn = self.__dict__.get("_diagnostics")
         if fn is None:
             fn = _jit_log_likelihood_diagnostics(self)
@@ -640,7 +648,7 @@ class BoundAnalysis:
         operands = (
             jnp.asarray(theta),
             self.gw_pe,
-            self.gw_selection,
+            gw_selection,
             self.catalog,
             self.observed_density_cache,
         )
