@@ -683,3 +683,48 @@ def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
         warnings.simplefilter("error")
         check_kernels_below_zero(edge, 0.01, 0.01)
 
+
+# ---------------------------------------------------------------------------
+# A draw count below the number of detected injections: 1/N_eff = S2/S^2 -
+# 1/n_draw went negative, its round-off clamp made N_eff = +inf, and every
+# reliability guard passed (the HDF5 loader refused it; in-memory stores and
+# the likelihood seams did not).
+
+
+def test_bind_refuses_ndraw_below_the_detected_injections():
+    from dataclasses import replace
+
+    analysis = ds.model(cosmology=COSMOLOGY, population=POPULATION)
+    short = replace(INJECTIONS, ndraw=INJECTIONS.n_injections // 4)
+    with pytest.raises(ValueError, match="ndraw=192 is smaller than its 768 detected injections"):
+        bind_analysis(analysis, events=EVENTS, injections=short)
+    # Every injection detected (a no-selection mock) is legal.
+    bind_analysis(analysis, events=EVENTS, injections=replace(INJECTIONS, ndraw=INJECTIONS.n_injections))
+
+
+def test_likelihood_seams_refuse_ndraw_below_the_live_injections():
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.gw.runtime import make_gw_event
+    from darksirens.likelihood.hierarchical import spectral_siren_log_likelihood
+    from darksirens.population import get_fixed_population_params
+
+    def event(store):
+        c = store.columns
+        return make_gw_event(
+            m1det=c["m1det"], m2det=c["m2det"], dL=c["dL"], chieff=c["chieff"],
+            prior_wt=store.prior_wt, pixels=np.zeros(len(c["dL"]), dtype=np.int32),
+        )
+
+    args = (
+        CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0),
+        jnp.asarray(get_fixed_population_params(MODEL)),
+        event(EVENTS),
+        event(INJECTIONS),
+        EVENTS.n_events,
+        EVENTS.nsamp,
+    )
+    with pytest.raises(ValueError, match="n_draw=192.0 is smaller than the 768 live"):
+        spectral_siren_log_likelihood(*args, 192.0, pop_model=MODEL)
+    assert np.isfinite(float(spectral_siren_log_likelihood(
+        *args, 768.0, pop_model=MODEL, max_likelihood_variance=1.0e6
+    )))
