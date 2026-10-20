@@ -1057,10 +1057,11 @@ def _require_trace_settings(bound) -> None:
 
     grids, evaluation = bound._trace_settings
     live_grids, live_evaluation = _trace_settings()
+    live = asdict(live_grids)
     changed = [
-        f"{name} {value!r} -> {asdict(live_grids)[name]!r}"
+        f"{name} {value!r} -> {live[name]!r}"
         for name, value in asdict(grids).items()
-        if asdict(live_grids)[name] != value
+        if live[name] != value
     ]
     if live_evaluation.missing_density != evaluation.missing_density:
         changed.append(
