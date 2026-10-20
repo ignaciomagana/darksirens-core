@@ -118,3 +118,39 @@ def test_the_recorded_set_is_every_angular_model_whose_coordinates_are_shared():
         by_coordinates[key].add(name)
     shared = set().union(*(names for names in by_coordinates.values() if len(names) > 1))
     assert shared == set(ANGULAR_MODELS_SHARING_COORDINATES)
+
+
+# ---------------------------------------------------------------------------
+# Partially fixed joint prior pairs
+
+_GWTC5 = "gwtc5_fiducial_bpl2peaks"
+_L0 = r"$\lambda_0$"
+_M1L, _M2L = r"$m_{1,{\rm low}}$", r"$m_{2,{\rm low}}$"
+
+
+def _partially_fixed(fixed):
+    with pytest.warns(RuntimeWarning) as record:
+        analysis = ds.model(cosmology=COSMOLOGY, population=ds.Population(_GWTC5, fixed=fixed))
+    texts = [str(w.message) for w in record if "joint prior constraint" in str(w.message)]
+    assert len(texts) == 1
+    return analysis, texts[0]
+
+
+def test_fixing_the_lower_member_of_a_conditional_pair_says_the_prior_changes():
+    # The review's scenario: m2_low = 5 leaves m1_low ~ U(5, 10) (prior mean
+    # 7.5), while the declared prior conditioned on m2_low = 5 falls as
+    # 1 / (m1_low - 3) (prior mean 6.99). The warning said only logZ changed.
+    analysis, text = _partially_fixed({_M2L: 5.0})
+    assert _M1L in analysis.parameters.labels
+    assert "has fixed member(s)" in text
+    assert "not the declared joint prior conditioned on" in text
+    assert "1 / ($m_{1,{\\rm low}}$ - 3.0)" in text
+    assert "the posterior differs from that conditional, not only logZ" in text
+    assert "ds.infer adds to log_prior_volume_fraction" in text
+
+
+@pytest.mark.parametrize("fixed", [{_M1L: 5.0}, {_L0: 0.6}])
+def test_fixing_a_member_whose_partner_keeps_its_conditional_prior_says_only_logZ(fixed):
+    _, text = _partially_fixed(fixed)
+    assert "not the declared joint prior" not in text
+    assert "logZ carries the log prior-fraction offset, which ds.infer adds" in text

@@ -204,20 +204,33 @@ def _is_float32(compute_dtype):
         return False
 
 
-def _apply_angular_prior_volume_correction(result, analysis):
-    """Record the angular prior-box offset carried by a reported evidence.
+def _log_prior_volume_fraction(analysis):
+    """Log of the prior-box fraction an ordinary analysis's likelihood keeps.
 
     An angular model whose ``log_g`` rejects part of the prior box makes the
     sampler integrate an unnormalized constrained prior, so the raw ``logZ``
     carries a data-independent offset that differs between models (measured
-    -0.50 nat for ``multipole`` against -3.38 for ``multipole_l3``). The raw
-    value stays untouched; the corrected one is recorded alongside it.
+    -0.50 nat for ``multipole`` against -3.38 for ``multipole_l3``). A
+    partially fixed joint prior pair does the same
+    (``ParameterPlan.fixed_constraint_log_fraction``, ln 0.4 = -0.92 nat for
+    the GWTC-5 ``lambda_0 = 0.6``). This is their sum.
     """
     from darksirens.population.angular import angular_log_prior_volume_correction
 
-    fraction = angular_log_prior_volume_correction(
+    angular = angular_log_prior_volume_correction(
         getattr(analysis, "angular_model", "isotropic")
     )
+    return angular + float(
+        getattr(analysis.parameters, "fixed_constraint_log_fraction", 0.0)
+    )
+
+
+def _apply_prior_volume_correction(result, fraction):
+    """Record the prior-box offset carried by a reported evidence.
+
+    The raw ``logZ`` stays untouched; the corrected one is recorded alongside
+    it.
+    """
     result["log_prior_volume_fraction"] = fraction
     logZ = result.get("logZ")
     if logZ is not None and math.isfinite(float(logZ)):
@@ -461,8 +474,16 @@ def infer(
     sampler options, and never enter the sampler namespace.
 
     Ordinary results also carry ``log_prior_volume_fraction`` and, when the
-    sampler reports a finite ``logZ``, ``logZ_corrected``. The raw ``logZ``
-    stays exactly as the sampler reported it.
+    sampler reports a finite ``logZ``, ``logZ_corrected`` (``logZ`` minus
+    the fraction). The fraction is the log of the prior-box fraction the
+    likelihood keeps: the angular model's (one whose ``log_g`` rejects part
+    of the box) plus a partially fixed joint prior pair's
+    (``ParameterPlan.fixed_constraint_log_fraction``). The raw ``logZ``
+    stays exactly as the sampler reported it. A target result carries both
+    keys when the target declares ``InferenceTarget.log_prior_volume_fraction``,
+    as the targets core builds from an analysis do
+    (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`,
+    :func:`~darksirens.likelihood.host_density.make_host_density_target`).
 
     ``guard_report`` (default ``True``) evaluates an ordinary analysis's
     likelihood diagnostics at 32 prior draws before sampling (an integer sets
@@ -518,12 +539,19 @@ def infer(
                 "InferenceTarget; build the target's likelihood with them instead"
             )
         sampler = _resolve_sampler(sampler, plan)
-        return _execute_target(
+        result = _execute_target(
             analysis.log_likelihood,
             analysis.parameters,
             sampler=sampler,
             sampler_options=sampler_options,
             target=analysis,
+        )
+        # Core's own target builders declare the offset of their analysis; a
+        # companion's target may declare its own.
+        if analysis.log_prior_volume_fraction is None:
+            return result
+        return _apply_prior_volume_correction(
+            result, float(analysis.log_prior_volume_fraction)
         )
 
     if events is None or injections is None:
@@ -585,7 +613,7 @@ def infer(
     )
     if report is not None:
         result["guard_report"] = report
-    return _apply_angular_prior_volume_correction(result, analysis)
+    return _apply_prior_volume_correction(result, _log_prior_volume_fraction(analysis))
 
 
 __all__ = ["DEFAULT_SAMPLER", "infer", "log_likelihood"]

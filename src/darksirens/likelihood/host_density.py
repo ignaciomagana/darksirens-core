@@ -191,7 +191,10 @@ def make_host_density_target(
 
     The supplied GWEvent objects must already carry pixel ids in the external
     model's state frame. Core decodes only its accepted cosmology/population/
-    angular block and treats all extension state as opaque.
+    angular block and treats all extension state as opaque. The target
+    declares the base analysis's ``log_prior_volume_fraction`` (its angular
+    model's and a partially fixed population pair's), so its ``ds.infer``
+    result carries ``logZ_corrected`` as an ordinary one does.
     """
 
     if not isinstance(base_analysis, Analysis):
@@ -251,7 +254,13 @@ def make_host_density_target(
             return_diagnostics=False,
         )
 
-    return InferenceTarget(log_likelihood=log_likelihood, parameters=combined_plan)
+    from darksirens.inference.public import _log_prior_volume_fraction
+
+    return InferenceTarget(
+        log_likelihood=log_likelihood,
+        parameters=combined_plan,
+        log_prior_volume_fraction=_log_prior_volume_fraction(base_analysis),
+    )
 
 
 __all__ = [

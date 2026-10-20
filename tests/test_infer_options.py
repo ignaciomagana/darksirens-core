@@ -9,10 +9,13 @@ it (with the right spelling when there is one) before anything is bound.
 from __future__ import annotations
 
 import ast
+import math
 from pathlib import Path
 import sys
 from types import ModuleType
+import warnings
 
+import numpy as np
 import pytest
 
 import darksirens as ds
@@ -189,3 +192,135 @@ def test_the_accepted_set_covers_every_option_a_backend_reads():
     assert {"nlive", "nuts_warmup", "dynesty_walks", "tinyns_preset"} <= read
     missing = sorted(read - _known_sampler_options() - _CORE_MIRRORS)
     assert missing == []
+
+
+# ---------------------------------------------------------------------------
+# The prior-volume correction of the evidence
+
+_GWTC5 = "gwtc5_fiducial_bpl2peaks"
+_L0 = r"$\lambda_0$"
+_M1L, _M2L = r"$m_{1,{\rm low}}$", r"$m_{2,{\rm low}}$"
+
+
+@pytest.mark.parametrize(
+    "fixed, fraction",
+    [
+        # lambda_1 is sampled on [0, 1]; lambda_0 + lambda_1 <= 1 leaves [0, 0.4].
+        ({_L0: 0.6}, 0.4),
+        # m2_low is sampled on [3, 10]; m2_low <= m1_low = 5 leaves [3, 5].
+        ({_M1L: 5.0}, 2.0 / 7.0),
+        # m1_low is sampled on [3, 10]; m1_low >= m2_low = 5 leaves [5, 10].
+        ({_M2L: 5.0}, 5.0 / 7.0),
+        ({_L0: 0.6, _M1L: 5.0}, 0.4 * 2.0 / 7.0),
+    ],
+)
+def test_a_partially_fixed_pair_enters_the_prior_volume_correction(monkeypatch, fixed, fraction):
+    # The review's scenario: the sampler's logZ is ln(0.4) below the
+    # normalised-prior evidence, but the result reported a fraction of 0.0
+    # and logZ_corrected equal to logZ.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        analysis = _analysis(population=ds.Population(_GWTC5, fixed=fixed))
+    _fake_backend(monkeypatch, {"logZ": -100.0})
+    result = infer(analysis, events=object(), injections=object(), sampler="dynesty")
+    assert result["logZ"] == -100.0
+    assert result["log_prior_volume_fraction"] == pytest.approx(math.log(fraction), rel=1e-15)
+    assert result["logZ_corrected"] == pytest.approx(-100.0 - math.log(fraction), rel=1e-15)
+    assert analysis.parameters.fixed_constraint_log_fraction == pytest.approx(
+        math.log(fraction), rel=1e-15
+    )
+
+
+def test_a_free_or_wholly_fixed_population_has_no_constraint_offset():
+    free = _analysis(population=ds.Population(_GWTC5))
+    assert free.parameters.fixed_constraint_log_fraction == 0.0
+    fixed = _analysis(population=ds.Population(_GWTC5, fixed=True))
+    assert fixed.parameters.fixed_constraint_log_fraction == 0.0
+
+
+class _VolumeRedshiftModel:
+    def parameter_spec(self):
+        from darksirens.analysis import ParameterPlan
+
+        return ParameterPlan(
+            labels=("eta",), lower=(0.0,), upper=(1.0,),
+            prior_kinds=(("uniform", None, None),), joint_constraints=(),
+        )
+
+    def log_density(self, z, pixel, cosmology, parameters, state):
+        return 0.0 * z
+
+    def log_auxiliary_likelihood(self, parameters, state):
+        return 0.0
+
+
+def _gw_event():
+    from darksirens.gw.types import GWEvent
+
+    ones = np.ones(4)
+    return GWEvent(m1det=30.0 * ones, m2det=25.0 * ones, dL=500.0 * ones,
+                   chieff=0.0 * ones, prior_wt=ones, pixels=np.zeros(4, dtype=int),
+                   q=ones, valid=ones.astype(bool))
+
+
+@pytest.mark.parametrize("angular", ["isotropic", "multipole", "multipole_l3"])
+def test_a_core_host_density_target_carries_its_angular_correction(monkeypatch, angular):
+    # The review's scenario: a core-built target with a multipole angular
+    # model reported the raw logZ (3.38 nat low for multipole_l3) and no
+    # correction, because the target branch returned before it.
+    from darksirens.likelihood.host_density import make_host_density_target
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    expected = angular_log_prior_volume_correction(angular)
+    event = _gw_event()
+    target = make_host_density_target(
+        _analysis(angular=angular),
+        redshift_model=_VolumeRedshiftModel(),
+        gw_pe=event, gw_selection=event, pe_state=None, selection_state=None,
+        n_events=1, nsamp=4, n_draw=4.0,
+    )
+    _fake_backend(monkeypatch, {"logZ": -12.5})
+    result = infer(target, sampler="dynesty")
+    assert result["log_prior_volume_fraction"] == expected
+    assert result["logZ_corrected"] == -12.5 - expected
+    if angular == "multipole_l3":
+        assert expected == pytest.approx(-3.38, abs=0.01)
+
+
+def test_a_core_catalog_mixture_target_carries_its_analysis_correction(monkeypatch):
+    from _catalog_model_fixtures import catalog_store, gw_stores
+    from darksirens.likelihood.mixture import make_catalog_mixture_target
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    events, injections = gw_stores()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        analysis = ds.model(
+            cosmology=ds.Cosmology(H0=(50.0, 90.0), Om0=0.3075),
+            population=ds.Population(_GWTC5, fixed={_L0: 0.6}),
+            catalog=catalog_store(11),
+            catalog_sky_weighting="field",
+            count_ratio="row",
+            angular="multipole",
+        )
+    target = make_catalog_mixture_target(
+        analysis, events=events, injections=injections, max_likelihood_variance=1e3
+    )
+    expected = angular_log_prior_volume_correction("multipole") + math.log(0.4)
+    _fake_backend(monkeypatch, {"logZ": -7.0})
+    result = infer(target, sampler="dynesty")
+    assert result["log_prior_volume_fraction"] == pytest.approx(expected, rel=1e-15)
+    assert result["logZ_corrected"] == pytest.approx(-7.0 - expected, rel=1e-15)
+
+
+def test_a_companion_target_declares_its_own_correction(monkeypatch):
+    _fake_backend(monkeypatch, {"logZ": -4.0})
+    plain = ds.InferenceTarget(lambda theta: -1.0, _plan())
+    assert infer(plain, sampler="dynesty") == {"logZ": -4.0}
+    declared = ds.InferenceTarget(lambda theta: -1.0, _plan(), log_prior_volume_fraction=-0.5)
+    result = infer(declared, sampler="dynesty")
+    assert result == {"logZ": -4.0, "log_prior_volume_fraction": -0.5, "logZ_corrected": -3.5}
+    for bad, error in ((0.1, ValueError), (float("nan"), ValueError), ("0", TypeError),
+                       (True, TypeError)):
+        with pytest.raises(error, match="log_prior_volume_fraction"):
+            ds.InferenceTarget(lambda theta: -1.0, _plan(), log_prior_volume_fraction=bad)

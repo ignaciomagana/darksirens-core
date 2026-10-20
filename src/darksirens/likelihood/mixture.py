@@ -627,6 +627,10 @@ def make_catalog_mixture_target(
     the analysis's own plan semantic (fixed values and
     ``ParameterPlan.catalog_model`` included), the non-default likelihood
     options and, when the extension defines ``provenance()``, its block.
+    The target declares the analysis's ``log_prior_volume_fraction`` (its
+    angular model's and a partially fixed population pair's), so its
+    ``ds.infer`` result carries ``logZ_corrected`` as an ordinary one does;
+    an extension's own prior rejection is not included.
     """
 
     from darksirens.analysis import Analysis, FieldCatalogMixtureRedshift, ParameterPlan
@@ -726,11 +730,14 @@ def make_catalog_mixture_target(
             block["extension"] = hook()
         return block
 
+    from darksirens.inference.public import _log_prior_volume_fraction
+
     return InferenceTarget(
         log_likelihood=log_likelihood,
         parameters=plan,
         identity=identity,
         provenance=provenance,
+        log_prior_volume_fraction=_log_prior_volume_fraction(analysis),
     )
 
 

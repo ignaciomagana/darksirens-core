@@ -6,10 +6,12 @@ load GW data, build runtime likelihood state, or run a sampler.
 
 from __future__ import annotations
 
+import collections
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import operator
 import re
 from typing import Any
@@ -295,7 +297,13 @@ class ParameterPlan:
     angular=...)``: two angular models can declare the same coordinates
     (``"sphere_gp_z"`` and ``"overdensity_gp"`` do), and
     :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
-    records the name of those.
+    records the name of those. ``fixed_constraint_log_fraction`` is the log
+    prior fraction a partially fixed joint prior pair keeps (``0.0`` when
+    none is): the pair's sampled member is sampled over its own bounds and
+    the likelihood is zero outside the interval the fixed member leaves it,
+    so the raw ``logZ`` carries this data-independent offset, which
+    ``ds.infer`` adds to ``log_prior_volume_fraction``. It derives from the
+    fixed values, so the fingerprint block does not record it.
     """
 
     labels: tuple[str, ...]
@@ -321,6 +329,7 @@ class ParameterPlan:
     catalog_population: tuple[tuple[int, tuple[str, ...]], ...] = ()
     n_catalog_population: int = 0
     angular_model: str = "isotropic"
+    fixed_constraint_log_fraction: float = 0.0
 
     @property
     def catalog_model_settings(self) -> dict:
@@ -1109,7 +1118,7 @@ def _partner_support(kind, members, fixed, bounds):
     return free, lo, hi
 
 
-def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
+def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None) -> float:
     """Check fixed values against the model's joint prior constraints.
 
     Fixed values that violate a constraint, or leave the pair's sampled member
@@ -1117,9 +1126,29 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
     whatever ``allow_out_of_prior`` says: that opt-out concerns a parameter's
     own prior bounds, not the support of a joint prior. A partially fixed pair
     otherwise warns: it cannot be a cube map any more.
+
+    Returns the log prior fraction the likelihood-side rejection keeps
+    (``ParameterPlan.fixed_constraint_log_fraction``): the sampled member of
+    a partially fixed pair is sampled over its own bounds, and only the
+    interval the fixed member leaves it has support. It sums the pairs whose
+    sampled member has a uniform prior (``kinds``) and appears in no other
+    partially fixed pair; another pair's offset is not known here and is
+    named in its warning.
     """
-    for kind, group in getattr(model_obj, "constraint_groups", None) or ():
-        members = [str(label) for label in group]
+    groups = [
+        (kind, [str(label) for label in group])
+        for kind, group in getattr(model_obj, "constraint_groups", None) or ()
+    ]
+    # How many partially fixed pairs each sampled member belongs to.
+    free_count = collections.Counter(
+        label
+        for _, members in groups
+        if any(m in fixed for m in members) and not all(m in fixed for m in members)
+        for label in members
+        if label not in fixed
+    )
+    log_fraction = 0.0
+    for kind, members in groups:
         fixed_members = [label for label in members if label in fixed]
         if not fixed_members:
             continue
@@ -1132,6 +1161,7 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
                     "the likelihood would be zero everywhere"
                 )
             continue
+        known = False
         if (
             len(members) == 2
             and kind in ("ordered_le", "conditional_upper", "simplex")
@@ -1145,14 +1175,48 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
                     f"(interval [{lo}, {hi}]); fix {free!r} as well or move "
                     "the fixed value"
                 )
+            kind_of_free = (kinds or {}).get(free, _UNIFORM)[0]
+            if kind_of_free == "uniform" and free_count[free] == 1:
+                b_lo, b_hi = bounds[free]
+                log_fraction += math.log((hi - lo) / (b_hi - b_lo))
+                known = True
+        offset = (
+            "logZ carries the log prior-fraction offset, which ds.infer adds "
+            "to log_prior_volume_fraction"
+            if known
+            else "logZ carries a log prior-fraction offset that "
+            "log_prior_volume_fraction does not include"
+        )
+        if kind == "conditional_upper" and members[0] in fixed:
+            # The declared pair is upper ~ U(lo, hi), lower | upper ~ U(lo,
+            # upper): at a fixed lower member the upper one's conditional
+            # density is proportional to 1 / (upper - lo), while the sampled
+            # member is uniform over the interval the fixed value leaves it.
+            lo_text = f" - {bounds[members[1]][0]!r}" if members[1] in bounds else ""
+            warnings.warn(
+                f"joint prior constraint {kind}{tuple(members)} has fixed "
+                f"member(s) {fixed_members}, its lower member; {members[1]!r} is sampled "
+                "uniformly over the interval the fixed value leaves it (its "
+                "own uniform prior with likelihood-side rejection, and "
+                f"{offset}). That is not the declared joint prior conditioned "
+                f"on {members[0]!r}, under which {members[1]!r} has a density "
+                f"proportional to 1 / ({members[1]}{lo_text}): the posterior "
+                "differs from that conditional, not only logZ. Fix "
+                f"{members[1]!r} instead (the lower member then has the "
+                "declared conditional prior), or both members.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            continue
         warnings.warn(
             f"joint prior constraint {kind}{tuple(members)} has fixed "
             f"member(s) {fixed_members}; the sampled member(s) keep its "
             "likelihood-side rejection (the invalid region keeps zero "
-            "likelihood, and logZ carries the log prior-fraction offset).",
+            f"likelihood, and {offset}).",
             RuntimeWarning,
             stacklevel=4,
         )
+    return log_fraction
 
 
 def per_catalog_population_label(label: str, catalog_number: int) -> str:
@@ -1516,6 +1580,19 @@ def model(
     support, still raise: the likelihood would be zero everywhere, which is
     not a question of prior bounds. Nor does it check that the model is
     defined at the value.
+
+    Fixing one member of a joint prior pair (for example ``lambda_0`` of the
+    GWTC-5 simplex) warns: the sampled member keeps its own uniform prior
+    with likelihood-side rejection outside the interval the fixed value
+    leaves it, so the raw ``logZ`` carries the log prior fraction that
+    interval keeps (``ParameterPlan.fixed_constraint_log_fraction``, added
+    to ``ds.infer``'s ``log_prior_volume_fraction``). For ``ordered_le``,
+    ``simplex`` and a fixed upper member of ``conditional_upper`` that
+    uniform prior is the declared joint prior conditioned on the fixed
+    value. For a fixed lower member of ``conditional_upper`` (``m2_low`` of
+    the GWTC-5 pair) it is not: the declared conditional of the upper
+    member falls as ``1 / (m1_low - lower bound)``, so the posterior differs
+    as well, and the warning says so.
 
     ``kernel_pin="auto"`` (the default) lets an incomplete-catalog analysis
     that fixes ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` (``H0``
@@ -1898,6 +1975,7 @@ def model(
 
     fixed_population = None
     population_fixed: dict[str, float] = {}
+    fixed_constraint_log_fraction = 0.0
     if population.fixed_values:
         population_model = get_model(
             population.model_name,
@@ -1909,13 +1987,14 @@ def model(
             population, population_model, pop_labels, pop_lower, pop_upper,
             allow_out_of_prior,
         )
-        _check_fixed_constraints(
+        fixed_constraint_log_fraction = _check_fixed_constraints(
             population_model,
             population_fixed,
             {
                 label: (float(lo), float(hi))
                 for label, lo, hi in zip(pop_labels, pop_lower, pop_upper)
             },
+            {label: tuple(kind) for label, kind in zip(pop_labels, pop_kinds)},
         )
     if population_fixed and len(population_fixed) == len(pop_labels):
         fixed_population = tuple(population_fixed[label] for label in pop_labels)
@@ -2022,6 +2101,7 @@ def model(
         catalog_population=catalog_population,
         n_catalog_population=n_catalog_population,
         angular_model=str(angular),
+        fixed_constraint_log_fraction=fixed_constraint_log_fraction,
     )
     return Analysis(
         cosmology=cosmology,
