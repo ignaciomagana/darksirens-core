@@ -237,6 +237,20 @@ class MassComponent(ABC):
         mass_grid = get_mass_grid()
         return jnp.trapezoid(self._eval_unnorm(mass_grid, theta), mass_grid)
 
+    def _norm_above(self, theta, m_lo):
+        """Normalisation integral over ``[m_lo, m_hi]`` of the mass grid.
+
+        Used by ``population_norm="exact"`` for a mixture component with no
+        low-mass edge of its own, whose pairing removes everything below the
+        mixture's edge ``m_lo`` (see :meth:`MixtureModel._mass_norms`).  A
+        trapezoid on nodes relative to ``m_lo``, so the sampled edge never
+        crosses a node; a component with a closed form overrides it.
+        """
+        grid = get_mass_grid()
+        lo = jnp.clip(m_lo, grid[0], grid[-1])
+        m = lo + jnp.linspace(0.0, 1.0, grid.size) * (grid[-1] - lo)
+        return jnp.trapezoid(self._eval_unnorm(m, theta), m)
+
     def _mask_to_support(self, m, dens):
         """Zero ``dens`` outside :attr:`support`.
 
@@ -1261,6 +1275,27 @@ class MixtureModel:
                 return tm[c.param_specs.index(c.m_min_spec)], dmmin
         return M_LO, 0.01
 
+    def _mass_norms(self, tm_list, edge, norms):
+        """The mass normalisers ``norms`` (one ``_norm`` per component), or exact ones.
+
+        A component with no low-mass edge of its own (the Gaussian ``peak``)
+        is normalised over the whole mass grid, but its pairing uses the
+        mixture edge ``m_min`` (:meth:`_low_mass_edge`) and is zero for every
+        ``m1 <= m_min``, so the mixture integrates to
+        ``1 - sum_G w_G P_G(m1 < m_min)`` (0.88 for ``powerlaw+peak`` at the
+        in-prior corner ``G.mu = 20``, ``G.sigma = 10``, ``PL.m_min = 10``).
+        With one population that factor cancels between the event and
+        selection terms; between catalog branches with different populations
+        it does not.  ``population_norm="exact"`` (opt-in) normalises such a
+        component over ``[m_min, m_hi]`` instead (:meth:`MassComponent._norm_above`),
+        so the mixture integrates to one and each weight is the population
+        fraction.  The default returns ``norms`` unchanged.
+        """
+        if normalization_grid_settings().population_norm != "exact":
+            return norms
+        return [norm if hasattr(c, "m_min_spec") else c._norm_above(tm_list[i], edge[0])
+                for i, (c, norm) in enumerate(zip(self.mass_components, norms))]
+
     def _pairing_args(self, i, tm_list, tp_list, edge):
         """``(pairing, m_min, dm_min, theta_p)`` component ``i``'s pairing is called with."""
         c_m = self.mass_components[i];    tm = tm_list[i]
@@ -1313,6 +1348,7 @@ class MixtureModel:
         ]
 
         edge = self._low_mass_edge(tm_list)
+        mass_norms = self._mass_norms(tm_list, edge, mass_norms)
 
         contributions = []
         for i in range(self.k):
@@ -1357,6 +1393,7 @@ class MixtureModel:
 
         mass_norms = [c._norm(tm_list[i]) for i, c in enumerate(self.mass_components)]
         edge = self._low_mass_edge(tm_list)
+        mass_norms = self._mass_norms(tm_list, edge, mass_norms)
 
         total = 0.0
         for i in range(self.k):

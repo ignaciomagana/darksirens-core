@@ -162,6 +162,14 @@ GOLOMB_QUADRATURES = ("grid", "split")
 #: ``sigma = 0.05`` prior floor.
 GOLOMB_SPLIT_NODES = (384, 128, 64)
 
+#: How exactly a population density is normalised (see
+#: ``NormalizationGridSettings``): ``"legacy"`` (default) is correct up to a
+#: factor that depends on the hyperparameters only, which cancels in a
+#: likelihood with one population; ``"exact"`` (opt-in) makes the density
+#: integrate to one, which a likelihood whose catalog branches carry
+#: different populations (``per_catalog_population``) needs.
+POPULATION_NORMS = ("legacy", "exact")
+
 # Grid of the per-point taper table (``pairing_norm="per_point"``), in
 # lambda = log s, s = (m1 - m_edge)/(m_shoulder - m_edge) the primary mass's
 # position inside the secondary-mass taper window.  Three segments of
@@ -297,6 +305,22 @@ class NormalizationGridSettings:
     ``sigma = 0.05``).  ``"split"`` removes both: no node crosses a sampled
     edge, and the narrowest kernel spans several nodes.  The mass grid the
     density is then evaluated on and interpolated from is unchanged.
+
+    ``population_norm`` (env ``DARKSIRENS_GW_POPULATION_NORM``) is
+    ``"legacy"`` (default) or the opt-in ``"exact"`` (see
+    :data:`POPULATION_NORMS`).  Under ``"legacy"`` two population families
+    integrate to a hyperparameter-dependent constant rather than to one,
+    which cancels in a likelihood with a single population but biases the
+    relative branch weights when catalog branches carry different
+    populations: a grammar mixture's component without a low-mass edge of its
+    own (the Gaussian ``peak``) is normalised over the whole mass grid while
+    its pairing, which uses the mixture's edge ``m_min``, removes all of its
+    mass below ``m_min`` (``powerlaw+peak`` integrates to 0.88 at an in-prior
+    corner); and the GWTC-3 and GWTC-5 fiducial masses form each component's
+    kept fraction as ``1 - deficit``, so a steep power law almost entirely
+    inside the taper window loses up to 19% of its kept fraction to the
+    window quadrature.  ``"exact"`` normalises the edge-less component over
+    ``[m_min, m_hi]`` and integrates the kept part directly.
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
@@ -308,6 +332,7 @@ class NormalizationGridSettings:
     pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
     pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "auto")
     golomb_quadrature: str = os.environ.get("DARKSIRENS_GW_GOLOMB_QUADRATURE", "grid")
+    population_norm: str = os.environ.get("DARKSIRENS_GW_POPULATION_NORM", "legacy")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -355,6 +380,11 @@ class NormalizationGridSettings:
             raise ValueError(
                 f"golomb_quadrature must be one of {GOLOMB_QUADRATURES}, got "
                 f"{self.golomb_quadrature!r} (env DARKSIRENS_GW_GOLOMB_QUADRATURE)"
+            )
+        if self.population_norm not in POPULATION_NORMS:
+            raise ValueError(
+                f"population_norm must be one of {POPULATION_NORMS}, got "
+                f"{self.population_norm!r} (env DARKSIRENS_GW_POPULATION_NORM)"
             )
         # The two options answer the same question differently: the m1 grid
         # interpolates the per-sample normaliser from static nodes, "per_point"
@@ -410,10 +440,12 @@ class NormalizationGridSettings:
         # per-sample normaliser, or the reverse.
         if out["pairing_norm"] == "per_sample":
             del out["pairing_norm"]
-        # The opt-in is recorded only when set: every run made without it
-        # evaluated the default, so their fingerprints keep matching.
+        # The two opt-ins are recorded only when set: every run made without
+        # them evaluated the defaults, so their fingerprints keep matching.
         if out["golomb_quadrature"] == "grid":
             del out["golomb_quadrature"]
+        if out["population_norm"] == "legacy":
+            del out["population_norm"]
         return out
 
     def per_point_pairing_norm(self) -> bool:
@@ -453,6 +485,7 @@ def configure_normalization_grids(
     pairing_scale: str | None = None,
     pairing_norm: str | None = None,
     golomb_quadrature: str | None = None,
+    population_norm: str | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -467,8 +500,10 @@ def configure_normalization_grids(
     :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"auto"`` (default),
     ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`.
     ``golomb_quadrature`` is ``"grid"`` (default) or the opt-in ``"split"``;
-    see :data:`GOLOMB_QUADRATURES`. Like every setting here they are read when
-    a likelihood is traced, so configure them before binding the analysis.
+    see :data:`GOLOMB_QUADRATURES`. ``population_norm`` is ``"legacy"``
+    (default) or the opt-in ``"exact"``; see :data:`POPULATION_NORMS`. Like
+    every setting here they are read when a likelihood is traced, so configure
+    them before binding the analysis.
     """
 
     global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
@@ -480,7 +515,8 @@ def configure_normalization_grids(
                         "pairing_edge_tol": pairing_edge_tol,
                         "pairing_scale": pairing_scale,
                         "pairing_norm": pairing_norm,
-                        "golomb_quadrature": golomb_quadrature}.items():
+                        "golomb_quadrature": golomb_quadrature,
+                        "population_norm": population_norm}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:

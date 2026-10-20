@@ -248,6 +248,12 @@ class Gaussian(MassComponent):
         grid = get_mass_grid()
         return truncated_gaussian_norm(theta[0], theta[1], grid[0], grid[-1])
 
+    def _norm_above(self, theta, m_lo):
+        """Exact normaliser over ``[m_lo, m_hi]`` (``population_norm="exact"``)."""
+        grid = get_mass_grid()
+        return truncated_gaussian_norm(theta[0], theta[1],
+                                       jnp.clip(m_lo, grid[0], grid[-1]), grid[-1])
+
     def _eval_unnorm(self, m, t):
         """Evaluate the Gaussian peak at primary mass ``m``."""
         mu, sig = t[0], t[1]
@@ -572,6 +578,30 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
 
         n_bpl, n_g1, n_g2 = self._component_norms(theta)
         m_w = self._taper_window_grid(m1_low, delta_m1)
+        if normalization_grid_settings().population_norm == "exact":
+            # Opt-in: the kept part integrated directly, the window by the
+            # same quadrature plus the closed-form rest above it.  ``1 - D``
+            # subtracts the window rule's O(h^2) error from a number near 1,
+            # which a component almost entirely inside the window turns into
+            # a large relative error of what it keeps (see
+            # NormalizationGridSettings; 1.2e-3 on this normaliser at the
+            # worst of 300 prior draws).
+            keep = sfilter_low(m_w, m1_low, delta_m1)
+            top = m_w[-1]
+
+            def kept(raw, n, rest):
+                inside = jnp.trapezoid(raw * keep, m_w)
+                return jnp.where(n > 0.0, jnp.clip((inside + rest) / _pos(n), 0.0, 1.0), 0.0)
+
+            total = (
+                lambda0 * kept(self._bpl_raw(m_w, alpha1, alpha2, m_break, m1_low), n_bpl,
+                               broken_powerlaw_norm(alpha1, alpha2, m_break, top, self.m_high))
+                + lambda1 * kept(self._trunc_gauss_raw(m_w, mu1, sigma1, m1_low), n_g1,
+                                 truncated_gaussian_norm(mu1, sigma1, top, self.m_high))
+                + lambda2 * kept(self._trunc_gauss_raw(m_w, mu2, sigma2, m1_low), n_g2,
+                                 truncated_gaussian_norm(mu2, sigma2, top, self.m_high))
+            )
+            return jnp.where(valid_weights, total, 0.0)
         cut = 1.0 - sfilter_low(m_w, m1_low, delta_m1)
 
         def kept(raw, n):
@@ -894,6 +924,23 @@ class GWTC3PowerLawPeakMass(MassComponent):
         """
         alpha, m_min, m_max, lam, mu, sigma, delta_m = theta
         m_w = self._taper_window_grid(m_min, delta_m)
+        if normalization_grid_settings().population_norm == "exact":
+            # Opt-in: the kept part integrated directly (see the GWTC-5
+            # model's _norm): measured at alpha = 10.8, m_min = 3.24,
+            # delta_m = 9.11 (inside Table VI) the default ``1 - D`` keeps
+            # 1.18e-3 of the power law against a true 1.46e-3, and this
+            # normaliser is 0.37% low.
+            keep = sfilter_low(m_w, m_min, delta_m)
+            top = m_w[-1]
+            s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+            pl_rest = (_powerlaw_segment_norm(top, m_max, 1.0, alpha)
+                       / _pos(_powerlaw_segment_norm(m_min, m_max, 1.0, alpha)))
+            kept_pl = jnp.clip(jnp.trapezoid(self._powerlaw_pdf(m_w, alpha, m_min, m_max) * keep, m_w)
+                               + pl_rest, 0.0, 1.0)
+            # P(m > top) of the untruncated Gaussian, through erfc.
+            kept_g = jnp.clip(jnp.trapezoid(self._gaussian_pdf(m_w, mu, s) * keep, m_w)
+                              + 0.5 * erfc((top - mu) / (s * _SQRT2)), 0.0, 1.0)
+            return (1.0 - lam) * kept_pl + lam * kept_g
         cut = 1.0 - sfilter_low(m_w, m_min, delta_m)
 
         def kept(pdf, below=0.0):
