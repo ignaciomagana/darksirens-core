@@ -168,10 +168,10 @@ class FieldCatalogMixtureRedshift:
     ``components`` are the catalogs in order (catalog ``k + 1`` of the
     labels' ``_c{k+1}`` suffix). ``completeness`` is one of
     :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the count ratio of
-    ``count_ratio``; ``"selection"``; ``"complete"``) when every catalog has the same
-    one, else a tuple with one entry per catalog. ``n0_units`` is the unit of
-    every ``log10n0``. ``normalizer`` is the resolved form of the catalogs'
-    survey-global normalisers (``"direct"`` or ``"moments"``, see
+    ``count_ratio``; ``"selection"``; ``"complete"``) when every catalog has
+    the same one, else a tuple with one entry per catalog. ``n0_units`` is
+    the unit of every ``log10n0``. ``normalizer`` is the resolved form of the
+    catalogs' survey-global normalisers (``"direct"`` or ``"moments"``, see
     :mod:`darksirens.catalog.mixture`; it is not evaluated for one catalog,
     where it cancels), likewise one value when they agree and a tuple
     otherwise. :attr:`catalog_completeness` and :attr:`catalog_normalizers`
@@ -1171,10 +1171,10 @@ def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None, copied=()) ->
     interval the fixed member leaves it has support. It sums the pairs whose
     sampled member has a uniform prior (``kinds``) and appears in no other
     partially fixed pair, and none of whose members has a per-catalog copy
-    (``copied``, the base labels of ``model(per_catalog_population=...)``):
-    the rejection then acts per catalog, and the likelihood is zero only
-    where every catalog's copy leaves the support, which is no constant
-    fraction of the box. Another pair's offset is not known here and is
+    (``copied``, the base labels of ``model(per_catalog_population=...)``;
+    with a copy the rejection acts per catalog, and the likelihood is zero
+    only where every catalog's copy leaves the support, which is no constant
+    fraction of the box). Another pair's offset is not known here and is
     named in its warning.
     """
     groups = [
@@ -1545,9 +1545,9 @@ def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     ``setting="auto"`` whose sampled labels include none of ``Om0``, ``w0``,
     ``wa``, ``delta``, ``sigma_kde``, and for a field-weighted analysis with
     any catalog pinned (:func:`catalog_kernel_pins_active`, which pins a
-    complete catalog too): the kernel's redshift dependence is then fixed up to the
-    scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never values,
-    as legacy's ``kernel_pin_admissible`` does
+    complete catalog too): the kernel's redshift dependence is then fixed up
+    to the scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never
+    values, as legacy's ``kernel_pin_admissible`` does
     (``likelihood/factory.py:1031-1052``, which also restricts the pin to
     the unmarked incomplete ``dark_sirens`` model).
     """

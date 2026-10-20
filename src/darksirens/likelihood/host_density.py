@@ -195,6 +195,15 @@ def make_host_density_target(
     declares the base analysis's ``log_prior_volume_fraction`` (its angular
     model's and a partially fixed population pair's), so its ``ds.infer``
     result carries ``logZ_corrected`` as an ordinary one does.
+
+    The target carries no ``identity`` or ``provenance``, and its plan
+    (:func:`~darksirens.inference.target.combine_parameter_plans`) keeps only
+    the sampled coordinates, so its run fingerprint does not record the base
+    analysis's fixed values or which of two angular models with the same
+    coordinates (``"sphere_gp_z"``, ``"overdensity_gp"``) it uses. A caller
+    that checkpoints one adds them, e.g.
+    ``dataclasses.replace(target, provenance={"base": parameter_plan_semantic(
+    base_analysis.parameters)})``.
     """
 
     if not isinstance(base_analysis, Analysis):
