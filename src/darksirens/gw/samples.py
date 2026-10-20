@@ -578,8 +578,36 @@ _COSMO_H0_TOL = 1.0
 _COSMO_OM0_TOL = 0.05
 
 
+#: The declarations gwcat's 2.1 ``contract_hash`` digests
+#: (``gwcat.export.contract.PAIRING_FIELDS``).
+_PAIRING_FIELDS = (
+    "parameter_space",
+    "fit_columns",
+    "advisory_columns",
+    "spin_basis_kind",
+    "spin_density_exact",
+    "sky_prior_in_density",
+    "source_class",
+)
+#: The one PE/selection pair gwcat validates with unequal hashes: a chi_eff PE
+#: file and a selection file reweighted to the reference spin prior that PE
+#: file divides out. Their contracts differ only in these fields; one shared
+#: spin ceiling (checked by ``_require_reference_ceiling``) makes them one
+#: density.
+_REFERENCE_SPACES = ("chieff", "chieff_reference")
+_REFERENCE_FIELDS = ("parameter_space", "advisory_columns")
+
+
+def _store_contract(store) -> dict:
+    try:
+        contract = json.loads(store.attrs.get("contract", "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return contract if isinstance(contract, dict) else {}
+
+
 def require_matching_contract(events: GWStore, injections: SelectionStore) -> None:
-    """Refuse a PE/selection pair declaring different gwcat pairing contracts.
+    """Refuse a PE/selection pair that does not describe one estimand.
 
     The 2.1 ``contract_hash`` digests the pairing-critical declarations
     (parameter space, fit/advisory columns, spin-basis kind, sky-measure
@@ -587,8 +615,23 @@ def require_matching_contract(events: GWStore, injections: SelectionStore) -> No
     the denominator of one hierarchical likelihood on different estimands and
     is silently wrong, so it is refused here with the field-by-field
     difference rather than a bare hash. Stores predating the contract carry no
-    hash and stay exempt; the per-store basis gates still apply.
+    hash and are exempt from that comparison; the per-store basis gates still
+    apply. The one unequal pair gwcat accepts, a ``chieff`` PE file with a
+    ``chieff_reference`` selection file, passes when its other pairing fields
+    agree.
+
+    Two declarations the hash leaves out are compared here directly, on every
+    pair that records them (see :func:`_require_matching_event_cut`): the
+    detection cut and the redshift truncation of the event list. A
+    ``chieff_reference`` selection file must also name the PE side's spin
+    ceiling (:func:`_require_reference_ceiling`).
     """
+    _require_matching_hash(events, injections)
+    _require_reference_ceiling(events, injections)
+    _require_matching_event_cut(events, injections)
+
+
+def _require_matching_hash(events: GWStore, injections: SelectionStore) -> None:
     pe_hash = events.attrs.get("contract_hash")
     sel_hash = injections.attrs.get("contract_hash")
     if pe_hash is None or sel_hash is None:
@@ -596,25 +639,187 @@ def require_matching_contract(events: GWStore, injections: SelectionStore) -> No
     if pe_hash == sel_hash:
         return
 
-    diff = ""
-    try:
-        pe_contract = json.loads(events.attrs.get("contract", "{}"))
-        sel_contract = json.loads(injections.attrs.get("contract", "{}"))
-        fields = sorted(set(pe_contract) | set(sel_contract))
-        parts = [
-            f"{k}: PE={pe_contract.get(k)!r} vs selection={sel_contract.get(k)!r}"
-            for k in fields
-            if pe_contract.get(k) != sel_contract.get(k)
-        ]
-        diff = " Differing fields: " + "; ".join(parts) if parts else ""
-    except Exception:
-        pass
+    pe_contract = _store_contract(events)
+    sel_contract = _store_contract(injections)
+    fields = sorted(set(pe_contract) | set(sel_contract))
+    differing = [k for k in fields if pe_contract.get(k) != sel_contract.get(k)]
+    reference_pair = (
+        (pe_contract.get("parameter_space"), sel_contract.get("parameter_space"))
+        == _REFERENCE_SPACES
+        and all(k in pe_contract and k in sel_contract for k in _PAIRING_FIELDS)
+        and not [k for k in differing if k in _PAIRING_FIELDS and k not in _REFERENCE_FIELDS]
+    )
+    if reference_pair:
+        return
+    parts = [
+        f"{k}: PE={pe_contract.get(k)!r} vs selection={sel_contract.get(k)!r}"
+        for k in differing
+    ]
+    diff = " Differing fields: " + "; ".join(parts) if parts else ""
     raise RuntimeError(
         f"PE file {events.path!r} and selection file {injections.path!r} "
         f"declare different pairing contracts (contract_hash {pe_hash} != "
         f"{sel_hash}): the pair does not describe the same fit and cannot be "
         f"combined in one likelihood.{diff}"
     )
+
+
+def _attr_number(value) -> float:
+    try:
+        return float(np.asarray(value, dtype=float).ravel()[0])
+    except (TypeError, ValueError, IndexError):
+        return float("nan")
+
+
+def _require_reference_ceiling(events: GWStore, injections: SelectionStore) -> None:
+    """A ``chieff_reference`` selection file must name the PE chi_eff ceiling.
+
+    Its pdraw is reweighted TO the reference prior the chi_eff PE p_pe divides
+    OUT, so the two ceilings are one quantity: a mismatch leaves an uncancelled
+    chi_eff-dependent factor in every event's weight. A campaign that does not
+    reach the reference ceiling leaves part of its support without draws,
+    which biases mu low; gwcat records that as ``spin_reference_coverage_ok``.
+    """
+    if _decode_hdf5_attr(injections.attrs.get("spin_basis", "")) != "chieff_reference":
+        return
+    a_ref = _attr_number(injections.attrs.get("spin_reference_amax"))
+    if not (np.isfinite(a_ref) and a_ref > 0.0):
+        raise RuntimeError(
+            f"Selection file {injections.path!r} is in the 'chieff_reference' basis "
+            f"but its spin_reference_amax={injections.attrs.get('spin_reference_amax')!r} "
+            "is not a positive finite spin ceiling"
+        )
+    names = [n for n in ("chi_eff_amax_1_per_event", "chi_eff_amax_2_per_event") if n in events.attrs]
+    if names:
+        pe_amax = np.concatenate([np.atleast_1d(np.asarray(events.attrs[n], dtype=float)) for n in names])
+    elif "chi_eff_amax" in events.attrs:
+        pe_amax = np.atleast_1d(np.asarray(events.attrs["chi_eff_amax"], dtype=float))
+    else:
+        pe_amax = np.array([], dtype=float)
+    if not pe_amax.size or not np.all(np.isfinite(pe_amax)):
+        raise RuntimeError(
+            f"Selection file {injections.path!r} is in the 'chieff_reference' basis, "
+            f"whose reference ceiling must equal the PE chi_eff ceiling, but PE file "
+            f"{events.path!r} records no finite chi_eff ceiling (chi_eff_amax_1/2_per_event "
+            "or chi_eff_amax)"
+        )
+    if not np.allclose(pe_amax, a_ref, rtol=1e-9, atol=1e-12):
+        found = sorted({round(float(v), 9) for v in pe_amax})
+        raise RuntimeError(
+            f"PE file {events.path!r} has chi_eff prior ceiling(s) {found} but selection "
+            f"file {injections.path!r} is reweighted to the reference spin prior at "
+            f"spin_reference_amax={a_ref}. In the 'chieff_reference' basis the two "
+            "are the same prior, so a mismatch leaves an uncancelled chi_eff-dependent "
+            "factor in every event's weight. Re-export the selection file with "
+            "spin_reference_amax equal to the PE ceiling (or the PE file at that ceiling)."
+        )
+    coverage = injections.attrs.get("spin_reference_coverage_ok")
+    if coverage is not None and not bool(np.all(np.asarray(coverage).astype(bool))):
+        warnings.warn(
+            f"Selection file {injections.path!r} records spin_reference_coverage_ok=False: "
+            f"at least one campaign's injected spin magnitudes do not reach the "
+            f"reference ceiling {a_ref}, so part of the reference support has no "
+            "draws and the selection integral is biased low.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+
+def _declared_number(store, contract, attr_names, contract_key):
+    """``(value, recorded)``: a store's statement of one cut, NaN when unstated.
+
+    The first of ``attr_names`` the store carries wins, then the 2.1 contract
+    field. ``recorded`` is whether the store records the field at all (a NaN
+    or ``None`` record states "no cut").
+    """
+    for name in attr_names:
+        if name in store.attrs:
+            return _attr_number(store.attrs[name]), True
+    if contract_key in contract:
+        value = contract[contract_key]
+        return (float("nan") if value is None else _attr_number(value)), True
+    return float("nan"), False
+
+
+def _declared_statistic(store, contract, far, snr):
+    for value in (store.attrs.get("significance_type"), contract.get("detection_statistic")):
+        value = _decode_hdf5_attr(value)
+        if value:
+            return str(value)
+    if np.isfinite(far):
+        return "far_or_snr" if np.isfinite(snr) else "far"
+    return "snr" if np.isfinite(snr) else None
+
+
+def _same_cut(a, b):
+    if np.isnan(a) and np.isnan(b):
+        return True
+    if np.isnan(a) or np.isnan(b):
+        return False
+    return bool(np.isclose(a, b, rtol=1e-12, atol=0.0))
+
+
+def _require_matching_event_cut(events: GWStore, injections: SelectionStore) -> None:
+    """Refuse a pair whose event cut differs from its injections' detection cut.
+
+    The selection integral must count injections under the same detection
+    statistic and threshold, and over the same redshift range, that selected
+    the events (gwcat records these but leaves them out of the contract hash).
+    Two stated values that differ are refused; a value stated on one side only
+    warns, since a name-selected event list can match an injection cut exactly
+    without saying so. The rules follow gwcat's pair validator, plus the
+    detection statistic itself when both sides state one.
+    """
+    pe_contract = _store_contract(events)
+    sel_contract = _store_contract(injections)
+    pe_far, _ = _declared_number(events, pe_contract, ("far_max",), "detection_threshold")
+    sel_far, _ = _declared_number(injections, sel_contract, ("far_threshold",), "detection_threshold")
+    pe_snr, _ = _declared_number(events, pe_contract, ("snr_min",), "snr_min")
+    sel_snr, _ = _declared_number(
+        injections, sel_contract, ("significance_snr_threshold", "snr_threshold"), "snr_min"
+    )
+    pe_zmax, pe_has_zmax = _declared_number(events, pe_contract, ("z_max",), "z_max")
+    sel_zmax, sel_has_zmax = _declared_number(injections, sel_contract, ("z_max",), "z_max")
+    pe_stat = _declared_statistic(events, pe_contract, pe_far, pe_snr)
+    sel_stat = _declared_statistic(injections, sel_contract, sel_far, sel_snr)
+
+    mismatch, one_sided = [], []
+    if pe_stat is not None and sel_stat is not None and pe_stat != sel_stat:
+        mismatch.append(f"detection statistic: PE {pe_stat!r} vs selection {sel_stat!r}")
+    for label, pe_v, sel_v, pe_name, sel_name in (
+        ("FAR", pe_far, sel_far, "far_max", "far_threshold"),
+        ("SNR", pe_snr, sel_snr, "snr_min", "significance_snr_threshold"),
+    ):
+        if _same_cut(pe_v, sel_v):
+            continue
+        where = f"{label}: PE {pe_name}={pe_v} vs selection {sel_name}={sel_v}"
+        (one_sided if np.isnan(pe_v) or np.isnan(sel_v) else mismatch).append(where)
+    if not _same_cut(pe_zmax, sel_zmax):
+        where = f"redshift truncation: PE z_max={pe_zmax} vs selection z_max={sel_zmax}"
+        if np.isnan(pe_zmax) or np.isnan(sel_zmax):
+            # A side that records "no truncation" contradicts one that truncates;
+            # a side that predates the record is unknown, not a mismatch.
+            (mismatch if pe_has_zmax and sel_has_zmax else one_sided).append(where)
+        else:
+            mismatch.append(where)
+    if mismatch:
+        raise RuntimeError(
+            f"PE file {events.path!r} and selection file {injections.path!r} select "
+            "their events differently: " + "; ".join(mismatch) + ". The selection "
+            "integral must count injections under the same detection statistic, "
+            "threshold and redshift truncation that selected the events, or mu, and "
+            "with it every population and cosmology parameter, is biased."
+        )
+    if one_sided:
+        warnings.warn(
+            f"PE store {events.path!r} and selection file {injections.path!r}: event "
+            "cut stated on one side only (" + "; ".join(one_sided) + "). This is legal "
+            "when the event list was chosen another way (for example by name) to "
+            "satisfy the injection cut, but the files cannot show it; verify the "
+            "equivalence before quoting a rate.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def warn_pair_cosmology(events: GWStore, injections: SelectionStore) -> None:
