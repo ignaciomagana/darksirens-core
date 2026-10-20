@@ -394,7 +394,8 @@ def core_numerics_semantic(likelihood=None) -> dict:
 
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
-    ``DARKSIRENS_SKY_ZNORM_HI``, ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
+    ``DARKSIRENS_GP_NORM_QUADRATURE``, ``DARKSIRENS_SKY_ZNORM_HI``,
+    ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
     ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
     ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
     runtime by ``configure_normalization_grids`` and the catalog evaluation
@@ -435,6 +436,11 @@ def core_numerics_semantic(likelihood=None) -> dict:
         if options:
             extra["likelihood_options"] = options
 
+    gp_normaliser = {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N}
+    if gp._NORM_QUADRATURE != "lattice":
+        # Opt-in (DARKSIRENS_GP_NORM_QUADRATURE); the default enters no key, so
+        # every existing fingerprint is unchanged.
+        gp_normaliser["quadrature"] = gp._NORM_QUADRATURE
     catalog_evaluation = catalog_evaluation_settings().to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
@@ -449,7 +455,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
             "zmax": distances.zMax,
             "nodes": distances._ZGRID_NODES,
         },
-        "gp_redshift_normaliser": {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N},
+        "gp_redshift_normaliser": gp_normaliser,
         "gp_population_edges": {
             "mass": list(gp._GPPOP_M_EDGES),
             "redshift": list(gp._GPPOP_Z_EDGES),
