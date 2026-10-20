@@ -487,3 +487,16 @@ def test_admissible_joint_constraints_draw_inside_their_region():
     assert np.all(np.sum(draws[:, 2:5] ** 2, axis=1) <= 1.0 + 1e-12)
     assert np.all(draws[:, 5] <= draws[:, 6]) and np.all(draws[:, 6] <= draws[:, 7])
 
+
+def test_normal_prior_window_the_transform_cannot_resolve_is_refused():
+    """N(0.4, 0.02) on [0.1, 0.2]: every draw was 0.2593, outside the bounds."""
+    with pytest.raises(ValueError, match=r"parameter 'x'.*7\.03 scale"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.1,),
+                upper=(0.2,),
+                prior_kinds=(("normal", 0.4, 0.02),),
+            ),
+        )

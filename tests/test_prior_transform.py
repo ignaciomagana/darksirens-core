@@ -245,6 +245,70 @@ def test_joint_maps_sharing_a_coordinate_that_do_not_compose_are_refused(
         )
 
 
+@pytest.mark.parametrize(
+    "lower,upper,kind",
+    [
+        (8.0, 10.0, ("normal", 0.0, 1.0)),
+        (-10.0, -8.0, ("normal", 0.0, 1.0)),
+        (0.1, 0.2, ("normal", 0.4, 0.02)),
+        # survey_priors={"sigma_kde": ("normal", 0.1, 0.005)} on [0, 0.05].
+        (0.0, 0.05, ("normal", 0.1, 0.005)),
+        (float(np.exp(8.0)), float(np.exp(10.0)), ("lognormal", 0.0, 1.0)),
+        # 0.1% of this window lies beyond the clip: the top draws collapsed
+        # onto 7.0345.
+        (6.0, 8.0, ("normal", 0.0, 1.0)),
+    ],
+)
+def test_truncation_window_beyond_the_inverse_cdf_clip_is_refused(lower, upper, kind):
+    """The inverse CDF clips Phi at 1e-12 from 0 and 1, so a window holding
+    (almost) no normal mass returned loc -/+ 7.03 scale for every u: a point
+    mass, here outside [lower, upper] (0.2593 on [0.1, 0.2])."""
+    _enable_x64()
+    with pytest.raises(ValueError, match="7.03 scale"):
+        make_prior_transform([lower], [upper], [kind])
+
+
+def test_resolvable_truncation_windows_keep_their_transform():
+    _enable_x64()
+    from scipy.stats import truncnorm
+
+    u = np.linspace(0.001, 0.999, 9)[:, None]
+    for lower, upper, loc, scale in [
+        (4.0, 6.0, 0.0, 1.0),
+        (-10.0, -4.5, 0.0, 1.0),
+        (-23.0, -18.0, -20.3, 0.05),
+        (-3.0, 3.0, 0.0, 1.0),
+    ]:
+        got = np.asarray(
+            make_prior_transform([lower], [upper], [("normal", loc, scale)])(u)
+        )[:, 0]
+        want = truncnorm.ppf(
+            u[:, 0], (lower - loc) / scale, (upper - loc) / scale, loc=loc, scale=scale
+        )
+        np.testing.assert_allclose(got, want, rtol=1e-7, atol=1e-12)
+
+
+def test_survey_prior_normal_far_from_its_default_bounds_is_refused_at_infer():
+    """``survey_priors`` truncates a bare normal to the default bounds: sigma_kde
+    N(0.1, 0.005) on [0, 0.05] drew 0.0648 for every point, outside them."""
+    _enable_x64()
+    import darksirens as ds
+    from darksirens.inference.public import _prior_transform
+    from _catalog_model_fixtures import COSMOLOGY, FIXED_POPULATION, MODEL, catalog_store
+
+    analysis = ds.model(
+        cosmology=COSMOLOGY,
+        population=ds.Population(MODEL, fixed=FIXED_POPULATION),
+        catalog=catalog_store(),
+        survey_priors={"sigma_kde": ("normal", 0.1, 0.005)},
+    )
+    plan = analysis.parameters
+    index = plan.labels.index("sigma_kde")
+    assert (plan.lower[index], plan.upper[index]) == (0.0, 0.05)
+    with pytest.raises(ValueError, match=f"parameter index {index}: .*7.03 scale"):
+        _prior_transform(plan)
+
+
 def test_uniform_module_import_and_construction_do_not_eagerly_load_jax_or_backends():
     code = (
         "import sys; from darksirens.inference.prior import make_prior_transform; "

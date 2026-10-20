@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 # The per-parameter families and the index arity of each joint cube map this
@@ -94,6 +96,74 @@ def check_joint_constraint_composition(joint_constraints, labels=None) -> None:
             )
 
 
+# _trunc_normal_ppf clips the normal CDF to [1e-12, 1 - 1e-12], so it cannot
+# place a draw more than about 7.03 standard deviations from loc: every u the
+# clip touches maps to loc -/+ 7.03 scale, inside or outside [lower, upper].
+_TRUNC_NORMAL_CDF_CLIP = 1e-12
+# A truncation window may lose at most this fraction of its mass to the clip,
+_TRUNC_NORMAL_MAX_CLIPPED = 1e-6
+# and must hold at least this much of the normal: near 1 the CDF resolves
+# only ~1e-16, too coarse for a thinner window in the upper tail.
+_TRUNC_NORMAL_MIN_MASS = 1e-10
+
+
+def truncated_normal_window_problem(kind, lower, upper, loc, scale):
+    """Why the transform cannot draw this truncated normal window, or ``None``.
+
+    ``kind`` is ``"normal"`` or ``"lognormal"`` (whose window is
+    ``[log lower, log upper]``, with the transform's 1e-300 floor); ``None``
+    for ``loc``/``scale`` means the ``(0, 1)`` defaults, as in the transform.
+    A window whose mass lies beyond the CDF clip collapses: every draw is the
+    same constant ``loc -/+ 7.03 scale``, which may lie outside the bounds.
+    The masses are computed from the tail on the window's side, so they stay
+    accurate where ``ndtr`` rounds to 1.
+    """
+    mu = 0.0 if loc is None else float(loc)
+    sigma = 1.0 if scale is None else float(scale)
+    a, b = float(lower), float(upper)
+    if kind == "lognormal":
+        a, b = math.log(max(a, 1e-300)), math.log(max(b, 1e-300))
+    za, zb = (a - mu) / sigma, (b - mu) / sigma
+
+    def cdf(z):
+        return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+    def sf(z):
+        return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+    if za >= 0.0:
+        mass = sf(za) - sf(zb)
+    elif zb <= 0.0:
+        mass = cdf(zb) - cdf(za)
+    else:
+        mass = 1.0 - cdf(za) - sf(zb)
+    clip = _TRUNC_NORMAL_CDF_CLIP
+    clipped = max(0.0, min(cdf(zb), clip) - cdf(za)) + max(
+        0.0, min(sf(za), clip) - sf(zb)
+    )
+    space = " in log space" if kind == "lognormal" else ""
+    family = f"N(loc={mu:g}, scale={sigma:g}){space}"
+    window = f"[{float(lower):g}, {float(upper):g}]"
+    clipping = (
+        "the unit-cube inverse CDF clips the normal CDF at 1e-12 from 0 and "
+        "1, so its draws collapse onto loc -/+ 7.03 scale"
+    )
+    remedy = "Widen the bounds, move loc toward them, or use a uniform prior."
+    if not mass > _TRUNC_NORMAL_MIN_MASS:
+        return (
+            f"{family} puts only {mass:.3g} of its mass inside {window}, "
+            f"below the {_TRUNC_NORMAL_MIN_MASS:g} the transform resolves "
+            f"({clipping}). {remedy}"
+        )
+    if clipped / mass > _TRUNC_NORMAL_MAX_CLIPPED:
+        return (
+            f"{clipped / mass:.3g} of the mass {family} puts inside {window} "
+            f"lies beyond 7.03 standard deviations of loc, where {clipping}. "
+            f"{remedy}"
+        )
+    return None
+
+
 def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None):
     """Unit-cube -> parameter inverse-CDF transform, per-parameter prior-aware.
 
@@ -141,6 +211,14 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
                     f"unknown prior kind {k[0]!r} at parameter index {index}; "
                     f"accepted kinds are {PRIOR_KINDS}"
                 )
+            if k[0] in ("normal", "lognormal"):
+                problem = truncated_normal_window_problem(
+                    k[0], lower[index], upper[index], k[1], k[2]
+                )
+                if problem is not None:
+                    raise ValueError(
+                        f"prior kind {k[0]!r} at parameter index {index}: {problem}"
+                    )
 
     if joint_constraints:
         import jax.numpy as _jnp

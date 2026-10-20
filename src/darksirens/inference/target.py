@@ -18,6 +18,7 @@ from .prior import (
     JOINT_CONSTRAINT_ARITY,
     PRIOR_KINDS,
     check_joint_constraint_composition,
+    truncated_normal_window_problem,
 )
 
 
@@ -131,8 +132,16 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
         if not lo < hi:
             raise ValueError(f"parameter {label!r} requires lower < upper")
 
-    for label, entry in zip(plan.labels, plan.prior_kinds):
+    for label, entry, lower, upper in zip(
+        plan.labels, plan.prior_kinds, plan.lower, plan.upper
+    ):
         _validate_prior_kind(label, entry)
+        if entry[0] in ("normal", "lognormal"):
+            problem = truncated_normal_window_problem(
+                entry[0], lower, upper, entry[1], entry[2]
+            )
+            if problem is not None:
+                raise ValueError(f"prior for parameter {label!r}: {problem}")
 
     for kind, indices in plan.joint_constraints:
         if not isinstance(kind, str) or not kind:
