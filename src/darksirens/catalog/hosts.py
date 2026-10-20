@@ -37,6 +37,9 @@ jax.config.update("jax_enable_x64", True)
 LOG_H_CLIP: float = 7.0
 MU_MISS_NBINS: int = 40
 MARK_SATURATION_MAX_FRACTION: float = 0.5
+#: ``mu_miss_estimator`` values: the legacy count mean of ``h`` per redshift
+#: bin, and the opt-in mean weighted by the catalog base weights.
+MU_MISS_ESTIMATORS: tuple = ("count", "weighted")
 
 
 @jax.tree_util.register_pytree_node_class
@@ -490,7 +493,12 @@ def build_marked_catalog_kernel_state(
 
 
 def _mu_miss_from_flat(zs, h, real):
-    """Legacy 40-bin empirical ``E_obs[h|z]`` missing-host efficiency."""
+    """Legacy 40-bin empirical ``E_obs[h|z]`` missing-host efficiency.
+
+    ``real`` weighs each entry: the {0, 1} real-galaxy mask (the legacy count
+    mean) or, under ``mu_miss_estimator="weighted"``, each real galaxy's base
+    weight (zero on padding).
+    """
 
     z_hi = zgrid[-1]
     edges = jnp.linspace(0.0, z_hi, MU_MISS_NBINS + 1)
@@ -503,9 +511,12 @@ def _mu_miss_from_flat(zs, h, real):
     # where, not ``h * real``: a non-finite h in a padded slot times 0 is NaN.
     sum_h = jnp.zeros(MU_MISS_NBINS).at[b].add(jnp.where(real > 0.0, h * real, 0.0))
     cnt = jnp.zeros(MU_MISS_NBINS).at[b].add(real)
+    # A count total is >= 1 when positive, so this is the legacy
+    # ``maximum(total, 1)`` for counts; base weights may sum below 1.
+    total = jnp.sum(cnt)
     mu_global = jnp.where(
-        jnp.sum(cnt) > 0.0,
-        jnp.sum(sum_h) / jnp.maximum(jnp.sum(cnt), 1.0),
+        total > 0.0,
+        jnp.sum(sum_h) / jnp.where(total > 0.0, total, 1.0),
         1.0,
     )
     mu_bin = jnp.where(
@@ -523,6 +534,7 @@ def missing_host_efficiency_grid(
     eta,
     *,
     aligned_log_h=None,
+    mu_miss_estimator: str = "count",
 ):
     """Return ``mu_miss(z|eta)=E_obs[h|z]`` on the shared redshift grid.
 
@@ -530,10 +542,33 @@ def missing_host_efficiency_grid(
     and selection compact views receive the same missing-host modulation.
     Otherwise the aligned catalog rows provide the empirical reference, matching
     the frozen K=1 conditional implementation.
+
+    ``mu_miss_estimator="count"`` (the default, legacy) is the count mean of
+    ``h`` per redshift bin.  The observed branch carries ``N_obs <h>_w``, the
+    mean weighted by the catalog base weights, so when the base weights
+    correlate with the mark (luminosity weights with a stellar-mass mark) a
+    redshift-independent mark still moves the catalog:missing odds by
+    ``<h>_w / <h>``.  The opt-in ``"weighted"`` takes ``sum w h / sum w`` per
+    bin over the aligned rows, so the two branches cancel for such a mark.  It
+    needs the aligned rows' base weights and refuses a reference table, which
+    carries none.
     """
 
     model._check_names(marks.names)
+    if mu_miss_estimator not in MU_MISS_ESTIMATORS:
+        raise ValueError(
+            f"mu_miss_estimator must be one of {MU_MISS_ESTIMATORS}, got "
+            f"{mu_miss_estimator!r}"
+        )
+    weighted = mu_miss_estimator == "weighted"
     if marks.reference_values is not None:
+        if weighted:
+            raise ValueError(
+                'mu_miss_estimator="weighted" needs the base weight of every '
+                "galaxy it averages, and the survey-wide reference table "
+                "(CenteredHostMarks.reference_z / reference_values) carries "
+                'none: use the aligned rows (no reference table) or "count"'
+            )
         log_h = jnp.clip(
             model.log_h_values(marks.reference_values, eta),
             -LOG_H_CLIP,
@@ -549,6 +584,10 @@ def missing_host_efficiency_grid(
     zs = jnp.asarray(catalog.zgals).reshape(-1)
     h = jnp.exp(jnp.asarray(aligned_log_h)).reshape(-1)
     real = _real_mask(catalog).reshape(-1).astype(h.dtype)
+    if weighted:
+        real = jnp.where(
+            real > 0.0, jnp.asarray(catalog.wgals, dtype=h.dtype).reshape(-1), 0.0
+        )
     return _mu_miss_from_flat(zs, h, real)
 
 
@@ -560,12 +599,16 @@ def build_marked_incomplete_catalog_prior_state(
     model: LogLinearHostModel,
     marks: CenteredHostMarks,
     eta,
+    *,
+    mu_miss_estimator: str = "count",
 ) -> IncompleteCatalogPriorState:
     """Build the ordinary conditional marked-host dark-siren prior state.
 
     The completeness is the count ratio read from ``observed_cache``; a
     magnitude-selection model on ``params.selection``
     (``completeness="selection"``) is refused, not ignored.
+    ``mu_miss_estimator`` is passed to :func:`missing_host_efficiency_grid`
+    (``"count"``, the default, or the opt-in ``"weighted"``).
     """
 
     if getattr(params, "selection", None) is not None:
@@ -584,7 +627,8 @@ def build_marked_incomplete_catalog_prior_state(
     )
     curves = completion_curves(cosmo, params, catalog, observed_cache)
     mu_miss = missing_host_efficiency_grid(
-        catalog, model, marks, eta, aligned_log_h=log_h
+        catalog, model, marks, eta, aligned_log_h=log_h,
+        mu_miss_estimator=mu_miss_estimator,
     )
     dN_miss = curves.dN_miss * mu_miss[None, :]
     N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)
@@ -618,6 +662,7 @@ __all__ = [
     "LOG_H_CLIP",
     "LogLinearHostModel",
     "MARK_SATURATION_MAX_FRACTION",
+    "MU_MISS_ESTIMATORS",
     "build_marked_catalog_kernel_state",
     "build_marked_incomplete_catalog_prior_state",
     "check_centered_marks",

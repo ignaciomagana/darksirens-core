@@ -477,3 +477,77 @@ def test_selection_completeness_is_refused_not_ignored():
         _prior(cat, params, _marks(), eta=0.0)
     with pytest.raises(ValueError, match="count-ratio completeness"):
         _marked_likelihood(cat, _marks(), cat, _marks(), params=params)
+
+
+def _weight_correlated_catalog(weight_scale=1.0):
+    """Every row: marks +0.5 / -0.5 with base weights 1 / 4 at z = 0.10 and 0.30.
+
+    The mark carries no redshift structure, but the base weights correlate
+    with it, so ``<h>_w != <h>`` per bin and per row.
+    """
+    z = np.tile(np.array([0.10, 0.10, 0.30, 0.30, 0.0]), (2, 1))
+    w = np.tile(np.array([1.0, 4.0, 1.0, 4.0, 0.0]), (2, 1)) * weight_scale
+    m = np.tile(np.array([0.5, -0.5, 0.5, -0.5, 0.0]), (2, 1))[..., None]
+    cat = GalaxyCatalog(
+        apix=1.0e-2,
+        zgals=jnp.asarray(z),
+        dzgals=jnp.asarray(np.full_like(z, 0.01)),
+        wgals=jnp.asarray(w),
+        ngals=jnp.asarray(np.array([4, 4], dtype=np.int32)),
+    )
+    return cat, CenteredHostMarks(("logmstar",), jnp.asarray(m))
+
+
+def _estimator_prior(cat, marks, eta, estimator):
+    params = CatalogParameters(n0=1.0e-8, delta=0.0, sigma_kde=0.0, z_depth=None)
+    state = build_marked_incomplete_catalog_prior_state(
+        COSMO, params, cat, build_observed_density_cache(cat), MODEL, marks,
+        jnp.asarray([eta]), mu_miss_estimator=estimator,
+    )
+    zq = jnp.linspace(0.02, 0.6, 30)
+    rows = jnp.zeros(zq.shape, dtype=jnp.int32)
+    return np.asarray(eval_incomplete_catalog_prior_state_vmap(zq, rows, state, cat))
+
+
+def test_weighted_mu_miss_keeps_a_redshift_independent_mark_a_shape_null():
+    """Opt-in: with base weights that correlate with the mark, the count mean
+    lets eta move the catalog:missing odds; the base-weight mean cancels."""
+    cat, marks = _weight_correlated_catalog()
+    base_w = _estimator_prior(cat, marks, 0.0, "weighted")
+    base_c = _estimator_prior(cat, marks, 0.0, "count")
+    np.testing.assert_allclose(base_w, base_c, rtol=1e-12, atol=0.0)
+    for eta in (-2.0, 1.5):
+        np.testing.assert_allclose(
+            _estimator_prior(cat, marks, eta, "weighted"), base_w, rtol=1e-12, atol=0.0
+        )
+        # The default stays the legacy count mean, which moves (~0.4 nat here).
+        assert np.max(np.abs(_estimator_prior(cat, marks, eta, "count") - base_c)) > 0.1
+    # Invariant to a global rescaling of the base weights, like the observed
+    # branch, including weights that sum below 1.
+    cat_small, _ = _weight_correlated_catalog(weight_scale=1.0e-6)
+    np.testing.assert_allclose(
+        _estimator_prior(cat_small, marks, 1.5, "weighted"),
+        _estimator_prior(cat, marks, 1.5, "weighted"),
+        rtol=1e-12, atol=0.0,
+    )
+
+
+def test_weighted_mu_miss_refuses_a_reference_table_and_unknown_names():
+    cat, _ = _catalog()
+    with pytest.raises(ValueError, match="mu_miss_estimator must be one of"):
+        _estimator_prior(cat, _marks(), 0.5, "mean")
+    shared = CenteredHostMarks(("logmstar",), _marks().values, *_reference_table())
+    with pytest.raises(ValueError, match="carries\\s+none"):
+        _estimator_prior(cat, shared, 0.5, "weighted")
+    # Reaches both seams of the marked likelihood.
+    pe, sel = _events()
+    common = (COSMO, PARAMS, POP, pe, cat, build_observed_density_cache(cat), MODEL)
+    values = {}
+    for estimator in ("count", "weighted"):
+        values[estimator] = float(marked_dark_siren_log_likelihood(
+            *common, _marks(), jnp.asarray([1.5]), sel, cat,
+            build_observed_density_cache(cat), _marks(), 1, 2, 8.0,
+            pop_model="powerlaw+peak", max_likelihood_variance=1.0e6,
+            mu_miss_estimator=estimator,
+        ))
+    assert np.isfinite(values["weighted"]) and values["weighted"] != values["count"]
