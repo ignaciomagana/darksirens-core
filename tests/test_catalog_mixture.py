@@ -39,6 +39,7 @@ from darksirens.catalog.field import (
     eval_field_incomplete_catalog_prior_state_vmap,
 )
 from darksirens.catalog.geometry import ang2pix_ring
+from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.mixture import stick_breaking_log_weights
 from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import CatalogMixtureParameters, CatalogParameters, GalaxyCatalog, physical_n0
@@ -185,6 +186,10 @@ def test_selection_mixture_plan_and_per_catalog_pins():
         (dict(catalog=[A, B], survey_priors={"fcat_2": (0.0, 0.5)}), ValueError, "unknown survey parameter"),
         (dict(catalog=[A, B], fixed_survey={"delta_c3": 0.0}), ValueError, "unknown survey parameter"),
         (dict(catalog=[A, B], catalog_sky_weighting="sideways"), ValueError, "catalog_sky_weighting must be"),
+        (dict(catalog=[A, B], mixture_density="sideways"), ValueError, "mixture_density must be one of"),
+        (dict(catalog=A, mixture_density="steradian"), ValueError, "two or more catalogs"),
+        (dict(catalog=A, catalog_sky_weighting="conditional", mixture_density="pixel"), ValueError,
+         "mixture_density applies only to catalog_sky_weighting='field'"),
         (dict(catalog=[A, dataclasses.replace(B, catalog=B.catalog._replace(
             zgals=B.catalog.zgals[:100], dzgals=B.catalog.dzgals[:100], wgals=B.catalog.wgals[:100],
             ngals=B.catalog.ngals[:100]))]), ValueError, "must hold every HEALPix row"),
@@ -503,6 +508,74 @@ def test_decode_parameters_returns_each_catalog_and_the_weights():
     np.testing.assert_allclose(np.exp(np.asarray(decoded.catalog.log_weights)), [0.75, 0.25], rtol=1e-15)
     with pytest.raises(ValueError, match="takes each catalog's z_depth"):
         ds.decode_parameters(analysis, theta, z_depth=0.3)
+
+
+def _uniform_store(z_list, nside, copies, tag):
+    """A sky-uniform field: every row holds ``copies`` copies of ``z_list``."""
+    npix = 12 * nside * nside
+    z = np.tile(np.tile(z_list, copies), (npix, 1))
+    return CatalogStore(
+        path=f"uniform-{tag}.h5", nside=nside, z_depth=None,
+        catalog=GalaxyCatalog(apix=np.pi / (3.0 * nside * nside), zgals=z, dzgals=0.01 * (1.0 + z),
+                              wgals=np.ones_like(z), ngals=np.full(npix, z.shape[1], dtype=np.int32),
+                              unique_pixels=None),
+    )
+
+
+_Z_F = np.sort(np.random.default_rng(7).uniform(0.04, 0.08, 40))
+_Z_G = np.sort(np.random.default_rng(8).uniform(0.15, 0.22, 40))
+
+
+@pytest.mark.slow
+def test_steradian_branches_do_not_depend_on_the_pixelization():
+    """One host field stored at nside 1 (four copies of a row's galaxies) and at
+    nside 2 (one copy) has the same host density per steradian. Each branch
+    n_k / Z_k is the host probability of the sample's row, which carries the
+    pixel area (A_1 = 4 A_2): by default the mixture [field, G] moves with
+    the field's nside, and mixture_density="steradian" removes the area, so
+    the likelihood is the same at either nside and every weight."""
+    field_1 = _uniform_store(_Z_F, 1, 4, "F-n1")
+    field_2 = _uniform_store(_Z_F, 2, 1, "F-n2")
+    other = _uniform_store(_Z_G, 2, 1, "G-n2")
+    with pytest.warns(UserWarning, match="different HEALPix resolutions"):
+        pixel_1 = _model([field_1, other])
+    assert pixel_1.redshift.mixture_density == "pixel"
+    steradian_1 = _model([field_1, other], mixture_density="steradian")
+    pixel_2 = _model([field_2, other])
+    steradian_2 = _model([field_2, other], mixture_density="steradian")
+    bound = {name: _bind(a) for name, a in (("p1", pixel_1), ("s1", steradian_1),
+                                             ("p2", pixel_2), ("s2", steradian_2))}
+    base = dict(H0=70.0, log10n0=-4.0, delta=0.0, sigma_kde=0.01,
+                log10n0_c2=-4.0, delta_c2=0.0, sigma_kde_c2=0.01)
+    for f in (0.1, 0.5, 0.9):
+        theta = theta_of(pixel_1, dict(base, fcat_2=f))
+        s1, s2 = float(bound["s1"](theta)), float(bound["s2"](theta))
+        p1, p2 = float(bound["p1"](theta)), float(bound["p2"](theta))
+        _close(s1, s2, 1e-10, f"steradian fcat_2={f}")
+        # Equal nsides: the area is common to both branches and cancels.
+        _close(p2, s2, 1e-12, f"equal nside fcat_2={f}")
+        assert abs(p1 - p2) > 1e-3, (f, p1, p2)
+        # The per-pixel weights act as w_k A_k / sum_j w_j A_j.
+        f_eff = f / (f + 4.0 * (1.0 - f))
+        _close(p1, float(bound["s2"](theta_of(pixel_1, dict(base, fcat_2=f_eff)))), 1e-10,
+               f"effective weight fcat_2={f}")
+
+
+def test_mixture_density_is_recorded_only_when_steradian():
+    with pytest.warns(UserWarning, match="different HEALPix resolutions"):
+        default = parameter_plan_semantic(_model([A, B]).parameters)
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        pixel = parameter_plan_semantic(_model([A, B], mixture_density="pixel").parameters)
+        steradian = parameter_plan_semantic(_model([A, B], mixture_density="steradian").parameters)
+        same_nside = _model([A, C])
+    assert same_nside.redshift.mixture_density == "pixel"
+    assert "mixture_density" not in default["catalog_model"]
+    assert pixel == default
+    assert steradian["catalog_model"]["mixture_density"] == "steradian"
+    assert str(steradian) != str(default)
 
 
 def test_fingerprint_records_the_mixture_only_when_set():

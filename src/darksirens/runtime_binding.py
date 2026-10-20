@@ -726,6 +726,7 @@ class BoundAnalysis:
                 completeness=self.analysis.redshift.completeness,
                 normalizer=self.analysis.redshift.normalizer,
                 host_mass=self.analysis.redshift.host_mass,
+                mixture_density=getattr(self.analysis.redshift, "mixture_density", "pixel"),
                 **ordinary_common,
             )
 

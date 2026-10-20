@@ -11,7 +11,10 @@ samples and the detected injections alike; the GW reduction (event evidences,
 selection integral, Monte-Carlo variances and guards) is the ordinary
 hierarchical reducer's. With one catalog the density is ``n_1`` alone: ``Z_1``
 is common to every sample and cancels between the event evidences and
-``N log mu``, so it is not evaluated.
+``N log mu``, so it is not evaluated. Each branch is the host probability of
+the sample's row, a mass per pixel; ``mixture_density="steradian"`` (opt-in)
+divides branch k by its catalog's pixel area, which matters only when the
+catalogs' nsides differ (:mod:`darksirens.catalog.mixture`).
 
 Each catalog has its own completeness (``ds.model(..., completeness=[...])``):
 the count ratio and the selection curve give ``n_k = N_obs,p p_cat + dN_miss,p``
@@ -314,6 +317,7 @@ def field_mixture_log_likelihood(
     completeness: str = "incomplete",
     normalizer: str = "direct",
     host_mass: str = "count",
+    mixture_density: str = "pixel",
     shared_beta: bool = True,
     shared_spin: bool = True,
     shared_gamma: bool = True,
@@ -357,6 +361,11 @@ def field_mixture_log_likelihood(
     (``compact_row_weight``, ``full_row_weight``) instead of the galaxy
     counts; it is refused with any other completeness, and so is a component
     that carries row weight sums under ``host_mass="count"``.
+    ``mixture_density="steradian"`` (opt-in, ``K >= 2``) divides each branch
+    by its catalog's pixel area, ``n_k / (Z_k A_k)``, a host density per
+    steradian; the default ``"pixel"`` keeps ``n_k / Z_k``, the host
+    probability of the sample's row, which is the same up to a common factor
+    only when every catalog has the same nside.
     ``compute_dtype="float32"`` evaluates
     the per-sample weights, mixture included, in float32 (the per-proposal
     state and every reduction stay float64). ``extension`` is an optional
@@ -384,6 +393,11 @@ def field_mixture_log_likelihood(
             )
     if host_mass not in ("count", "weight"):
         raise ValueError(f"unsupported host_mass {host_mass!r}")
+    if mixture_density not in ("pixel", "steradian"):
+        raise ValueError(f"unsupported mixture_density {mixture_density!r}")
+    # Opt-in: each branch per steradian, n_k / (Z_k A_k). With one catalog the
+    # area is common to every sample and cancels.
+    per_steradian = mixture_density == "steradian" and n >= 2
     weighted = host_mass == "weight"
     if weighted and any(comp != "complete" for comp in completeness):
         raise ValueError(
@@ -476,6 +490,9 @@ def field_mixture_log_likelihood(
         for piece, component in zip(pieces, components)
     )
 
+    def _log_area(component):
+        return jnp.log(jnp.asarray(component.compact.apix, dtype=zgrid.dtype))
+
     def evaluate(member):
         views = []
         for k, (params, component, piece) in enumerate(zip(params_k, components, pieces)):
@@ -483,6 +500,8 @@ def field_mixture_log_likelihood(
                 log_total = (
                     jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if n >= 2 else 0.0
                 )
+                if per_steradian:
+                    log_total = log_total + _log_area(component)
                 views.append(
                     _complete_view(
                         piece.kernels, piece.pin_ok, component.compact, log_total,
@@ -508,6 +527,8 @@ def field_mixture_log_likelihood(
                     extension, member, extension_params, extension_data, piece.observed_total,
                 )
                 log_Z = jnp.log(jnp.maximum(total, 1.0e-300)) + piece.observed_poison + poison
+                if per_steradian:
+                    log_Z = log_Z + _log_area(component)
             else:
                 log_Z = poison
             views.append(_view(state, log_Z))
@@ -682,6 +703,7 @@ def make_catalog_mixture_target(
         completeness=redshift.completeness,
         normalizer=redshift.normalizer,
         host_mass=redshift.host_mass,
+        mixture_density=getattr(redshift, "mixture_density", "pixel"),
     )
     if bound.compute_dtype is not None:
         options["compute_dtype"] = bound.compute_dtype

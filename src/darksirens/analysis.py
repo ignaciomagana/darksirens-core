@@ -83,6 +83,15 @@ HOST_MASS_SETTINGS = ("count", "weight")
 #: (the default) resolves to ``"pooled"`` wherever a catalog runs the count
 #: ratio and to ``"row"`` (inert) everywhere else.
 COUNT_RATIO_SETTINGS = ("row", "pooled")
+#: Settings of ``model(..., mixture_density=...)`` for a field mixture of two or
+#: more catalogs: what each catalog's branch ``n_k(z | p_k) / Z_k`` is per.
+#: ``"pixel"`` (the default, the frozen reference's convention) is the host
+#: probability of the sample's row, so branch k carries a factor of its pixel
+#: area; ``"steradian"`` (opt-in) divides each branch by its pixel area, a host
+#: density per steradian, so the weights are host fractions whatever each
+#: catalog's nside. The two agree up to a common factor, which cancels, when
+#: every catalog has the same nside.
+MIXTURE_DENSITY_SETTINGS = ("pixel", "steradian")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
@@ -178,7 +187,9 @@ class FieldCatalogMixtureRedshift:
     then complete). ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS`,
     the estimator of every catalog that runs ``"incomplete"``, and
     ``count_ratio_window`` the kernel width of ``"pooled"`` (``None`` for
-    ``"row"``).
+    ``"row"``). ``mixture_density`` is one of :data:`MIXTURE_DENSITY_SETTINGS`:
+    ``"pixel"`` (each branch is the host probability of the sample's row) or
+    ``"steradian"`` (each branch divided by its catalog's pixel area).
     """
 
     components: tuple
@@ -188,6 +199,7 @@ class FieldCatalogMixtureRedshift:
     host_mass: str = "count"
     count_ratio: str = "row"
     count_ratio_window: float | None = None
+    mixture_density: str = "pixel"
 
     @property
     def n_catalogs(self) -> int:
@@ -655,7 +667,7 @@ def _per_catalog(value, n, what, single_types):
 
 def _resolve_mixture(
     catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer,
-    host_mass="count", count_ratio=None, count_ratio_window=None,
+    host_mass="count", count_ratio=None, count_ratio_window=None, mixture_density=None,
 ):
     """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
 
@@ -769,6 +781,33 @@ def _resolve_mixture(
                     "mixture's normaliser Z_k sums the host mass of every row, "
                     "empty rows included"
                 )
+    if mixture_density is not None:
+        if mixture_density not in MIXTURE_DENSITY_SETTINGS:
+            raise ValueError(
+                f"mixture_density must be one of {MIXTURE_DENSITY_SETTINGS}, got "
+                f"{mixture_density!r}"
+            )
+        if n < 2:
+            raise ValueError(
+                "mixture_density applies to a field mixture of two or more catalogs: "
+                "with one catalog the pixel area is common to every sample and cancels"
+            )
+    elif n >= 2:
+        nsides = [int(store.nside) for store in catalogs]
+        if len(set(nsides)) > 1:
+            warnings.warn(
+                f"the catalogs of this field mixture have different HEALPix resolutions "
+                f"(nside {', '.join(str(s) for s in nsides)}): each branch n_k / Z_k is "
+                "the host probability of the sample's row, so branch k carries a "
+                "factor of its pixel area, the weights fcat_k are not host fractions "
+                "and their uniform-simplex prior is not uniform in the host fractions. "
+                "mixture_density='steradian' divides each branch by its pixel area (a "
+                "host density per steradian); mixture_density='pixel' keeps the frozen "
+                "reference's convention. Pass mixture_density to ds.model to choose "
+                "and silence this warning.",
+                UserWarning,
+                stacklevel=4,
+            )
     components = []
     for k, (store, sel, frac, comp) in enumerate(
         zip(catalogs, selections, fractions, resolved)
@@ -807,6 +846,7 @@ def _resolve_mixture(
         host_mass=host_mass,
         count_ratio=count_ratio,
         count_ratio_window=count_ratio_window,
+        mixture_density=mixture_density or "pixel",
     )
 
 
@@ -1327,7 +1367,8 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     and row-fraction digest. The completeness and the normaliser are one
     string when every catalog shares it (the record of every analysis before
     per-catalog completeness) and a list with one entry per catalog otherwise.
-    ``host_mass`` enters only when it is not the default ``"count"``, and
+    ``host_mass`` enters only when it is not the default ``"count"``,
+    ``mixture_density`` only when it is not the default ``"pixel"``, and
     ``count_ratio`` with its window only when it is not ``"row"`` (the legacy
     estimator, the default before 2026-10-10, and the inert value of every
     analysis without a count-ratio catalog), so the record of every such
@@ -1345,8 +1386,10 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         from darksirens.selection.catalog import selection_record
 
+        density = getattr(redshift, "mixture_density", "pixel")
         return _canonical_json({
             **({} if redshift.host_mass == "count" else {"host_mass": redshift.host_mass}),
+            **({} if density == "pixel" else {"mixture_density": density}),
             **pooled,
             "sky_weighting": "field",
             "completeness": redshift.completeness,
@@ -1448,6 +1491,7 @@ def model(
     host_mass="count",
     count_ratio=None,
     count_ratio_window=None,
+    mixture_density=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -1593,7 +1637,22 @@ def model(
     ``ParameterPlan.catalog_model``; the completeness and the normaliser are
     recorded as one value when every catalog shares it (so a single value, or
     a list of equal entries, gives the plan and fingerprint of one value) and
-    as a list otherwise. ``compute_dtype="float32"`` is not available with a
+    as a list otherwise. Each branch ``n_k(z | p_k) / Z_k`` is the host
+    probability of the sample's row of catalog k, a mass per pixel, which is
+    the frozen reference's convention (``mixture_density="pixel"``, the
+    default). The PE and selection samples need a density per steradian, so
+    branch k carries a factor of its pixel area: when every catalog has the
+    same nside that factor is common and cancels, and the weights are the
+    catalogs' host fractions; when the nsides differ the weights act as
+    ``w_k A_k / sum_j w_j A_j`` (``A_k`` the pixel area), they are not host
+    fractions, and the uniform-simplex prior is not uniform in the host
+    fractions. ``ds.model`` then warns unless ``mixture_density`` is given.
+    ``mixture_density="steradian"`` (opt-in) divides each branch by its
+    catalog's pixel area, ``n_k / (Z_k A_k)``, so the weights are host
+    fractions whatever each catalog's nside; it is refused with one catalog
+    (the area cancels). The plan records it
+    (``ParameterPlan.catalog_model``) and a run fingerprint changes with it;
+    ``"pixel"`` is not recorded. ``compute_dtype="float32"`` is not available with a
     complete catalog, as for a conditional complete-catalog analysis, and a
     missing-host extension
     (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`) is not
@@ -1726,9 +1785,15 @@ def model(
             host_mass=host_mass,
             count_ratio=count_ratio,
             count_ratio_window=count_ratio_window,
+            mixture_density=mixture_density,
         )
         catalog_priors = _INCOMPLETE_CATALOG_PRIORS
     else:
+        if mixture_density is not None:
+            raise ValueError(
+                "mixture_density applies only to catalog_sky_weighting='field' with two "
+                "or more catalogs"
+            )
         if host_mass != "count" and catalog is None:
             raise ValueError(
                 "host_mass='weight' requires a galaxy catalog: it sets a sky row's "
@@ -2020,6 +2085,7 @@ __all__ = [
     "FIELD_COMPLETENESS_SETTINGS",
     "HOST_MASS_SETTINGS",
     "FIELD_NORMALIZER_SETTINGS",
+    "MIXTURE_DENSITY_SETTINGS",
     "FieldCatalogMixtureRedshift",
     "COMPLETENESS_SETTINGS",
     "ParameterPlan",

@@ -18,8 +18,14 @@ without one). A K-catalog mixture with weights ``w_k`` is the host density
 with ``p_k`` the sample's row in catalog k's own pixelization. With one
 catalog ``Z`` is common to every PE and selection sample at fixed parameters
 and cancels between the event evidences and ``N log mu``, so it is not
-evaluated; with ``K >= 2`` the ratios ``w_k / Z_k`` are the catalogs' host
-fractions and must be evaluated on every proposal.
+evaluated; with ``K >= 2`` the ratios ``w_k / Z_k`` must be evaluated on
+every proposal. ``n_k / Z_k`` is the host probability of the sample's row of
+catalog k, a mass per pixel: when every catalog has the same nside the pixel
+area is common to every branch and cancels, and the ``w_k`` are the
+catalogs' host fractions. When the nsides differ, branch k carries a factor
+of its pixel area ``A_k`` and the weights act as ``w_k A_k / sum_j w_j A_j``;
+``ds.model(..., mixture_density="steradian")`` (opt-in) divides each branch
+by ``A_k``, so the ``w_k`` are host fractions whatever the nsides.
 
 ``Z_k`` is computed in one of two forms (:data:`FIELD_NORMALIZERS`):
 
