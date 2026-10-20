@@ -627,3 +627,62 @@ def test_a_failing_guard_report_never_stops_the_run(monkeypatch):
                        sampler="dynesty")
     assert calls == {"ran": True}
     assert "guard_report" not in result
+
+
+def test_the_old_soft_guard_name_is_refused_not_swallowed(monkeypatch):
+    """``selection_neff_soft_guard`` is ``bind_analysis``'s name for the
+    resolved guard; passed to infer it went into the sampler namespace and the
+    likelihood kept the default guard, without a word."""
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(TypeError, match=r"selection_neff_soft_guard is not a sampler option.*selection_neff_guard='soft'"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="numpyro", selection_neff_soft_guard=True)
+    assert calls == {}
+    import darksirens as ds
+
+    target = ds.InferenceTarget(lambda theta: -1.0, _target_plan())
+    with pytest.raises(TypeError, match="selection_neff_soft_guard is not a sampler option"):
+        infer(target, sampler="dynesty", selection_neff_soft_guard=False)
+
+
+def test_unknown_sampler_options_warn(monkeypatch):
+    """A misspelt option (NumPyro's are nuts_warmup/nuts_samples) ran without
+    it: no backend reads it."""
+    import warnings
+
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.warns(UserWarning, match=r"sampler option\(s\) \['num_samples', 'num_warmup'\]"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="numpyro", guard_report=False, num_warmup=5, num_samples=5)
+    assert calls["opts"].num_warmup == 5  # passed through, as before
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        infer(
+            _angular_analysis("isotropic"), events=object(), injections=object(),
+            sampler="tinyns", guard_report=False, nlive=50, nuts_warmup=5, nuts_samples=5,
+            tinyns_walks=9, tinyns_preset="prior", dynesty_walks=3, checkpoint_interval="10m",
+            resume=False, resume_force=False, run_dir="/tmp/run", save_path="/tmp/run",
+        )
+
+
+def test_every_option_a_backend_reads_is_a_known_sampler_option():
+    """The list the warning checks against covers every name read from the
+    sampler namespace in the core sources (getattr/hasattr/attribute reads),
+    so a new backend option cannot be warned about by mistake."""
+    import pathlib
+    import re
+
+    import darksirens
+    from darksirens.inference.public import _known_sampler_options
+
+    root = pathlib.Path(darksirens.__file__).parent
+    names = set()
+    pattern = re.compile(
+        r"(?:getattr|hasattr)\(opts, *\"([A-Za-z_][A-Za-z0-9_]*)\"|\bopts\.([A-Za-z_][A-Za-z0-9_]*)"
+    )
+    for path in root.rglob("*.py"):
+        for match in pattern.finditer(path.read_text()):
+            names.add(match.group(1) or match.group(2))
+    names.discard("sampler")  # set by the namespace itself
+    assert names, "the scan found no option reads"
+    assert names <= _known_sampler_options(), sorted(names - _known_sampler_options())

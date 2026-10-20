@@ -41,6 +41,80 @@ _SAMPLER_DEFAULTS = {
 }
 
 
+# Every other option a core backend, the checkpoint planner or the run
+# fingerprint reads from the sampler namespace (with TinyNS's tinyns_<field>
+# options, _known_sampler_options). tests/test_public_infer.py checks this
+# against the sources.
+_BACKEND_OPTIONS = frozenset({
+    "resume",
+    "resume_force",
+    "checkpoint_interval",
+    "run_dir",
+    "save_path",
+    "dynesty_walks",
+    "dynesty_diagnostics",
+    "nuts_warmup",
+    "nuts_samples",
+    "nuts_chains",
+    "nuts_chain_method",
+    "nuts_target_accept",
+    "nuts_max_tree_depth",
+    "nuts_init_tries",
+    "nuts_init_seed_offset",
+    "tinyns_preset",
+    "tinyns_checkpoint_path",
+    "tinyns_checkpoint_path_out",
+    "tinyns_resume_from",
+    # Mirrors core stamps back onto the namespace.
+    "run_fingerprint_digest",
+    "resume_forced_mismatch",
+    "tinyns_resolved_config",
+})
+
+# Likelihood options that are not sampler options: the namespace would
+# swallow them, and the likelihood would never see them.
+_LIKELIHOOD_OPTION_HINTS = {
+    "selection_neff_soft_guard": (
+        "selection_neff_guard='soft' (or 'hard'; 'auto', the default, is soft "
+        "for numpyro only)"
+    ),
+}
+
+
+def _known_sampler_options():
+    from darksirens.inference.tinyns_config import BASE_DEFAULTS
+
+    return (
+        frozenset(_SAMPLER_DEFAULTS)
+        | _BACKEND_OPTIONS
+        | frozenset(f"tinyns_{name}" for name in BASE_DEFAULTS)
+    )
+
+
+def _check_sampler_options(options):
+    """Refuse a likelihood option passed as a sampler option; warn on unknown ones.
+
+    ``infer`` passes ``**sampler_options`` to the backends as attributes,
+    and a backend reads only the names it knows, so a misspelt option (or a
+    likelihood option under its old name) used to run without it, silently.
+    """
+    for name, hint in _LIKELIHOOD_OPTION_HINTS.items():
+        if name in options:
+            raise TypeError(
+                f"{name} is not a sampler option and would be ignored: the "
+                f"likelihood's guard is set with ds.infer(..., {hint})"
+            )
+    unknown = sorted(set(options) - _known_sampler_options())
+    if unknown:
+        warnings.warn(
+            f"ds.infer: no core backend reads the sampler option(s) {unknown}; they "
+            "are ignored (check the spelling: NumPyro takes nuts_warmup/nuts_samples, "
+            "TinyNS tinyns_<setting>, Dynesty dynesty_walks).",
+            UserWarning,
+            stacklevel=4,
+        )
+
+
 def _sampler_namespace(sampler, options):
     """Map public sampler keywords onto the frozen attribute-based contract."""
     values = dict(_SAMPLER_DEFAULTS)
@@ -347,7 +421,11 @@ def infer(
     Ordinary analyses retain the existing API and require both standardized GW
     stores. An :class:`InferenceTarget` already owns its likelihood, so stores
     and the five likelihood options below must be omitted. Backend-specific
-    options keep their existing names.
+    options keep their existing names. A sampler option that no core backend
+    reads (a misspelt name) warns, ``UserWarning``, as it is ignored; the
+    likelihood option ``selection_neff_soft_guard`` (``bind_analysis``'s name
+    for the resolved guard) raises ``TypeError``, pointing to
+    ``selection_neff_guard``.
 
     ``sampler`` is ``'dynesty'``, ``'tinyns'`` or ``'numpyro'``. ``None``
     (the default) is ``'dynesty'``, the optional extra
@@ -394,6 +472,7 @@ def infer(
     must see the request first because a zero-free target has exact evidence and
     returns before any backend validation or optional-backend import.
     """
+    _check_sampler_options(sampler_options)
     # ``auto`` is soft for NumPyro only, so the default (Dynesty) resolves
     # exactly as None does; the default is resolved after the argument checks.
     soft_guard = _resolve_selection_neff_soft_guard(selection_neff_guard, sampler)
