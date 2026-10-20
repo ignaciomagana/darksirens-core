@@ -586,9 +586,10 @@ def build_pooled_count_ratio_cache(
     ``z = 0`` a galaxy scattered there by its redshift error dominates the
     sum, the ratio exceeds 1 and the clip makes the catalog complete there,
     whatever its completeness, so the missing hosts there are removed.  A
-    ``UserWarning`` names the redshifts where the ratio exceeds the one below
-    by more than the factor ``POOLED_POINT_REDSHIFT_WARN`` (photometric
-    redshifts; galaxies at a redshift below their peculiar-velocity error).
+    ``UserWarning`` names the redshifts where the ratio exceeds the one of
+    ``redshift_errors=True`` (below) by more than the factor
+    ``POOLED_POINT_REDSHIFT_WARN`` (photometric redshifts; galaxies at a
+    redshift below their peculiar-velocity error).
 
     ``redshift_errors=True`` (``count_ratio="pooled_kernel"``, opt-in) counts
     each galaxy through its redshift kernel instead of its point redshift:
@@ -612,8 +613,8 @@ def build_pooled_count_ratio_cache(
     are binned in redshift (``POOLED_BIN_WIDTH``) and in error classes
     (``POOLED_KERNEL_CLASSES_PER_DECADE``); one farther than
     ``POOLED_KERNEL_REACH`` widths above ``z_top`` is not counted, nor one as
-    far below 0 (a ``UserWarning``).  For errors far below the window it is the default
-    estimator.
+    far below 0 (a ``UserWarning``).  For errors far below the window it is
+    the default estimator.
 
     ``row_fraction`` values must be finite and in [0, 1], and a row with
     fraction 0 (outside the footprint) must hold no galaxy: its galaxies
@@ -1105,5 +1106,6 @@ __all__ = [
     "gathered_completion_curves",
     "gathered_missing_count",
     "gathered_missing_density",
+    "refuse_galaxies_outside_row_fraction",
     "smoothing_operator",
 ]
