@@ -60,13 +60,15 @@ def test_max_likelihood_variance_relaxes_the_criterion():
     assert np.isfinite(float(val))  # threshold max(250, 2500/10=250) = 250 < 300
 
 
+@pytest.mark.parametrize("pe", [3.0, 1.0, 1.0 - 5.0e-13])
 @pytest.mark.parametrize("neff", [1.0e11, 1.0e13, np.inf])
-def test_over_budget_pe_variance_is_rejected_whatever_neff_is(neff):
-    # The PE variance alone (3) is three times the cap (1). The saturated
-    # threshold N_obs^2 * 1e12 = 4e12 used to be the only barrier, so
-    # Neff = 1e13 (a no-selection campaign with near-uniform weights) and
-    # Neff = inf (exactly uniform weights) were admitted with a finite value.
-    kw = dict(max_likelihood_variance=1.0, pe_variance_sum=jnp.asarray(3.0))
+def test_over_budget_pe_variance_is_rejected_whatever_neff_is(neff, pe):
+    # The PE variance alone (3) is three times the cap (1), or uses it up to
+    # within the 1e-12 floor. The saturated threshold N_obs^2 * 1e12 = 4e12
+    # used to be the only barrier, so Neff = 1e13 (a no-selection campaign
+    # with near-uniform weights) and Neff = inf (exactly uniform weights) were
+    # admitted with a finite value.
+    kw = dict(max_likelihood_variance=1.0, pe_variance_sum=jnp.asarray(pe))
     hard = selection_log_correction(jnp.asarray(0.0), jnp.asarray(neff), 2, **kw)
     assert float(hard) == -np.inf
     soft = selection_log_correction(jnp.asarray(0.0), jnp.asarray(neff), 2, soft_guard=True, **kw)

@@ -117,14 +117,14 @@ DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
 # threshold is >= 1/_MIN_VARIANCE_BUDGET = 1e12, above the Neff of any
 # campaign of < 1e9 detected injections, but NOT above Neff = +inf (the
 # zero-variance verdict) or the 1e12+ a near-uniform campaign reaches.  An
-# over-budget proposal (pe_variance_sum >= max_likelihood_variance) is
-# therefore rejected explicitly in selection_log_correction, not through this
-# threshold.  The floor also floors any requested budget below 1e-12
-# (irrelevant in practice).
+# exhausted budget (the floor reached: pe_variance_sum within 1e-12 of
+# max_likelihood_variance, or above it) is therefore rejected explicitly in
+# selection_log_correction, not through this threshold.  The floor also
+# floors any requested budget below 1e-12 (irrelevant in practice).
 _MIN_VARIANCE_BUDGET = 1e-12
 
 # Under an exhausted budget the soft guard's gate argument Neff/threshold is
-# at most Neff / (N_obs^2 * 1e12), below this cap for every campaign of < 1e9
+# Neff / (N_obs^2 * 1e12), below this cap for every campaign of < 1e9
 # detected injections, where the gate already sits at full depth.  Clamping
 # to it leaves those values bit-identical and keeps the wall at full depth
 # when Neff is +inf or larger still.
@@ -318,10 +318,11 @@ def selection_log_correction(
     Once ``pe_variance_sum`` exceeds the budget the threshold saturates at
     ``N_obs²/1e-12`` (its gradient w.r.t. ``pe_variance_sum`` clamps to
     zero there) and the wall repels through the ``Neff``/``log_mu``
-    channels at its validated full depth.  ``pe_variance_sum >=
-    max_likelihood_variance`` is rejected (hard) or kept at full wall depth
-    (soft) whatever ``Neff`` is, ``+inf`` included: no selection term can
-    bring such a total variance under the cap.
+    channels at its validated full depth.  An exhausted budget
+    (``pe_variance_sum >= max_likelihood_variance - 1e-12``, where the
+    threshold saturates) is rejected (hard) or kept at full wall depth (soft)
+    whatever ``Neff`` is, ``+inf`` included: no selection term can bring such
+    a total variance under the cap.
 
     The correction is:
 
@@ -362,7 +363,11 @@ def selection_log_correction(
     threshold = jnp.maximum(5.0 * n, (n * n) / budget)
     # The PE variances alone use up the budget: no Neff can bring the total
     # under it, including Neff = +inf, which passes the saturated threshold.
-    exhausted = pe_variance_sum >= max_likelihood_variance
+    # Read off the floored budget (exactly where the threshold saturates), not
+    # by comparing pe_variance_sum again: a second use of pe_variance_sum
+    # changes how XLA fuses the jitted likelihood and moves admitted values
+    # by an ulp.
+    exhausted = budget <= _MIN_VARIANCE_BUDGET
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
         # every trajectory that brushes it is flagged divergent (the H1-profile
