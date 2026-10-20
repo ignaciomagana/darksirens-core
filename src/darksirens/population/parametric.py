@@ -23,7 +23,7 @@ component's.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 from jax.scipy.special import erf, erfc
@@ -1282,11 +1282,34 @@ class GolombRemnantMass1GPlusTail(GolombRemnantMass1G):
 
     The tail approximates 2G/high-mass contamination. I parameterise the
     amplitude by log10_f_pl for sampling stability.
+
+    ``tail_taper`` picks the turn-on.  ``"logistic"`` (default, the frozen
+    reference's) never reaches zero: below the window it decays only like
+    ``exp(12 m / dm_tail)``, while ``(m / M_BH,max)**-c`` grows toward low
+    mass, so for a wide window and a steep tail the product turns up again
+    below about ``c dm_tail / 12`` and the "high-mass" tail sets the
+    low-mass shape.  Inside the shipped prior box (``c`` up to 8,
+    ``dm_tail`` up to 20) it holds 47% of all mass below 10 Msun at
+    ``c = 8``, ``dm_tail = 20`` and the fiducial ``log10_f_PL = -1.4``
+    (3.7 times ``phi_1G`` at 1 Msun; 96% of all mass at
+    ``log10_f_PL = 0``), against 0 at ``c = 4``, ``dm_tail = 5``; more than
+    1% of all black holes below 20 Msun in about 2% of the
+    ``(c, dm_tail)`` box at the fiducial amplitude.  ``"planck"``
+    (opt-in) is :func:`~darksirens.population.utils.sfilter_low` across
+    ``[M_BH,max - dm_tail, M_BH,max]``: identically zero below the window,
+    one above it.
     """
 
     c_spec: ParamSpec
     log10_fpl_spec: ParamSpec
     dm_tail_spec: ParamSpec
+    tail_taper: str = field(default="logistic", kw_only=True)
+
+    def __post_init__(self):
+        if self.tail_taper not in ("logistic", "planck"):
+            raise ValueError(
+                f"tail_taper must be 'logistic' or 'planck', got {self.tail_taper!r}"
+            )
 
     @property
     def param_specs(self):
@@ -1300,10 +1323,16 @@ class GolombRemnantMass1GPlusTail(GolombRemnantMass1G):
     def _tail_taper(self, m, m_bh_max, dm_tail):
         """Smooth turn-on ending at M_BH,max.
 
-        This is a logistic approximation to the paper's exponential taper.
-        It is 0 well below M_BH,max - dm_tail and 1 above M_BH,max.
+        ``"logistic"`` (default) is a logistic approximation to the paper's
+        exponential taper: 0.5 at the window's centre, 0.9975 at M_BH,max
+        and about ``exp(6 - 12 (M_BH,max - m) / dm_tail)``, small but never
+        zero, below the window (see the class docstring for what that does to the
+        product with the power law).  ``"planck"`` (opt-in) is exactly 0
+        below ``M_BH,max - dm_tail`` and exactly 1 above ``M_BH,max``.
         """
         width = jnp.maximum(dm_tail, _EPS)
+        if self.tail_taper == "planck":
+            return sfilter_low(m, m_bh_max - width, width)
         x = (m - (m_bh_max - width)) / width
         # Far below the window exp overflows and the logistic is exactly 0,
         # but its VJP is then 0 * inf = NaN, and the normaliser integrates

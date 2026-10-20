@@ -143,3 +143,43 @@ def test_default_is_the_grid_rule_bit_for_bit():
     assert got.tobytes() == want.tobytes()
     with _quadrature("split"):
         assert np.asarray(mc._eval_unnorm(grid, theta)).tobytes() != want.tobytes()
+
+
+def _tail_fraction_below(mc, theta, cut):
+    """Share of all 1G+tail mass that is tail below ``cut`` (dense grid on [1, 200])."""
+    g = jnp.linspace(1.0, 200.0, 4001)
+    phi = mc._eval_unnorm(g, theta)
+    tail = phi - mc._eval_1g_unnorm(g, theta[:5])
+    return float(jnp.trapezoid(jnp.where(g < cut, tail, 0.0), g) / jnp.trapezoid(phi, g))
+
+
+def test_planck_tail_taper_keeps_the_tail_above_its_window():
+    """tail_taper="planck" (opt-in): no tail mass below M_BH,max - dm_tail.
+
+    The default logistic is never zero below the window, and against a steep
+    (m / M_BH,max)**-c the product turns up again at low mass: at c = 8,
+    dm_tail = 20 (inside the prior box) the "high-mass" tail is 47% of all
+    mass, almost all of it below 10 Msun.
+    """
+    from dataclasses import replace
+
+    mc = get_model("golomb_1g+tail").mass_component
+    assert mc.tail_taper == "logistic"
+    planck = replace(mc, tail_taper="planck")
+    theta = jnp.asarray([2.35, 1.90, 35.0, 3.0, 0.08, 8.0, -1.4, 20.0])
+    cut = 38.0 - 20.0
+    assert _tail_fraction_below(mc, theta, 10.0) == pytest.approx(0.47, abs=5e-3)
+    assert _tail_fraction_below(planck, theta, cut) == 0.0
+    rng = np.random.default_rng(3)
+    for _ in range(20):
+        c, dm_tail = rng.uniform(0.0, 8.0), rng.uniform(0.1, 20.0)
+        t = theta.at[5].set(c).at[7].set(dm_tail)
+        assert _tail_fraction_below(planck, t, 38.0 - dm_tail) == 0.0
+    # Above M_BH,max the tail is untapered under "planck".
+    g = jnp.asarray([39.0, 50.0, 80.0])
+    tail = planck._eval_unnorm(g, theta) - planck._eval_1g_unnorm(g, theta[:5])
+    peak = planck._eval_1g_unnorm(jnp.asarray(38.0), theta[:5])
+    np.testing.assert_allclose(np.asarray(tail), np.asarray(10.0 ** -1.4 * peak * (g / 38.0) ** -8.0),
+                               rtol=1e-12)
+    with pytest.raises(ValueError, match="tail_taper"):
+        replace(mc, tail_taper="exponential")
