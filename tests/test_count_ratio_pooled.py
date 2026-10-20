@@ -210,8 +210,11 @@ def test_the_operator_is_the_galaxy_sum_at_any_proposal():
 
 
 def test_the_gathered_form_is_the_grid():
+    # Every row holds galaxies, so every fraction is positive (a row with
+    # fraction 0 must hold none).
     cache = build_pooled_count_ratio_cache(
-        TOY, window=0.02, z_depth=TOY_DEPTH, row_fraction=np.linspace(0.0, 1.0, TOY_ROWS)
+        TOY, window=0.02, z_depth=TOY_DEPTH,
+        row_fraction=np.linspace(0.0, 1.0, TOY_ROWS + 1)[1:],
     )
     grid = completion_curves(COSMO, TOY_PARAMS, TOY, cache)
     gathered = gathered_completion_curves(COSMO, TOY_PARAMS, TOY, cache)
@@ -641,3 +644,247 @@ def test_the_gradient_is_finite(catalog):
     assert float(jax.jit(lambda t: fn(t))(theta)) == pytest.approx(float(value), rel=1e-12)
     labels = list(analysis.parameters.labels)
     assert grad[labels.index("H0")] != 0.0
+
+
+# ---------------------------------------------------------------------------
+# Redshift errors: point redshifts near z = 0, and count_ratio="pooled_kernel"
+
+PHOTO_DEPTH = 0.25
+PHOTO_ROWS = 12
+
+
+def _photo(sigma, seed=1, n0=10.0**-3.8, completeness=0.5):
+    """Galaxies Poisson in comoving volume, completeness 0.5 below 0.25, observed
+    with a Gaussian redshift error ``sigma`` (stored as ``dzgals``), and their ``n0``."""
+    rng = np.random.default_rng(seed)
+    zf = np.linspace(0.0, PHOTO_DEPTH, 20_001)
+    density = completeness * n0 * 4.0 * np.pi * _dV(zf)
+    cdf = np.concatenate([[0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(zf))])
+    n = rng.poisson(cdf[-1])
+    z = np.interp(rng.uniform(0.0, cdf[-1], n), cdf, zf) + sigma * rng.normal(size=n)
+    rows = rng.integers(0, PHOTO_ROWS, n)
+    ngals = np.bincount(rows, minlength=PHOTO_ROWS)
+    zgals = np.full((PHOTO_ROWS, ngals.max()), 100.0)
+    dzgals = np.ones(zgals.shape)
+    for row in range(PHOTO_ROWS):
+        zgals[row, : ngals[row]] = z[rows == row]
+        dzgals[row, : ngals[row]] = sigma
+    catalog = GalaxyCatalog(
+        apix=4.0 * np.pi / PHOTO_ROWS, zgals=zgals, dzgals=dzgals,
+        wgals=np.ones(zgals.shape), ngals=ngals.astype(np.int32),
+    )
+    return catalog, n0
+
+
+def _ratio(catalog, n0, cache, cosmo=COSMO, delta=0.0):
+    """The unclipped pooled ratio ``operator @ (z^2 / dN_exp)`` at a proposal."""
+    params = CatalogParameters(n0=n0, delta=delta, sigma_kde=0.0, z_depth=PHOTO_DEPTH)
+    dN_exp = np.asarray(build_completion_state(cosmo, params, catalog).dN_exp)
+    u = Z**2 / np.where(dN_exp > 0.0, dN_exp, 1.0)
+    u[0] = u[1]
+    return np.asarray(cache.operator) @ u
+
+
+_trapezoid = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+PHOTO, PHOTO_N0 = _photo(0.03)
+LOW_Z = (Z >= 0.005) & (Z <= 0.12)
+
+
+def test_point_redshifts_near_zero_saturate_the_default_and_it_warns():
+    """Photometric redshifts: galaxies scattered toward z = 0 carry the weight
+    ``1/dN_exp ~ z^-2``, so the default ratio of a catalog 50% complete is far
+    above 1 below z ~ 0.05 (the clip then makes it complete and removes every
+    missing host there). Building the cache says so and names the option."""
+    with pytest.warns(UserWarning, match="count_ratio='pooled_kernel' counts each galaxy"):
+        cache = build_pooled_count_ratio_cache(PHOTO, window=0.02, z_depth=PHOTO_DEPTH)
+    ratio = _ratio(PHOTO, PHOTO_N0, cache)
+    low = (Z >= 0.005) & (Z <= 0.05)
+    assert np.all(ratio[low] > 2.0), ratio[low]
+
+
+def test_the_kernel_count_ratio_recovers_the_completeness_with_redshift_errors():
+    """``count_ratio="pooled_kernel"`` counts each galaxy through its redshift
+    kernel: 0.5 to within 0.02 from z = 0.005 to 0.12 on the same catalog, and
+    no warning of the point redshifts."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cache = build_pooled_count_ratio_cache(
+            PHOTO, window=0.02, z_depth=PHOTO_DEPTH, redshift_errors=True
+        )
+    ratio = _ratio(PHOTO, PHOTO_N0, cache)
+    assert np.max(np.abs(ratio[LOW_Z] - 0.5)) < 0.02, ratio[LOW_Z]
+
+
+def test_without_redshift_errors_both_count_ratios_agree():
+    """Spectroscopic redshifts (errors at the floor): the kernel ratio is the
+    default one to within 0.02 above z = 0.01, and neither warns."""
+    spec, n0 = _photo(0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        point = _ratio(
+            spec, n0, build_pooled_count_ratio_cache(spec, window=0.02, z_depth=PHOTO_DEPTH)
+        )
+        kernel = _ratio(spec, n0, build_pooled_count_ratio_cache(
+            spec, window=0.02, z_depth=PHOTO_DEPTH, redshift_errors=True
+        ))
+    above = (Z >= 0.01) & (Z <= PHOTO_DEPTH)
+    assert np.max(np.abs(kernel - point)[above]) < 0.02
+    assert np.max(np.abs(point[LOW_Z & (Z >= 0.02)] - 0.5)) < 0.03
+
+
+def test_the_kernel_operator_is_its_galaxy_sum_at_any_proposal():
+    """``operator @ (z^2 / dN_exp)`` against its definition, each galaxy's
+    truncated kernel over its exact normaliser ``int N(t; z_i, s) dN_exp(t) dt``,
+    at a cosmology and a density evolution the cache was not built with: 1e-3
+    relative (the normaliser's ``t^2 / u(zhat)`` form and the binning)."""
+    window, sigma = 0.015, 0.03
+    cosmo = CosmologyParameters(H0=81.0, Om0=0.42, w0=-0.8, wa=0.3)
+    n0, delta = 0.7 * PHOTO_N0, 1.3
+    cache = build_pooled_count_ratio_cache(
+        PHOTO, window=window, z_depth=PHOTO_DEPTH, redshift_errors=True
+    )
+    got = _ratio(PHOTO, n0, cache, cosmo, delta)
+    real = np.arange(PHOTO.zgals.shape[1])[None, :] < np.asarray(PHOTO.ngals)[:, None]
+    zs = np.asarray(PHOTO.zgals)[real]
+    t = np.linspace(1.0e-6, 0.6, 60_001)
+    dN_exp = n0 * PHOTO.apix * _dV(t, cosmo) * (1.0 + t) ** delta
+    lookup = np.linspace(zs.min(), zs.max(), 4001)
+    norm = np.interp(zs, lookup, [
+        _trapezoid(np.exp(-0.5 * ((t - z0) / sigma) ** 2) * dN_exp, t)
+        / (np.sqrt(2.0 * np.pi) * sigma)
+        for z0 in lookup
+    ])
+    width = np.hypot(window, sigma)
+    for z0 in (0.01, 0.03, 0.06, 0.1, 0.15, 0.2, 0.24):
+        k = int(np.argmin(np.abs(Z - z0)))
+        mu = (Z[k] * sigma**2 + zs * window**2) / width**2
+        sd = window * sigma / width
+        kernel = (
+            np.exp(-0.5 * ((Z[k] - zs) / width) ** 2) / (np.sqrt(2.0 * np.pi) * width)
+            * (ndtr((PHOTO_DEPTH - mu) / sd) - ndtr(-mu / sd))
+        )
+        kappa = ndtr((PHOTO_DEPTH - Z[k]) / window) - ndtr(-Z[k] / window)
+        want = np.sum(kernel / norm) / (PHOTO_ROWS * kappa)
+        np.testing.assert_allclose(got[k], want, rtol=1.0e-3)
+    assert np.all(got[Z > PHOTO_DEPTH] == 0.0)
+
+
+def test_the_kernel_count_ratio_does_not_count_a_galaxy_far_below_zero():
+    """Galaxies at ``z <= 0`` count through the part of their kernel above 0
+    without a warning; one farther than eight widths below 0 is not counted."""
+    z = np.asarray(PHOTO.zgals).copy()
+    z[0, 0] = -0.5
+    with pytest.warns(UserWarning, match="1 real galaxies more than 8 redshift errors below"):
+        build_pooled_count_ratio_cache(
+            PHOTO._replace(zgals=z), window=0.02, z_depth=PHOTO_DEPTH, redshift_errors=True
+        )
+
+
+@pytest.mark.parametrize("weighting", ["conditional", "field", "two"])
+def test_the_kernel_count_ratio_through_ds_model(weighting):
+    """``count_ratio="pooled_kernel"``: recorded with its window, a pooled
+    cache at binding, finite and not the default's value."""
+    kwargs = dict(catalog_sky_weighting="conditional" if weighting == "conditional" else "field")
+    stores = [A, B] if weighting == "two" else A
+    kernel = _model(stores, count_ratio="pooled_kernel", **kwargs)
+    assert kernel.redshift.count_ratio == "pooled_kernel"
+    assert kernel.redshift.count_ratio_window == 0.02
+    assert kernel.parameters.catalog_model_settings["count_ratio"] == "pooled_kernel"
+    assert parameter_plan_semantic(kernel.parameters) != parameter_plan_semantic(
+        _model(stores, **kwargs).parameters
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="count_ratio=")
+        bound = _bind(kernel)
+        default = _bind(_model(stores, **kwargs))
+    caches = (
+        [bound.observed_density_cache] if weighting == "conditional"
+        else [c.compact_cache for c in bound.model_operands.components]
+    )
+    assert all(isinstance(c, PooledCountRatioCache) for c in caches)
+    for theta in _points(kernel):
+        value = float(bound(theta))
+        assert np.isfinite(value)
+        assert abs(value - float(default(theta))) > 1.0e-9
+
+
+def test_the_kernel_count_ratio_gradient_is_finite():
+    analysis = _model(A_DEEP, count_ratio="pooled_kernel", fixed_survey={"sigma_kde": 0.01})
+    fn = _bind(analysis).as_pytree_callable()
+    theta = jnp.asarray(theta_of(analysis, {"log10n0": -3.9}))
+    value, grad = jax.value_and_grad(lambda t: fn(t))(theta)
+    assert np.isfinite(float(value))
+    assert np.all(np.isfinite(np.asarray(grad))), grad
+
+
+# ---------------------------------------------------------------------------
+# The row fraction: finite, in [0, 1], and no galaxy outside the footprint
+
+
+@pytest.mark.parametrize("value", [-0.5, 1.5, np.nan])
+def test_the_cache_refuses_a_row_fraction_out_of_range(value):
+    with pytest.raises(ValueError, match="finite and lie in"):
+        build_pooled_count_ratio_cache(
+            _sparse(800), window=0.05, row_fraction=np.full(12, value)
+        )
+
+
+def test_galaxies_in_a_row_outside_the_footprint_are_refused():
+    """A row with fraction 0 holds no galaxy. Counted anyway, its galaxies
+    raised the pooled ratio of every row by (all galaxies)/(galaxies in covered
+    rows) and were counted twice in their own row; now refused."""
+    fraction = np.ones(12)
+    fraction[[2, 5]] = 0.0
+    with pytest.raises(ValueError, match=r"row_fraction is 0 in 2 catalog rows that hold 1600"):
+        build_pooled_count_ratio_cache(_sparse(800), window=0.05, row_fraction=fraction)
+    # The same rows without galaxies are accepted.
+    build_pooled_count_ratio_cache(_sparse(800, empty=(2, 5)), window=0.05, row_fraction=fraction)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(),
+        dict(catalog_sky_weighting="field"),
+        dict(completeness="selection", selection=SEL),
+        dict(completeness="selection", selection=SEL, catalog_sky_weighting="field"),
+    ],
+)
+def test_ds_model_refuses_galaxies_outside_the_row_fraction(kwargs):
+    """Under the pooled count ratio and under ``completeness="selection"``
+    alike (row 0 of ``A`` holds galaxies; row 3 is empty)."""
+    fraction = np.ones(48)
+    fraction[3] = 0.0
+    _model(A, row_fraction=fraction, **kwargs)
+    fraction[0] = 0.0
+    with pytest.raises(ValueError, match="row_fraction is 0 in 1 catalog rows"):
+        _model(A, row_fraction=fraction, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# The cache records the depth it was normalised to
+
+
+def test_a_cache_evaluated_at_another_depth_is_nan():
+    """A cache normalised to the top of the grid (``z_depth=None``) and
+    evaluated with ``params.z_depth = 0.35`` gave a completeness up to half
+    the matched one near the depth, silently; it is now NaN, on the grid and
+    in the gathered form. The matched cache is finite."""
+    catalog = _sparse(800)
+    params = TOY_PARAMS._replace(z_depth=0.35)
+    matched = build_pooled_count_ratio_cache(catalog, window=0.05, z_depth=0.35)
+    full = build_pooled_count_ratio_cache(catalog, window=0.05)
+    assert float(matched.z_top) == 0.35 and float(full.z_top) == float(Z[-1])
+    assert np.all(np.isfinite(np.asarray(completion_curves(COSMO, params, catalog, matched).N_miss)))
+    assert np.all(np.isnan(np.asarray(completion_curves(COSMO, params, catalog, full).N_miss)))
+    gathered = gathered_completion_curves(COSMO, params, catalog, full)
+    assert np.all(np.isnan(np.asarray(gathered.N_miss)))
+    # Without a depth the full-grid cache is the matched one.
+    no_depth = params._replace(z_depth=None)
+    assert np.all(np.isfinite(np.asarray(completion_curves(COSMO, no_depth, catalog, full).N_miss)))
+    # A cache built without the record is not checked; the curve is the same.
+    unchecked = PooledCountRatioCache(full.operator, full.row_fraction)
+    np.testing.assert_array_equal(
+        np.asarray(completion_curves(COSMO, no_depth, catalog, unchecked).C),
+        np.asarray(completion_curves(COSMO, no_depth, catalog, full).C),
+    )

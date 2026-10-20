@@ -466,7 +466,8 @@ def test_row_fraction_scales_the_table_row_by_row():
     values = _schechter_values(ZGRID)
     table = TabulatedSelection(ZGRID, values)
     fraction = np.random.default_rng(4).uniform(0.0, 1.0, NPIX)
-    fraction[::7] = 0.0
+    # Outside the footprint (fraction 0) only on the rows that hold no galaxy.
+    fraction[[3, 17, 30]] = 0.0
     schechter = _bind(_analysis(SCHECHTER, store=STORE_DEPTH, row_fraction=fraction))
     analysis = _analysis(table, store=STORE_DEPTH, row_fraction=fraction)
     assert analysis.parameters.catalog_model_settings["row_fraction_sha256"]
