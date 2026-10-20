@@ -487,15 +487,18 @@ def core_environment_advisory() -> dict:
     """Advisory provenance: versions and every ``DARKSIRENS_*`` variable set.
 
     Belongs in the fingerprint's ``advisory`` block (not hashed); its
-    ``code.darksirens_version`` entry feeds the code-identity drift warning.
-    The target-setting settings themselves are hashed via
+    ``code`` entry (:func:`darksirens._code_identity.code_identity`: the
+    version and, when it can be read, the git commit of darksirens and of
+    TinyNS) feeds the code-identity drift warning, which a resume under
+    another core commit with the same configuration then raises. The
+    target-setting settings themselves are hashed via
     :func:`core_numerics_semantic`.
     """
 
     import platform
     from importlib import metadata
 
-    import darksirens
+    from darksirens._code_identity import code_identity
 
     def _dist_version(name):
         try:
@@ -504,7 +507,7 @@ def core_environment_advisory() -> dict:
             return None
 
     return {
-        "code": {"darksirens_version": str(darksirens.__version__)},
+        "code": code_identity(),
         "numerics_stack": {
             "python": platform.python_version(),
             "numpy": np.__version__,
