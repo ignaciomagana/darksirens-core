@@ -716,6 +716,13 @@ def bright_siren_log_likelihood(
             f"bright-siren counterparts has {len(counterparts)} entries but "
             f"n_events={n_events}"
         )
+    # Each counterpart's slice is checked on its own below, which cannot see a
+    # wrong grouping: a too-small nsamp gives full slices of the wrong samples.
+    n_pe = int(gw_pe.dL.shape[0])
+    if n_pe != n_events * nsamp:
+        raise ValueError(
+            f"gw_pe has {n_pe} samples, expected n_events*nsamp={n_events * nsamp}"
+        )
 
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
