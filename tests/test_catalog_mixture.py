@@ -777,3 +777,30 @@ def test_a_failed_catalog_check_makes_the_mixture_likelihood_minus_inf():
     wide = theta.copy()
     wide[list(pair.parameters.labels).index("sigma_kde_c2")] = 0.05
     assert float(windowed(wide)) == -np.inf
+
+
+class _NaNExtension(_TableExtension):
+    """The identity modulation, except a NaN missing-host density for catalog 2."""
+
+    def missing_density(self, ctx, dN_miss):
+        return dN_miss * jnp.nan if ctx.catalog_index == 1 else dN_miss
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("settings", [{}, dict(kernel_layout="padded", kernel_window="off")],
+                         ids=("defaults", "padded_window_off"))
+def test_a_nan_branch_makes_the_mixture_likelihood_minus_inf_under_every_layout(settings):
+    """A NaN in one catalog's branch (here its missing-host density) poisons
+    its normaliser. The mixture's logsumexp drops a non-finite term, so the
+    poison of every branch is added to every term; it used to be added only
+    when some catalog carried a pin, galaxy list or kernel window, so under
+    the padded layout with the window off the likelihood came back finite and
+    equal to catalog 1 alone."""
+    analysis = _model([A, B])
+    ones = [jnp.ones((48, zgrid.size)), jnp.ones((192, zgrid.size))]
+    theta = _points(analysis, n=1)[0]
+    with catalog_settings(**settings):
+        identity = _target(analysis, _TableExtension(ones))
+        poisoned = _target(analysis, _NaNExtension(ones))
+        assert np.isfinite(float(identity.log_likelihood(theta)))
+        assert float(poisoned.log_likelihood(theta)) == -np.inf

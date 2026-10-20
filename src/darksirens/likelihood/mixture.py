@@ -495,20 +495,14 @@ def field_mixture_log_likelihood(
         pieces.append(_CatalogPieces(kernels, pin_ok, curves, obs, obs_poison))
 
     # A failed pin probe, galaxy list or kernel window poisons its catalog's
-    # normaliser with NaN. With two or more catalogs the mixture's logsumexp
-    # would drop that branch as a non-finite term and return a finite value
-    # from the others, so the poison of every branch is also added to every
-    # term (0 when nothing failed; NaN makes every term non-finite and the
-    # likelihood -inf). Static: only when some catalog carries such a check,
-    # so a mixture without one keeps its program.
-    may_poison = n >= 2 and any(
-        piece.pin_ok is not None
-        or getattr(piece.kernels, "layout_ok", None) is not None
-        or getattr(piece.kernels, "window_ok", None) is not None
-        or component.full_pin is not None
-        or getattr(component.full, "galaxy_index", None) is not None
-        for piece, component in zip(pieces, components)
-    )
+    # normaliser with NaN, and so does a NaN normaliser or missing-host
+    # density from any other source (an extension, a selection model, a
+    # curve). With two or more catalogs the mixture's logsumexp would drop
+    # that branch as a non-finite term and return a finite value from the
+    # others, so the poison of every branch is also added to every term (0
+    # when nothing failed, which leaves every value as it was; NaN makes every
+    # term non-finite and the likelihood -inf), whatever the settings.
+    may_poison = n >= 2
 
     def _log_area(component):
         return jnp.log(jnp.asarray(component.compact.apix, dtype=zgrid.dtype))
