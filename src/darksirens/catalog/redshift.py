@@ -140,6 +140,19 @@ def _row_real_mask(zs, ws, ngal):
     return ws > 0.0
 
 
+def _padding_safe_widths(dzs, real):
+    """``dzs`` with a non-finite padded width read as 1.0.
+
+    Padded widths are masked out of every value, but a NaN or inf one makes
+    ``sqrt(dz**2 + sigma_kde**2)`` NaN there, and the reverse pass through the
+    masked branch is then ``0 * NaN``: the ``sigma_kde`` gradient (and, in the
+    padded normaliser, the ``H0`` one) came back NaN.  Real widths and finite
+    padding are returned as they are.
+    """
+
+    return jnp.where(real | jnp.isfinite(dzs), dzs, 1.0)
+
+
 def _logsumexp_neginf_safe(terms):
     """Gradient-safe logsumexp with exact ``-inf`` for an all-padding row."""
 
@@ -394,6 +407,7 @@ def _row_kernel_state(
     log_Z_depth=None,
 ):
     real = _row_real_mask(zs, ws, ngal)
+    dzs = _padding_safe_widths(dzs, real)
     sig_eff = jnp.maximum(
         jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR
     )

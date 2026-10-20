@@ -96,7 +96,8 @@ class GalaxyCatalog(NamedTuple):
     """Padded, pixel-row catalog in the core standardized schema.
 
     The first ``ngals[row]`` columns of each row are real galaxies.  Remaining
-    columns are padding and are ignored regardless of their stored values.
+    columns are padding: their widths and weights are ignored whatever they
+    hold, and their redshifts must be finite (:func:`validate_catalog`).
     ``unique_pixels`` maps compact rows back to global HEALPix ids; ``None``
     means row ``r`` is global pixel ``r``.  ``galaxy_index`` is ``None``
     (default) or the :class:`GalaxyIndex` of this catalog's real galaxies,

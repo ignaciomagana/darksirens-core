@@ -190,3 +190,42 @@ def test_counterpart_sky_marginalization_removes_pixel_gate():
     ))
     assert np.all(np.isfinite(got))
     np.testing.assert_array_equal(got[:1], got[1:])
+
+
+def _padded_widths(value):
+    cat = _catalog()
+    pad = np.arange(cat.zgals.shape[1])[None, :] >= np.asarray(cat.ngals)[:, None]
+    return cat._replace(dzgals=jnp.where(jnp.asarray(pad), value, cat.dzgals))
+
+
+def test_non_finite_padded_widths_leave_the_gradients_finite():
+    # validate_catalog accepts any padded width. A NaN or inf one is masked
+    # out of the value, but the reverse pass through the masked branch was
+    # 0 * NaN: d/dsigma_kde came back NaN in both layouts, and d/dH0 in the
+    # padded one.
+    from darksirens.catalog.redshift import with_galaxy_index
+    from darksirens.catalog.types import validate_catalog
+
+    z = jnp.asarray([0.05, 0.09, 0.2, 0.3, 0.33])
+    rows = jnp.asarray([0, 0, 1, 2, 2], dtype=jnp.int32)
+
+    def total(theta, cat, cache):
+        cosmo = _cosmo()._replace(H0=theta[0])
+        params = _params(0.3)._replace(sigma_kde=theta[1])
+        state = build_incomplete_catalog_prior_state(cosmo, params, cat, cache)
+        return jnp.sum(eval_incomplete_catalog_prior_state_vmap(z, rows, state, cat))
+
+    theta = jnp.asarray([67.74, 0.01])
+    finite = _padded_widths(1.0)
+    cache = build_observed_density_cache(finite)
+    want_value, want_grad = jax.value_and_grad(total)(theta, finite, cache)
+    assert np.all(np.isfinite(np.asarray(want_grad)))
+    for value in (jnp.nan, jnp.inf):
+        cat = _padded_widths(value)
+        assert validate_catalog(cat) is cat
+        for layout in (cat, with_galaxy_index(cat)):
+            got_value, got_grad = jax.value_and_grad(total)(theta, layout, cache)
+            assert float(got_value) == float(want_value)
+            np.testing.assert_allclose(
+                np.asarray(got_grad), np.asarray(want_grad), rtol=1e-12, atol=0.0
+            )
