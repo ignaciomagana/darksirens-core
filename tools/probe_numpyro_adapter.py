@@ -314,6 +314,7 @@ def _candidate_executor():
             upper=upper,
             conditional_pairs=tuple(cond_pairs),
             conditioned=frozenset(conditioned),
+            rejected_constraints=(),
             target_accept=float(target_accept),
             max_tree_depth=int(max_tree_depth),
             num_warmup=int(num_warmup),

@@ -37,6 +37,29 @@ class NumPyroStaticPlan:
     chain_method: str
 
 
+def joint_constraints_hold(constraints, theta):
+    """Whether ``theta`` satisfies every rejected joint constraint.
+
+    The constraints' meaning in parameter space (the models' own valid masks):
+    ``ordered_le`` is ``x_i <= x_j``, ``simplex`` ``x_i + x_j <= 1`` and
+    ``ball3`` ``|x|^2 <= 1``. Works on NumPy and JAX arrays alike.
+    """
+    valid = True
+    for kind, idx in constraints:
+        if kind == "ordered_le":
+            holds = theta[idx[0]] <= theta[idx[1]]
+        elif kind == "simplex":
+            holds = theta[idx[0]] + theta[idx[1]] <= 1.0
+        elif kind == "ball3":
+            holds = sum(theta[i] * theta[i] for i in idx) <= 1.0
+        else:
+            raise ValueError(
+                f"joint prior constraint {kind!r} has no NUTS rejection rule"
+            )
+        valid = valid & holds
+    return valid
+
+
 def prepare_numpyro_static_plan(
     labels,
     lower_bound,

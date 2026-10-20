@@ -12,7 +12,10 @@ from typing import Any
 
 import numpy as np
 
-from darksirens.inference.numpyro_static import NumPyroStaticPlan
+from darksirens.inference.numpyro_static import (
+    NumPyroStaticPlan,
+    joint_constraints_hold,
+)
 
 
 @dataclass(frozen=True)
@@ -40,8 +43,14 @@ def prepare_numpyro_initialization(
     midpoint = plan.midpoint
     init_values = dict(plan.init_values)
 
+    # NUTS rejects the plan's rejected joint constraints, so a start outside
+    # them has an infinite potential. An ordinary analysis's likelihood is
+    # already non-finite there; a target's need not be.
+    rejected = tuple(plan.rejected_constraints)
     midpoint_log_l = float(np.asarray(likelihood(midpoint)))
-    if not np.isfinite(midpoint_log_l):
+    if not np.isfinite(midpoint_log_l) or not bool(
+        joint_constraints_hold(rejected, midpoint)
+    ):
         rng = np.random.default_rng(
             int(opts.seed) + plan.nuts_init_seed_offset
         )
@@ -51,6 +60,8 @@ def prepare_numpyro_initialization(
         best_log_l = -np.inf
         for _ in range(plan.nuts_init_tries):
             candidate = rng.uniform(lower_np, upper_np)
+            if not bool(joint_constraints_hold(rejected, candidate)):
+                continue
             candidate_log_l = float(
                 np.asarray(
                     likelihood(jnp.asarray(candidate, dtype=lower.dtype))

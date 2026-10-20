@@ -282,6 +282,39 @@ def test_numpyro_recovers_the_analytic_posterior():
     np.testing.assert_allclose(log_likelihood, expected, rtol=0.0, atol=1e-9)
 
 
+def test_numpyro_enforces_a_target_s_joint_priors(capsys):
+    """NUTS sampled each site on its own box: with a flat likelihood about half
+    the draws broke each constraint (the nested transform gives none), while
+    the run printed that rejection enforced them."""
+    pytest.importorskip("numpyro")
+    import jax.numpy as jnp
+
+    uniform = ("uniform", None, None)
+    plan = ds.ParameterPlan(
+        labels=("w0", "w1", "dx", "dy", "dz", "a", "b"),
+        lower=(0.0, 0.0, -1.0, -1.0, -1.0, 0.0, 0.0),
+        upper=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        prior_kinds=(uniform,) * 7,
+        joint_constraints=(
+            ("simplex", (0, 1)),
+            ("ball3", (2, 3, 4)),
+            ("ordered_le", (5, 6)),
+        ),
+    )
+    target = ds.InferenceTarget(lambda theta: 0.0 * jnp.sum(theta), plan)
+    result = ds.infer(
+        target, sampler="numpyro", show_progress=False, seed=3,
+        nuts_warmup=200, nuts_samples=1000,
+    )
+    assert "enforced for NUTS by likelihood-side REJECTION" in capsys.readouterr().out
+    samples = np.asarray(result["samples"])
+    assert np.all(samples[:, 0] + samples[:, 1] <= 1.0)
+    assert np.all(np.sum(samples[:, 2:5] ** 2, axis=1) <= 1.0)
+    assert np.all(samples[:, 5] <= samples[:, 6])
+    # Still the prior: the walls reject, they do not pin the chain.
+    assert np.ptp(samples[:, 0]) > 0.5 and np.ptp(samples[:, 5]) > 0.5
+
+
 def test_dynesty_diagnostics_names_the_extra_when_matplotlib_is_missing(monkeypatch):
     # `pip install darksirens[dynesty]` now supplies matplotlib; an environment
     # that lacks it must say which extra to install, not fail on a bare import.

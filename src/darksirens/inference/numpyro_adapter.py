@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from darksirens.inference.nested_output import termination_record
+from darksirens.inference.numpyro_static import joint_constraints_hold
 
 
 def _numpyro_diagnostics(extra, max_tree_depth: int, target_accept: float):
@@ -55,6 +56,7 @@ def run_numpyro(
     upper = plan.upper
     conditional_pairs = tuple(plan.conditional_pairs)
     conditioned = set(plan.conditioned)
+    rejected = tuple(plan.rejected_constraints)
 
     def _site(i, name):
         kind, kloc, kscale = ("uniform", None, None)
@@ -116,6 +118,13 @@ def run_numpyro(
         theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
         log_l = likelihood(theta)
         numpyro.factor("likelihood", log_l)
+        if rejected:
+            # The rejection the static plan announces. An ordinary analysis's
+            # likelihood already rejects there (population and angular valid
+            # masks), so this adds exactly 0.0 or repeats its -inf; an
+            # InferenceTarget's likelihood is the companion's own and may not.
+            valid = joint_constraints_hold(rejected, theta)
+            numpyro.factor("joint_prior", jnp.where(valid, 0.0, -jnp.inf))
 
     init_values = dict(initialization.init_values)
     kernel = NUTS(
