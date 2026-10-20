@@ -390,7 +390,7 @@ def _reference_log_likelihood(analysis, values):
     def weight(m1det, q, dL, chieff, pix, prior_wt, _catalog=None):
         supported = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
         dL_c = jnp.clip(dL, dL_grid[0], dL_grid[-1])
-        z = z_of_dL_precomputed(dL_c, dL_grid)
+        z = z_of_dL_precomputed(dL_c, dL_grid, H0=cosmology.H0)
         m1src = m1det / (1.0 + z)
         terms = []
         for k in range(K):

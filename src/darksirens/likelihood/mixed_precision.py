@@ -43,7 +43,8 @@ The float32 interpolation kernels below mirror the default float64 kernels
 ``cosmology._grid.log_interp_zgrid``,
 ``catalog.models.eval_incomplete_catalog_prior_state``) term for term; the
 ``DARKSIRENS_INTERP_SCAN`` / ``DARKSIRENS_INTERP_SEARCHSORTED`` debugging
-switches do not apply to them.
+switches do not apply to them. The opt-in ``DARKSIRENS_LOW_Z_INTERP=corrected``
+does, through the same helpers as the float64 kernels.
 """
 
 from __future__ import annotations
@@ -203,11 +204,13 @@ def log_jacobian(z, dL, cosmo: CosmologyParameters):
     return jnp.log(ddl) + jnp.log1p(z)
 
 
-def z_of_dL(dL, dL_grid):
+def z_of_dL(dL, dL_grid, H0=None):
     """``cosmology.distances.z_of_dL_precomputed`` with the redshift nodes in dL's dtype."""
     zg = _dist.zgrid.astype(dL.dtype)
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
     z = _dist._interp_unrolled(dL, dL_grid, zg)
+    if _zgrid_mod.LOW_Z_INTERP == "corrected":
+        z = _dist._corrected_first_distance_cell(z, dL, dL_grid, zg, H0)
     return jnp.where(in_grid, z, jnp.nan)
 
 
@@ -229,6 +232,8 @@ def log_interp_zgrid(z, log_grid):
     i = i - ((i > 1) & (x < zg[i - 1]))
     i = i + ((i < n - 1) & (x >= zg[i]))
     i = jnp.where(x >= zg[-1], n - 1, i)
+    if _zgrid_mod.LOW_Z_INTERP == "corrected":
+        return _zgrid_mod._low_z_corrected_log_interp(z, log_grid, zg, i), i
     fp = log_grid
     df = fp[i] - fp[i - 1]
     dx = zg[i] - zg[i - 1]
@@ -308,7 +313,7 @@ def make_log_weight(
         )
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL(dL_c, dL_grid_c)
+        z = z_of_dL(dL_c, dL_grid_c, cosmo_c.H0)
         m1src = m1det / (1.0 + z)
         ldw = (
             log_p_pop(m1src, q, z, chieff, pop_c, **prep)
@@ -360,7 +365,7 @@ def make_branch_log_weight(
         )
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL(dL_c, dL_grid_c)
+        z = z_of_dL(dL_c, dL_grid_c, cosmo_c.H0)
         m1src = m1det / (1.0 + z)
         branches = log_prior_branches(z, pix)
         terms = [
