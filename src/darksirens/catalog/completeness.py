@@ -20,7 +20,9 @@ over the full modeled redshift grid.
 Pooled (``ds.model(..., count_ratio="pooled")``, the default of ``ds.model``
 since 2026-10-10): the pooled count ratio of
 :func:`build_pooled_count_ratio_cache`, which smooths the ratio itself, pools
-the catalog's rows before the clip and takes its kernel width as an argument.
+the catalog's rows before the clip and takes its kernel width as an argument;
+``count_ratio="pooled_kernel"`` (opt-in) is the same estimator with each
+galaxy counted through its redshift kernel instead of its point redshift.
 The functions here dispatch on the cache they are given: no cache or an
 :class:`ObservedDensityCache` is the legacy per-row estimator (what
 ``ds.model(..., count_ratio="row")`` binds), bit for bit as before; a
