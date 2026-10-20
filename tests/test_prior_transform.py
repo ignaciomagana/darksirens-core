@@ -191,6 +191,60 @@ def test_unknown_joint_constraint_kind_raises_instead_of_folding_to_simplex():
         )
 
 
+def test_chained_conditional_upper_must_declare_the_conditioning_pair_first():
+    """The maps apply in declaration order: (0, 1) before (1, 2) scaled u_0 by
+    the unconditioned u_1, so x_0 > x_1 on half the draws and the x_0 mean was
+    0.25 instead of the declared 0.125. That order is now refused."""
+    _enable_x64()
+    lower, upper = [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
+    natural = [("conditional_upper", (0, 1)), ("conditional_upper", (1, 2))]
+    with pytest.raises(ValueError, match=r"Declare \(1, 2\) first"):
+        make_prior_transform(lower, upper, joint_constraints=natural)
+
+    transform = make_prior_transform(
+        lower, upper, joint_constraints=natural[::-1]
+    )
+    x = np.asarray(transform(_cube(n=200_000, ndim=3, seed=7)))
+    assert np.all(x[:, 0] <= x[:, 1]) and np.all(x[:, 1] <= x[:, 2])
+    # x2 ~ U(0, 1), x1 ~ U(0, x2), x0 ~ U(0, x1): means 1/8, 1/4, 1/2.
+    np.testing.assert_allclose(x.mean(axis=0), [0.125, 0.25, 0.5], atol=3e-3)
+
+    # Two children of one parent compose in any order.
+    tree = make_prior_transform(
+        lower,
+        upper,
+        joint_constraints=[("conditional_upper", (0, 2)), ("conditional_upper", (1, 2))],
+    )
+    x = np.asarray(tree(_cube(n=1000, ndim=3, seed=8)))
+    assert np.all(x[:, 0] <= x[:, 2]) and np.all(x[:, 1] <= x[:, 2])
+
+
+@pytest.mark.parametrize(
+    "constraints,match",
+    [
+        # Two pairwise sorts are not a sort: a > b on a third of the draws.
+        ([("ordered_le", (0, 1)), ("ordered_le", (1, 2))], "share the coordinate"),
+        ([("simplex", (0, 1)), ("ordered_le", (1, 2))], "share the coordinate"),
+        ([("ball3", (0, 1, 2)), ("conditional_upper", (2, 0))], "share the coordinate"),
+        (
+            [("conditional_upper", (0, 1)), ("conditional_upper", (0, 2))],
+            "bounded member of two",
+        ),
+        (
+            [("conditional_upper", (0, 1)), ("conditional_upper", (1, 0))],
+            "cycle",
+        ),
+    ],
+)
+def test_joint_maps_sharing_a_coordinate_that_do_not_compose_are_refused(
+    constraints, match
+):
+    with pytest.raises(ValueError, match=match):
+        make_prior_transform(
+            [0.0, 0.0, 0.0], [1.0, 1.0, 1.0], joint_constraints=constraints
+        )
+
+
 def test_uniform_module_import_and_construction_do_not_eagerly_load_jax_or_backends():
     code = (
         "import sys; from darksirens.inference.prior import make_prior_transform; "

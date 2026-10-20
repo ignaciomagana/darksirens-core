@@ -90,7 +90,8 @@ def prepare_numpyro_static_plan(
             "NumPyro sampler: chained conditional_upper constraints "
             f"{chained} are not supported (a conditioning parameter is "
             "itself conditioned). Use --sampler dynesty/tinyns, whose "
-            "cube map composes them, or declare the chain differently."
+            "cube map composes them when each conditioning parameter's own "
+            "pair is declared first, or declare the chain differently."
         )
 
     rejected = tuple(

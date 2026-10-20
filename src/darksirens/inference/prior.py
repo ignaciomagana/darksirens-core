@@ -17,6 +17,83 @@ JOINT_CONSTRAINT_ARITY = {
 }
 
 
+def check_joint_constraint_composition(joint_constraints, labels=None) -> None:
+    """Refuse joint cube maps that share a coordinate but do not compose.
+
+    The maps apply one after another, each reading the coordinates the earlier
+    ones wrote, so two maps on one coordinate give the declared joint density
+    only for ``conditional_upper`` chains and trees (each ``x_i ~ U(lo, x_j)``
+    conditioned once), and only when the map that conditions ``x_j`` comes
+    first: ``(i, j)`` before ``(j, k)`` scales ``u_i`` by the unconditioned
+    ``u_j``, and ``x_i <= x_j`` then fails on half the draws. Any other shared
+    coordinate (two sorts, a fold and a sort, a ball and anything) has no such
+    order. ``labels`` only names the coordinates in the error.
+    """
+
+    def name(index):
+        return repr(labels[index]) if labels is not None else f"index {index}"
+
+    constraints = [
+        (str(kind), tuple(int(index) for index in idx))
+        for kind, idx in joint_constraints
+    ]
+    first_owner = {}
+    conditioned_at = {}
+    for position, (kind, idx) in enumerate(constraints):
+        for index in idx:
+            owner = first_owner.setdefault(index, position)
+            if owner == position:
+                continue
+            if kind != "conditional_upper" or constraints[owner][0] != kind:
+                raise ValueError(
+                    f"joint-prior constraints {constraints[owner][0]}"
+                    f"{constraints[owner][1]} and {kind}{idx} share the "
+                    f"coordinate {name(index)}: the cube maps apply one after "
+                    "another and do not compose into the declared joint density "
+                    "(only conditional_upper chains do). Enforce one of them in "
+                    "the likelihood instead."
+                )
+        if kind == "conditional_upper":
+            child = idx[0]
+            if child in conditioned_at:
+                raise ValueError(
+                    f"{name(child)} is the bounded member of two conditional_upper "
+                    f"constraints, {constraints[conditioned_at[child]][1]} and "
+                    f"{idx}: a cube map conditions a coordinate on one upper "
+                    "bound only."
+                )
+            conditioned_at[child] = position
+
+    parent = {child: constraints[pos][1][1] for child, pos in conditioned_at.items()}
+    for start in parent:
+        seen = [start]
+        node = parent[start]
+        while node in parent and node not in seen:
+            seen.append(node)
+            node = parent[node]
+        if node == start:
+            raise ValueError(
+                "conditional_upper constraints form a cycle through "
+                + " <= ".join(name(index) for index in seen + [start])
+                + ": only a degenerate prior satisfies it."
+            )
+
+    for position, (kind, idx) in enumerate(constraints):
+        if kind != "conditional_upper":
+            continue
+        upper = idx[1]
+        later = conditioned_at.get(upper, -1)
+        if later > position:
+            raise ValueError(
+                f"conditional_upper {idx} is declared before conditional_upper "
+                f"{constraints[later][1]}, which bounds its upper member "
+                f"{name(upper)}: the cube maps apply in declaration order, so "
+                f"{name(idx[0])} would be drawn below the unconditioned "
+                f"{name(upper)} and break {name(idx[0])} <= {name(upper)} on "
+                f"about half the draws. Declare {constraints[later][1]} first."
+            )
+
+
 def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None):
     """Unit-cube -> parameter inverse-CDF transform, per-parameter prior-aware.
 
@@ -40,6 +117,7 @@ def make_prior_transform(lower, upper, prior_kinds=None, joint_constraints=None)
                 f"joint-prior constraint {kind!r} takes {arity} indices, got "
                 f"{len(tuple(idx))}"
             )
+    check_joint_constraint_composition(joint_constraints)
 
     if prior_kinds is not None:
         # Beta(1, 1) is uniform. Normalizing it here is load-bearing for the
