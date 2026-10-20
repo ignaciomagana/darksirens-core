@@ -702,11 +702,57 @@ def test_bind_refuses_ndraw_below_the_detected_injections():
     bind_analysis(analysis, events=EVENTS, injections=replace(INJECTIONS, ndraw=INJECTIONS.n_injections))
 
 
-def test_likelihood_seams_refuse_ndraw_below_the_live_injections():
+class _VolumeRedshift:
+    """A host-density extension with no parameters: the comoving-volume prior."""
+
+    def parameter_spec(self):
+        from darksirens.analysis import ParameterPlan
+
+        return ParameterPlan(labels=(), lower=(), upper=(), prior_kinds=(), joint_constraints=())
+
+    def log_density(self, z, pixel, cosmology, parameters, state):
+        from darksirens.cosmology.volume import log_comoving_volume_prior
+
+        return log_comoving_volume_prior(z, cosmology)
+
+    def log_auxiliary_likelihood(self, parameters, state):
+        return 0.0
+
+
+def _spectral_seam(pe, sel, n_draw):
     from darksirens.cosmology.parameters import CosmologyParameters
-    from darksirens.gw.runtime import make_gw_event
     from darksirens.likelihood.hierarchical import spectral_siren_log_likelihood
     from darksirens.population import get_fixed_population_params
+
+    return spectral_siren_log_likelihood(
+        CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0),
+        jnp.asarray(get_fixed_population_params(MODEL)),
+        pe, sel, EVENTS.n_events, EVENTS.nsamp, n_draw,
+        pop_model=MODEL, max_likelihood_variance=1.0e6,
+    )
+
+
+def _host_density_seam(pe, sel, n_draw):
+    # The ordinary reducer (_validate_hierarchy_inputs) behind a host-density
+    # companion's sampler target, jitted as a sampler runs it: the injections
+    # are concrete constants of the traced program.
+    from darksirens.likelihood.host_density import make_host_density_target
+
+    target = make_host_density_target(
+        ds.model(cosmology=COSMOLOGY, population=POPULATION),
+        redshift_model=_VolumeRedshift(),
+        gw_pe=pe, gw_selection=sel, pe_state=None, selection_state=None,
+        n_events=EVENTS.n_events, nsamp=EVENTS.nsamp, n_draw=n_draw,
+        max_likelihood_variance=1.0e6,
+    )
+    plan = target.parameters
+    theta = 0.5 * (np.asarray(plan.lower, dtype=float) + np.asarray(plan.upper, dtype=float))
+    return jax.jit(target.log_likelihood)(jnp.asarray(theta))
+
+
+@pytest.mark.parametrize("seam", [_spectral_seam, _host_density_seam])
+def test_likelihood_seams_refuse_ndraw_below_the_live_injections(seam):
+    from darksirens.gw.runtime import make_gw_event
 
     def event(store):
         c = store.columns
@@ -715,16 +761,7 @@ def test_likelihood_seams_refuse_ndraw_below_the_live_injections():
             prior_wt=store.prior_wt, pixels=np.zeros(len(c["dL"]), dtype=np.int32),
         )
 
-    args = (
-        CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0),
-        jnp.asarray(get_fixed_population_params(MODEL)),
-        event(EVENTS),
-        event(INJECTIONS),
-        EVENTS.n_events,
-        EVENTS.nsamp,
-    )
+    pe, sel = event(EVENTS), event(INJECTIONS)
     with pytest.raises(ValueError, match="n_draw=192.0 is smaller than the 768 live"):
-        spectral_siren_log_likelihood(*args, 192.0, pop_model=MODEL)
-    assert np.isfinite(float(spectral_siren_log_likelihood(
-        *args, 768.0, pop_model=MODEL, max_likelihood_variance=1.0e6
-    )))
+        seam(pe, sel, 192.0)
+    assert np.isfinite(float(seam(pe, sel, 768.0)))
