@@ -292,7 +292,11 @@ def parameter_plan_semantic(plan) -> dict:
 # the single pass does.  Both therefore compute the same sums and differ only
 # by floating-point reassociation: rtol 1e-12 is the pinned reference contract
 # (tests/test_pe_event_reduction.py), and on the production DESI P12.4 target
-# the single pass and its 131072/32 blocks differ by 4e-16 relative.
+# the single pass and its 131072/32 blocks differ by 4e-16 relative.  With
+# compute_dtype="float32" the scanned and the single-pass programs also round
+# the float32 weights differently (XLA fuses them differently), whatever the
+# batch size: ~1e-8 nats on the 23-event float32 test mock, the float32
+# rounding level that compute_dtype itself records.
 # Recording them would make a requeue with a different memory budget refuse
 # its own checkpoint; the frozen reference's fingerprint excludes both for
 # that reason.

@@ -482,6 +482,25 @@ def _check_per_sample_dtypes(kind):
     assert reductions and {d for _, d in reductions} == {"float64"}, reductions
 
 
+def test_float32_selection_padding_keeps_the_float32_weights():
+    # The run fingerprint treats sel_batch_size as layout. The pad used to
+    # rebuild the float32 injections in float64 and recompute q there, so a
+    # batch size that does not divide the injections moved ln L by ~2e-7
+    # nats on this mock against one that does. (The scanned and the single-pass
+    # float32 programs still round the weights differently, by ~1e-8 nats
+    # here, whatever the batch size: that is XLA's fusion, not the padding.)
+    b = _bind("spectral", compute_dtype="float32")
+    n_sel = int(b.gw_selection.dL.shape[0])
+    divisor = next(d for d in range(512, n_sel) if n_sel % d == 0)
+    reference = _bind("spectral", compute_dtype="float32", sel_batch_size=divisor)
+    thetas = [jnp.asarray(t) for t in _near_map_thetas(_bind("spectral"))[:3]]
+    for size in (999, 1024):
+        assert n_sel % size
+        padded = _bind("spectral", compute_dtype="float32", sel_batch_size=size)
+        for t in thetas:
+            assert float(padded(t)) == pytest.approx(float(reference(t)), rel=0, abs=1e-11), size
+
+
 def test_diagnostics_are_float64():
     from darksirens.likelihood.hierarchical import spectral_siren_log_likelihood
     from darksirens.runtime_binding import _decode_theta

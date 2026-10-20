@@ -174,7 +174,11 @@ def pad_gw_event_to_multiple(
     -------
     (GWEvent, int)
         Event with length rounded up to the nearest ``multiple`` and the
-        number of padding entries added.
+        number of padding entries added.  Every column keeps its dtype and
+        ``q`` is the event's own, extended: the event is not rebuilt through
+        :func:`make_gw_event`, which would recast a float32 event
+        (``compute_dtype="float32"``) to float64 and recompute ``q`` there, so
+        that batching changed the likelihood value.
     """
     if multiple <= 0:
         raise ValueError("multiple must be positive")
@@ -187,6 +191,7 @@ def pad_gw_event_to_multiple(
     pad = multiple - remainder
 
     def _pad1d(arr, fill=0.0):
+        arr = jnp.asarray(arr)
         return jnp.concatenate([arr, jnp.full(pad, fill, dtype=arr.dtype)])
 
     def _pad_pixels(arr):
@@ -197,25 +202,35 @@ def pad_gw_event_to_multiple(
         pad_block = jnp.zeros((pad,) + arr.shape[1:], dtype=arr.dtype)
         return jnp.concatenate([arr, pad_block], axis=0)
 
-    padded = make_gw_event(
-        m1det    = _pad1d(event.m1det,    fill=30.0),
-        m2det    = _pad1d(event.m2det,    fill=30.0),
-        dL       = _pad1d(event.dL,       fill=event.dL[0]),
-        chieff   = _pad1d(event.chieff,   fill=0.0),
-        prior_wt = _pad1d(event.prior_wt, fill=fill_prior_wt),
-        pixels   = _pad_pixels(event.pixels),
-        valid    = _pad1d(event.valid,    fill=False),
-        # Sky direction: pad with a finite placeholder (masked out by valid).
-        nx       = _pad1d(event.nx, fill=0.0) if event.nx is not None else None,
-        ny       = _pad1d(event.ny, fill=0.0) if event.ny is not None else None,
-        nz       = _pad1d(event.nz, fill=0.0) if event.nz is not None else None,
+    dL = _pad1d(event.dL, fill=event.dL[0])
+
+    def _sky(arr):
+        # Sky direction: pad with a finite placeholder (masked out by valid);
+        # a missing column gets make_gw_event's zeros placeholder.
+        return _barrier(_pad1d(arr) if arr is not None else jnp.zeros_like(dL))
+
+    padded = GWEvent(
+        m1det    = _barrier(_pad1d(event.m1det,    fill=30.0)),
+        m2det    = _barrier(_pad1d(event.m2det,    fill=30.0)),
+        dL       = _barrier(dL),
+        chieff   = _barrier(_pad1d(event.chieff,   fill=0.0)),
+        prior_wt = _barrier(_pad1d(event.prior_wt, fill=fill_prior_wt)),
+        pixels   = _barrier(_pad_pixels(event.pixels)),
+        # q of the padded masses 30/30.
+        q        = _barrier(_pad1d(
+            event.q if event.q is not None else event.m2det / event.m1det, fill=1.0
+        )),
+        valid    = _barrier(_pad1d(jnp.asarray(event.valid, dtype=bool), fill=False)),
+        nx       = _sky(event.nx),
+        ny       = _sky(event.ny),
+        nz       = _sky(event.nz),
         # Spin block: (N, d) — pad axis 0 with a zero block (masked by valid).
         spin     = (
-            jnp.concatenate(
+            _barrier(jnp.concatenate(
                 [event.spin,
                  jnp.zeros((pad, event.spin.shape[1]), dtype=event.spin.dtype)],
                 axis=0,
-            )
+            ))
             if event.spin is not None else None
         ),
     )
