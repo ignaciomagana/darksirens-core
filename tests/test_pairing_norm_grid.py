@@ -592,6 +592,97 @@ def test_size_pairing_grid_scales_nodes_and_is_noop_when_covered():
     assert normalization_grid_settings().pairing_m1_grid is None
 
 
+def _spectral_tail_logl(theta):
+    """spectral_siren_log_likelihood called DIRECTLY (no bind_analysis) on PE and
+    injection samples at source m1 ~ 185-270, where a 200 Msun grid clamps."""
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.gw.runtime import make_gw_event
+    from darksirens.likelihood import spectral_siren_log_likelihood
+
+    def ev(n, m1lo, m1hi, dlo, dhi):
+        m1 = jnp.linspace(m1lo, m1hi, n)
+        q = jnp.linspace(0.45, 0.8, n)
+        return make_gw_event(m1det=m1, m2det=m1 * q, dL=jnp.linspace(dlo, dhi, n),
+                             chieff=jnp.linspace(-0.1, 0.1, n), prior_wt=jnp.ones(n),
+                             pixels=jnp.zeros(n, dtype=jnp.int32), valid=jnp.ones(n, dtype=bool))
+
+    cosmology = CosmologyParameters(H0=67.74, Om0=0.3075, w0=-1.0, wa=0.0)
+    return float(spectral_siren_log_likelihood(
+        cosmology, theta, ev(16, 220.0, 320.0, 900.0, 1100.0),
+        ev(512, 20.0, 340.0, 200.0, 1500.0), 2, 8, 2000.0,
+        pop_model="gwtc5_fiducial_bpl2peaks", max_likelihood_variance=1e9))
+
+
+def test_spectral_primitive_sizes_the_pairing_grid_for_a_300_msun_model():
+    """The guard used to run only in bind_analysis, so the public primitive with
+    the grid on clamped every 200 < m1 <= 300 sample at the m1 = 200 normaliser:
+    logL 0.20 nats high from 16 PE samples at a theta inside the priors."""
+    theta = np.asarray(get_fixed_population_params("gwtc5_fiducial_bpl2peaks")).copy()
+    theta[_GW_BETA], theta[_GW_M2LOW], theta[_GW_DM2] = -1.9, 3.05, 9.5
+    theta = jnp.asarray(theta)
+    _set_pairing_grid(None)
+    exact = _spectral_tail_logl(theta)
+    _set_pairing_grid(1024, m_hi=200.0)
+    gridded = _spectral_tail_logl(theta)
+    assert abs(gridded - exact) < 1.0e-3, (gridded, exact)
+    assert normalization_grid_settings().pairing_m_hi == 300.0
+
+
+def test_pairing_grid_does_not_depend_on_what_was_sized_before():
+    """A grid a 300 Msun model grew used to stay for every later model in the
+    process: powerlaw+peak traced after a GWTC-5 binding ran on 1137 nodes to
+    300 Msun instead of 1056 to 200 (log_p_pop off by up to 2.2e-5), and its
+    fingerprint recorded the wider grid, so a fresh-process resume was refused."""
+    from darksirens.population.registry import ensure_pairing_grid_covers, pop_model_parser
+
+    m1 = jnp.asarray(np.random.default_rng(0).uniform(5.0, 99.0, 2000))
+    q = jnp.asarray(np.random.default_rng(1).uniform(0.05, 1.0, 2000))
+    z = jnp.full(2000, 0.2)
+    chi = jnp.zeros(2000)
+
+    def traced():
+        # A fresh trace that resolves its density the way the likelihoods do.
+        return np.asarray(jax.jit(
+            lambda t: pop_model_parser("powerlaw+peak")(m1, q, z, chi, t))(THETA0))
+
+    _set_pairing_grid(1024, m_hi=200.0)
+    ensure_pairing_grid_covers("powerlaw+peak")
+    alone = normalization_grid_settings()
+    want = traced()
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
+    assert normalization_grid_settings().pairing_m_hi == 300.0
+    got = traced()
+    np.testing.assert_array_equal(got, want)
+    assert normalization_grid_settings() == alone
+    # A configuration change applies to the configured grid, not the grown one.
+    ensure_pairing_grid_covers("gwtc5_fiducial_bpl2peaks")
+    U.configure_normalization_grids(pairing_edge_tol=2.0e-4)
+    assert normalization_grid_settings().pairing_m_hi == 200.0
+
+
+def test_binding_fingerprint_records_its_own_pairing_grid():
+    import darksirens as ds
+    from darksirens.inference.run_fingerprint import core_numerics_semantic
+    from darksirens.runtime_binding import bind_analysis
+
+    from _catalog_model_fixtures import gw_stores
+
+    events, injections = gw_stores()
+    cosmology = ds.Cosmology(H0=(50.0, 90.0), Om0=0.3075)
+    _set_pairing_grid(1024, m_hi=200.0)
+    narrow = bind_analysis(
+        ds.model(cosmology=cosmology, population=ds.Population("powerlaw+peak", fixed=True)),
+        events=events, injections=injections)
+    before = core_numerics_semantic(narrow)["normalization_grids"]
+    assert before["pairing_m_hi"] == 200.0
+    wide = bind_analysis(
+        ds.model(cosmology=cosmology,
+                 population=ds.Population("gwtc5_fiducial_bpl2peaks", fixed=True)),
+        events=events, injections=injections)
+    assert core_numerics_semantic(wide)["normalization_grids"]["pairing_m_hi"] == 300.0
+    assert core_numerics_semantic(narrow)["normalization_grids"] == before
+
+
 # ---------------------------------------------------------------------------
 # (7) Trace-safety of the cached grid builders.  The builders compute with jnp
 #     and are lru-cached; if the FIRST eval after a cache clear happens inside a

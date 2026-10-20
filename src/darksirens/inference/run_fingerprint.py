@@ -389,6 +389,28 @@ def _bound_kernel_window(likelihood):
     return (min(tolerances),)
 
 
+def _bound_normalization_grids(likelihood):
+    """The normalisation grids a binding's likelihood traces with, or ``None``.
+
+    The opt-in pairing m1 grid is sized for the binding's own population model
+    (``pop_model_parser`` sizes it whenever the likelihood is traced), so a
+    binding records that grid, not whatever a later binding of a wider model
+    left in the process.  ``None`` without a binding or with the grid off.
+    """
+    from darksirens.population import utils
+
+    if utils.normalization_grid_settings().pairing_m1_grid is None:
+        return None
+    pop = getattr(getattr(likelihood, "analysis", None), "population", None)
+    if likelihood is None or isinstance(likelihood, Mapping) or pop is None:
+        return None
+    from darksirens.population.registry import get_model, population_m1_support_max
+
+    model = get_model(pop.model_name, shared_beta=pop.shared_beta,
+                      shared_spin=pop.shared_spin, shared_gamma=pop.shared_gamma)
+    return utils.pairing_grid_settings_for_support(population_m1_support_max(model))
+
+
 def core_numerics_semantic(likelihood=None) -> dict:
     """Target-setting numerics core resolved in THIS process.
 
@@ -422,7 +444,10 @@ def core_numerics_semantic(likelihood=None) -> dict:
     options (``compute_dtype``, ``max_likelihood_variance``,
     ``selection_neff_soft_guard``) are added under ``"likelihood_options"``;
     a default binding, or none, adds no key, so the block is then exactly
-    the one ``core_numerics_semantic()`` has always returned.
+    the one ``core_numerics_semantic()`` has always returned.  With the
+    opt-in pairing m1 grid on, a binding's ``normalization_grids`` are the
+    grid sized for its own population model (what its likelihood traces
+    with); without a binding they are the process's current settings.
     """
 
     from darksirens.catalog.settings import catalog_evaluation_settings
@@ -460,6 +485,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
         catalog_evaluation.pop("kernel_window", None)
         if bound_window[0] is not None:
             catalog_evaluation["kernel_window"] = bound_window[0]
+    grids = _bound_normalization_grids(likelihood) or utils.normalization_grid_settings()
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {
@@ -472,7 +498,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
             "redshift": list(gp._GPPOP_Z_EDGES),
         },
         "angular_redshift_normaliser": angular_normaliser,
-        "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        "normalization_grids": grids.to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
         **extra,
     })

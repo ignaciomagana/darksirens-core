@@ -185,8 +185,10 @@ class Population:
 
     ``fixed='gwtc5'`` is the conventional public shorthand promised by the
     reconstruction architecture: for BPL+2G it resolves to the existing
-    published-median ``gwtc5_fiducial_bpl2peaks`` registry model. No population
-    parameters are duplicated here.
+    ``gwtc5_fiducial_bpl2peaks`` registry model, whose fixed vector is the
+    published median except for the effective-spin pair ``mu_chi``/``sigma_chi``
+    (0.04/0.10, a fit made here; MIGRATION.md, "GWTC-5 fixed population"). No
+    population parameters are duplicated here.
 
     ``fixed={parameter: value, ...}`` fixes only the named parameters, at the
     given values, and samples the rest. A key is the parameter's label as
