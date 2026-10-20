@@ -107,9 +107,12 @@ def normalized_state(state, log_Z) -> IncompleteCatalogPriorState:
     returns ``numerator - log_Z[row]``; with every row's ``log_Z`` replaced by
     the catalog's survey-global ``log Z`` it returns ``n_k(z | p) / Z_k``.
     ``state`` is a :class:`~darksirens.catalog.field.FieldIncompleteCatalogPriorState`.
+    The NaN that a failed pin probe, galaxy list or kernel window puts on the
+    state's row masses is added to ``log_Z`` (:func:`poison_of`), so the
+    evaluator returns NaN rather than a value from a stale kernel.
     """
 
-    log_Z = jnp.asarray(log_Z, dtype=state.log_row_mass.dtype)
+    log_Z = jnp.asarray(log_Z, dtype=state.log_row_mass.dtype) + poison_of(state.log_row_mass)
     return IncompleteCatalogPriorState(
         kernels=state.kernels,
         log_Nobs=state.log_Nobs,

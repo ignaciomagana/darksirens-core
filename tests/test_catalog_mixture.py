@@ -608,6 +608,29 @@ def test_mixture_density_is_recorded_only_when_steradian():
     assert str(steradian) != str(default)
 
 
+def test_normalized_state_carries_the_row_mass_poison():
+    """eval_normalized_field_prior_vmap is the field numerator over Z, and a
+    NaN on the state's row masses (a failed pin probe, galaxy list or kernel
+    window) makes it NaN; it used to return a finite value from the stale
+    kernel, since every row's normaliser was replaced by the scalar Z."""
+    from darksirens.catalog.mixture import eval_normalized_field_prior_vmap
+    from darksirens.cosmology.parameters import CosmologyParameters
+
+    catalog = _jax_catalog(A.catalog)
+    cosmo = CosmologyParameters(H0=70.0, Om0=0.3075)
+    params = CatalogParameters(n0=1.0e-2, delta=0.0, sigma_kde=0.0, z_depth=None)
+    curves = completion_curves(cosmo, params, catalog, build_observed_density_cache(catalog))
+    state = build_field_incomplete_catalog_prior_state_from_curves(cosmo, params, catalog, curves)
+    log_Z = logsumexp(state.log_row_mass)
+    z = jnp.asarray([0.1, 0.15, 0.2])
+    rows = jnp.asarray([4, 10, 20], dtype=jnp.int32)
+    got = np.asarray(eval_normalized_field_prior_vmap(z, rows, state, catalog, log_Z))
+    want = np.asarray(eval_field_incomplete_catalog_prior_state_vmap(z, rows, state, catalog)) - float(log_Z)
+    np.testing.assert_allclose(got, want, rtol=1e-13)
+    poisoned = state._replace(log_row_mass=state.log_row_mass.at[0].set(jnp.nan))
+    assert np.all(np.isnan(np.asarray(eval_normalized_field_prior_vmap(z, rows, poisoned, catalog, log_Z))))
+
+
 def test_fingerprint_records_the_mixture_only_when_set():
     conditional = parameter_plan_semantic(
         ds.model(cosmology=COSMOLOGY, population=POPULATION, catalog=A, count_ratio="row").parameters
