@@ -407,7 +407,9 @@ def core_numerics_semantic(likelihood=None) -> dict:
     ``kernel_window="auto"``) are recorded, so a checkpoint written before
     that is not resumed under them (see :mod:`darksirens.catalog.settings`).
     Values are read from the resolved module state, not from ``os.environ``,
-    so they are what the likelihood actually uses.  They change the
+    so they are what the likelihood actually uses; for a binding, the
+    normalisation-grid and catalog evaluation settings are the ones it was
+    bound (and is traced) with.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
     ``semantic`` block, e.g. ``semantic["core_numerics"] =
     core_numerics_semantic(bound)``.  Calling this imports JAX and the
@@ -435,7 +437,14 @@ def core_numerics_semantic(likelihood=None) -> dict:
         if options:
             extra["likelihood_options"] = options
 
-    catalog_evaluation = catalog_evaluation_settings().to_dict()
+    # A binding carries the settings its likelihood is traced under (it
+    # refuses a trace under others); report those, not the live ones.
+    snapshot = getattr(likelihood, "_trace_settings", None)
+    if snapshot is None:
+        grids, evaluation = utils.normalization_grid_settings(), catalog_evaluation_settings()
+    else:
+        grids, evaluation = snapshot
+    catalog_evaluation = evaluation.to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
         # A binding carries the kernel window it was bound with, which is what
@@ -458,7 +467,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
             "z_hi": angular_advanced._ZNORM_HI,
             "nodes": angular_advanced._ZNORM_N,
         },
-        "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        "normalization_grids": grids.to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
         **extra,
     })
