@@ -82,6 +82,17 @@ def test_package_version_matches_project_metadata():
     assert ds.__version__ == _project()["version"]
 
 
+def test_requires_python_refuses_interpreters_without_pinned_wheels():
+    from packaging.specifiers import SpecifierSet
+
+    # numpy==1.26.4 and scipy==1.12.0 have no CPython 3.13 wheels, so 3.13
+    # must be refused at resolution rather than fail in a source build.
+    supported = SpecifierSet(_project()["requires-python"])
+    assert "3.11.10" in supported and "3.12.7" in supported
+    assert "3.13.0" not in supported and "3.14.0" not in supported
+    assert "3.10.15" not in supported
+
+
 def test_runtime_dependencies_are_pinned():
     deps = [dep.replace(" ", "").lower() for dep in _project()["dependencies"]]
     for pin in PINNED_RUNTIME:

@@ -7,7 +7,10 @@ name = "darksirens"
 version = "0.1.0.dev0"
 description = "Hierarchical population and cosmological inference with gravitational-wave sirens"
 readme = "README.md"
-requires-python = ">=3.11"
+# The pinned numpy 1.26.4 and scipy 1.12.0 ship no wheels for CPython 3.13+,
+# where pip would fall back to source builds that fail; 3.11 is the validated
+# interpreter and every pin has 3.12 wheels.
+requires-python = ">=3.11,<3.13"
 authors = [{name = "Ignacio Magana"}]
 dependencies = [
   "jax==0.4.34",
