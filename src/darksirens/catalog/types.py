@@ -42,11 +42,12 @@ class CatalogParameters(NamedTuple):
     ``(0, z_max]`` of the redshift grid, which :func:`check_survey_depth`
     checks at load and at bind (the traced kernel reads a depth beyond the
     grid's end as that end, and does not check the rest).
-    ``selection`` is ``None`` (the default: the per-row count-ratio
-    completeness) or the runtime magnitude-selection model of
-    ``completeness="selection"``
-    (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection` or
-    :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`), with
+    ``selection`` is ``None`` (the default: the count-ratio completeness,
+    pooled over the sky by default or per row, ``ds.model(count_ratio=...)``)
+    or the runtime selection model of ``completeness="selection"``
+    (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
+    :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection` or
+    :class:`~darksirens.selection.catalog.TabulatedSelection`), with
     any sampled nuisance in place. Only the likelihoods' completeness step
     reads it; the kernel, the depth convention and the missing-host budget
     never do.
@@ -84,9 +85,9 @@ class GalaxyIndex(NamedTuple):
     ``flat[k] = row * N_max + slot`` for every real galaxy (``slot <
     ngals[row]``), in strictly increasing order, so ``flat // N_max`` is each
     galaxy's row.  It is derived from ``ngals`` on the host
-    (:func:`darksirens.catalog.redshift.galaxy_index`) and lets the opt-in
-    ``kernel_layout="galaxy_list"`` evaluate per-galaxy quantities on the real
-    galaxies only (:mod:`darksirens.catalog.settings`).
+    (:func:`darksirens.catalog.redshift.galaxy_index`) and lets the
+    ``kernel_layout="galaxy_list"`` default evaluate per-galaxy quantities on
+    the real galaxies only (:mod:`darksirens.catalog.settings`).
     """
 
     flat: Any
@@ -102,12 +103,15 @@ class GalaxyCatalog(NamedTuple):
     means row ``r`` is global pixel ``r``.  ``galaxy_index`` is ``None``
     (default) or the :class:`GalaxyIndex` of this catalog's real galaxies,
     attached with :func:`darksirens.catalog.redshift.with_galaxy_index`; only
-    the opt-in galaxy-list kernel layout reads it.  ``kernel_window`` is
-    ``None`` (default) or the
+    the galaxy-list kernel layout (the default ``kernel_layout``) reads it.
+    ``kernel_window`` is ``None`` (default) or the
     :class:`~darksirens.catalog.redshift.CatalogKernelWindow` of this catalog,
     attached with :func:`darksirens.catalog.redshift.with_kernel_window`; only
-    the opt-in ``kernel_window`` setting attaches it, and only the per-sample
-    kernel sum reads it.
+    the ``kernel_window`` setting attaches it (``"auto"`` by default, on every
+    view it can serve), and only the per-sample kernel sum reads it.  Under
+    the defaults :func:`darksirens.runtime_binding.bind_analysis` attaches
+    the window to the views it builds, and the galaxy list to those of an
+    incomplete catalog.
     """
 
     apix: Any

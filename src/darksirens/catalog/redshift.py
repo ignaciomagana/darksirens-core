@@ -64,7 +64,7 @@ _KERNEL_SENTINEL_CUT: float = -1.0e29
 _ROW_CHUNK_AUTO_THRESHOLD: int = 2**25
 _ROW_CHUNK_SIZE: int = 512
 
-# Opt-in galaxy-list layout (``kernel_layout="galaxy_list"``): the per-galaxy
+# Galaxy-list layout (``kernel_layout="galaxy_list"``, the default): the per-galaxy
 # normaliser runs over the real galaxies chunk by chunk, so its node arrays are
 # (chunk x 24) rather than (N_galaxies x 24).  Each galaxy executes the same
 # arithmetic in any chunk.  _GALAXY_MAP picks how the chunks run:
@@ -210,7 +210,7 @@ def _ndtri_one_pass(p):
     branch's coefficients first and runs a single Horner pair over them;
     every operation of the chosen branch is the library's, in the library's
     order, so the value is the library's (checked bit for bit in the tests).
-    Used only by the opt-in galaxy-list layout.
+    Used only by the galaxy-list layout.
     """
 
     dtype = lax.dtype(p).type
@@ -506,7 +506,7 @@ def _log_kw_eff_rowmax(log_kw_eff):
 
 
 # ------------------------------------------------------------------------
-# Opt-in galaxy-list layout of the per-galaxy normaliser
+# Galaxy-list layout of the per-galaxy normaliser (the default)
 # ------------------------------------------------------------------------
 def galaxy_index(catalog: GalaxyCatalog) -> GalaxyIndex:
     """The flat positions of ``catalog``'s real galaxies (host side, NumPy).
@@ -534,7 +534,7 @@ def galaxy_index(catalog: GalaxyCatalog) -> GalaxyIndex:
 
 
 def with_galaxy_index(catalog: GalaxyCatalog) -> GalaxyCatalog:
-    """``catalog`` carrying its :class:`GalaxyIndex` (the galaxy-list opt-in).
+    """``catalog`` carrying its :class:`GalaxyIndex` (the galaxy-list layout).
 
     With the index attached, :func:`build_catalog_kernel_state` evaluates the
     per-galaxy kernel normaliser on the real galaxies only
@@ -716,8 +716,8 @@ def build_catalog_kernel_state(
     """Build per-galaxy observed-host kernel quantities once per proposal.
 
     A catalog that carries a galaxy list (:func:`with_galaxy_index`) has its
-    per-galaxy normaliser evaluated on the real galaxies only (the opt-in
-    ``kernel_layout="galaxy_list"``); every other step, and the state
+    per-galaxy normaliser evaluated on the real galaxies only (the
+    ``kernel_layout="galaxy_list"`` default); every other step, and the state
     returned, is the padded one.  A catalog that carries a kernel window
     (:func:`with_kernel_window`) also gets the window's traced verdict
     (``window_ok``).
@@ -1258,7 +1258,7 @@ def pinned_catalog_kernel_state(
 
 
 # ------------------------------------------------------------------------
-# Opt-in redshift window of the per-sample kernel sum
+# Redshift window of the per-sample kernel sum (kernel_window, "auto" by default)
 # ------------------------------------------------------------------------
 #: Relative margin of a window's stored half-width over ``k_r sigma_max,r``.
 #: It covers the rounding of the window's boundary comparisons and, under
@@ -1275,7 +1275,7 @@ _WINDOW_Z_SLACK: float = 1.0e-12
 
 
 class CatalogKernelWindow(NamedTuple):
-    """The opt-in redshift window of the per-sample catalog kernel sum.
+    """The redshift window of the per-sample catalog kernel sum.
 
     ``half_width`` is the ``(N_rows,)`` array of half-widths ``K_r`` (zero
     on an empty row), ``size`` the static window length ``W`` (the slots each
@@ -1493,7 +1493,7 @@ def with_kernel_window(
     *,
     strict: bool = True,
 ) -> GalaxyCatalog:
-    """``catalog`` carrying its :class:`CatalogKernelWindow` (the window opt-in).
+    """``catalog`` carrying its :class:`CatalogKernelWindow` (the kernel window).
 
     With the window attached, :func:`eval_log_catalog_prior_state` sums each
     sample's kernel over the window's ``W`` slots rather than the whole row,

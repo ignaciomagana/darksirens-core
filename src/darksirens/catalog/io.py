@@ -61,10 +61,11 @@ def _require_file_contract(path, nside, zgals, dzgals, wgals, ngals):
     samples would be matched to the wrong rows) or rows nothing can read. A
     file with fewer rows covers only the first pixels of its sky and binds
     only when no sample falls beyond them, so it is accepted with a warning.
-    The arrays are then checked as binding checks them. A negative redshift
-    of a real galaxy warns: the kernel is defined for it (it is truncated at
-    zero) and blueshifted nearby galaxies are real, but it is more often a
-    placeholder that was counted as a galaxy.
+    The arrays are then checked with :func:`validate_catalog`, the checks
+    that do not depend on the model. A negative redshift of a real galaxy
+    warns: the kernel is defined for it (it is truncated at zero) and
+    blueshifted nearby galaxies are real, but it is more often a placeholder
+    that was counted as a galaxy.
     """
     if nside < 1:
         raise ValueError(f"{path}: nside attribute must be a positive integer, got {nside}")
@@ -103,7 +104,10 @@ def _require_file_contract(path, nside, zgals, dzgals, wgals, ngals):
         warnings.warn(
             f"{path}: {n_negative} real galaxies have a negative redshift "
             f"(minimum {z_min:.6g}); each galaxy's redshift distribution is "
-            "truncated at zero and renormalised, so they stay hosts near z = 0.",
+            "truncated at zero and renormalised, so one within a few kernel "
+            "widths of zero stays a host near z = 0, while binding refuses one "
+            "farther below (where the normalisation fails and its sky row would "
+            "lose every host).",
             UserWarning,
             stacklevel=3,
         )
@@ -118,10 +122,14 @@ def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
     matching the frozen inference loader. Arrays stay on the host; later model
     construction decides what is transferred to an accelerator.
 
-    A ``ValueError`` is raised for a file with more rows than ``12 * nside**2``
-    and for arrays binding would refuse (:func:`validate_catalog`). Fewer rows
-    than pixels, and a negative redshift of a real galaxy, emit a
-    ``UserWarning``.
+    A ``ValueError`` is raised for a file with more rows than ``12 * nside**2``,
+    for a ``z_depth`` attribute that is not a finite redshift above zero, and
+    for arrays :func:`validate_catalog` refuses. Fewer rows than pixels, and a
+    negative redshift of a real galaxy, emit a ``UserWarning``. The checks
+    that depend on the model are made at bind, not here: a real galaxy beyond
+    the redshift grid or too many kernel widths below zero, and a ``z_depth``
+    beyond the grid, load without error and are refused by
+    :func:`darksirens.runtime_binding.bind_analysis`.
     """
     path = Path(path)
     with h5py.File(path, "r") as handle:

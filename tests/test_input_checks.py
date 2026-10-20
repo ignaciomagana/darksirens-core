@@ -249,9 +249,14 @@ def test_load_catalog_warns_on_a_negative_redshift_of_a_real_galaxy(tmp_path):
     z[first, 0], z[last, 0] = -0.01, -0.002
     with pytest.warns(
         UserWarning, match=r"2 real galaxies have a negative redshift \(minimum -0\.01\)"
-    ):
+    ) as caught:
         store = load_catalog(_write_catalog(tmp_path / "c.h5", zgals=z))
     assert store.catalog.zgals.min() == -0.01
+    # It used to say every such galaxy stays a host near z = 0; one many
+    # kernel widths below zero is refused at bind.
+    message = str(caught[0].message)
+    assert "within a few kernel widths of zero stays a host" in message
+    assert "binding refuses one farther below" in message
     # In the padding a negative redshift is only a placeholder.
     z = np.where(_padding(STORE.catalog), -1.0, STORE.catalog.zgals)
     with warnings.catch_warnings():
