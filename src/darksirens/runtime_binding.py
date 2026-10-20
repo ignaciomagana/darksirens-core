@@ -209,8 +209,8 @@ class DecodedParameters(NamedTuple):
         (``10**log10n0``, times ``(H0 / 100)**3`` under
         ``model(..., n0_units="h_scaled")``; ``1.0`` for
         ``completeness="complete"``, which has no ``log10n0``), a parameter
-        fixed with ``model(..., fixed_survey={...})`` enters as a 0-d array of
-        ``theta``'s dtype, and ``z_depth`` is the catalog's survey depth (a
+        fixed with ``model(..., fixed_survey={...})`` enters as a 0-d float64
+        array, and ``z_depth`` is the catalog's survey depth (a
         Python float or ``None``, never traced). ``selection`` is ``None``,
         or for ``completeness="selection"`` the analysis's runtime selection
         model with every nuisance sampled through ``survey_priors`` replaced
@@ -238,10 +238,29 @@ class DecodedParameters(NamedTuple):
     angular: Any
 
 
+def _float64_theta(theta):
+    """``theta`` as a float64 array; a complex or boolean ``theta`` raises ``TypeError``.
+
+    The fixed values of the plan enter as 0-d arrays of ``theta``'s dtype, so
+    an integer ``theta`` (an H0 grid from ``np.arange``) would truncate them
+    and a float32 one round them, which under a kernel pin makes every call
+    ``-inf``. A float64 ``theta`` is returned as it is, so its program is
+    unchanged.
+    """
+    theta = jnp.asarray(theta)
+    if theta.dtype == jnp.bool_ or not (
+        jnp.issubdtype(theta.dtype, jnp.floating) or jnp.issubdtype(theta.dtype, jnp.integer)
+    ):
+        raise TypeError(f"theta must hold real numbers, got dtype {theta.dtype}")
+    if theta.dtype != jnp.float64:
+        theta = theta.astype(jnp.float64)
+    return theta
+
+
 def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> DecodedParameters:
     """The one decoder: the bound likelihood and :func:`decode_parameters` both call it."""
     plan = analysis.parameters
-    theta = jnp.asarray(theta)
+    theta = _float64_theta(theta)
     if theta.ndim != 1 or int(theta.shape[0]) != len(plan.labels):
         raise ValueError(
             f"theta must have shape ({len(plan.labels)},), got {tuple(theta.shape)}"
@@ -258,8 +277,9 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
 
     # Fixed values are Python floats of the plan: inside the bound jit they
     # are trace-time constants, never sampled coordinates. Each enters as a
-    # 0-d array of theta's dtype, the type a sampled coordinate has, so the
-    # decoded values and every later operation match the all-sampled decode.
+    # 0-d array of theta's dtype (float64, above), the type a sampled
+    # coordinate has, so the decoded values and every later operation match
+    # the all-sampled decode.
     start = plan.n_cosmology
     if plan.fixed_population is not None:
         population = jnp.asarray(plan.fixed_population)
@@ -429,7 +449,10 @@ def decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH) -> DecodedParam
     eager, a jitted and a vmapped call can differ in the last bit or two
     (below 1e-15 relative). Inside one program it is the bound likelihood's
     value. A ``theta`` that is not one-dimensional with one entry per label
-    raises ``ValueError``.
+    raises ``ValueError``. A ``theta`` of integers or of another float dtype
+    (float32) is converted to float64 before it is decoded, here and in the
+    bound likelihood, so it decodes (and evaluates) as the float64 coordinate
+    of the same values; a complex or boolean ``theta`` raises ``TypeError``.
     """
     if isinstance(analysis, BoundAnalysis):
         if z_depth is not BINDING_DEPTH:
