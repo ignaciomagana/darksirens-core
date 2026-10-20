@@ -315,7 +315,10 @@ def event_block_problems(
     separates the blocks ``EVENT_BLOCK_MIN_RATIO`` times more than the same
     column sorted inside every declared block does (and at least that ratio);
     a column whose declared blocks repeat one event row for row fits both
-    readings and is not judged.
+    readings and is not judged. Sorting is a reference point, not a bound: a
+    contrived order inside each event can still be refused, and when ``nobs``
+    shares large factors with ``nsamp`` real interleaving of weakly separated
+    events only warns.
     """
     if nobs < 2 or nsamp < 2:
         return [], []
@@ -346,7 +349,9 @@ def event_block_problems(
         chance = float(f_distribution.sf(ratio, nobs - 1, nobs * (nsamp - 1)))
         if ratio < EVENT_BLOCK_MIN_RATIO or chance >= EVENT_BLOCK_MAX_CHANCE:
             continue
-        # The strongest strided signal an order inside each event can make.
+        # The strided signal that sorting inside each event makes: the common
+        # order the rule exempts, not the largest an order inside an event can
+        # make (one that puts the top ranks at rows 0 mod nobs separates more).
         ranked = np.sort(blocks, axis=1).reshape(nsamp, nobs).T
         by_order = _block_separation(ranked, nobs, nsamp)
         if ratio >= EVENT_BLOCK_MIN_RATIO * max(by_order, 1.0):
