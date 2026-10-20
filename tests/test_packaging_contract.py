@@ -42,6 +42,11 @@ PINNED_RUNTIME = (
     "h5py==3.12.1",
 )
 TINYNS_COMMIT = "3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
+# The first gwcat pin (3184bdb) predates ChiEffPrior.support, which the chi_eff
+# prior hook requires, so every load that needed the prior raised ImportError.
+# The release job installs the extra and calls the hook; this freezes the pin
+# that job validates.
+GWCAT_COMMIT = "3ba1dbf4116bb18f76c9103f79a914564d778182"
 OPTIONAL_BACKENDS = {
     "gp": "tinygp",
     "dynesty": "dynesty",
@@ -95,3 +100,21 @@ def test_optional_backends_stay_in_extras():
             extra,
             extras[extra],
         )
+
+
+def test_gwcat_extra_pins_a_gwcat_with_the_chi_eff_support_convention():
+    gwcat = [
+        req.replace(" ", "").lower()
+        for req in _project()["optional-dependencies"]["gwcat"]
+        if req.lower().startswith("gwcat")
+    ]
+    assert len(gwcat) == 1, gwcat
+    assert gwcat[0].endswith("@" + GWCAT_COMMIT), gwcat
+
+
+def test_release_job_calls_the_chi_eff_prior_hook_with_the_gwcat_extra():
+    # The pin check above only freezes a string; the release job is what
+    # proves the pinned gwcat satisfies the hook.
+    workflow = (REPO_ROOT / ".github" / "workflows" / "phase8d-final-freeze.yml").read_text()
+    assert "[gwcat]" in workflow
+    assert "chi_eff_prior_logprob" in workflow

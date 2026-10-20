@@ -40,7 +40,11 @@ numpyro = [
   "numpyro==0.17.0",
 ]
 gwcat = [
-  "gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3184bdb583f314d91ecae486436842ebe8e9f998",
+  # The chi_eff prior hook (darksirens.gw.samples.chi_eff_prior_logprob)
+  # refuses a gwcat whose ChiEffPrior has no `support` (the -inf out-of-support
+  # convention), so the pin must have it; the release job installs this extra
+  # and calls the hook.
+  "gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3ba1dbf4116bb18f76c9103f79a914564d778182",
 ]
 
 [project.urls]
