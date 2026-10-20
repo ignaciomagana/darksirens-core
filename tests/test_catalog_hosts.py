@@ -551,3 +551,33 @@ def test_weighted_mu_miss_refuses_a_reference_table_and_unknown_names():
             mu_miss_estimator=estimator,
         ))
     assert np.isfinite(values["weighted"]) and values["weighted"] != values["count"]
+
+
+def test_marks_survive_standard_jax_tree_operations():
+    """tree_unflatten used to re-run the validating constructor on JAX placeholders."""
+    for marks in (_marks(), CenteredHostMarks(("logmstar",), _marks().values, *_reference_table())):
+        n_leaves = len(jax.tree_util.tree_leaves(marks))
+        assert jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: 0, marks)) == [0] * n_leaves
+        shapes = jax.eval_shape(lambda m: m, marks)
+        assert shapes.names == marks.names
+        assert shapes.values.shape == marks.values.shape
+        moved = jax.device_put(marks)
+        np.testing.assert_array_equal(np.asarray(moved.values), np.asarray(marks.values))
+        doubled = jax.tree_util.tree_map(lambda x: 2.0 * x, marks)
+        assert isinstance(doubled, CenteredHostMarks) and doubled.names == marks.names
+        np.testing.assert_array_equal(np.asarray(doubled.values), 2.0 * np.asarray(marks.values))
+        if marks.reference_values is None:
+            assert doubled.reference_z is None and doubled.reference_values is None
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(doubled.reference_values), 2.0 * np.asarray(marks.reference_values))
+    # A vmap in_axes prefix tree over the marks (row axis of the aligned table).
+    marks = _marks()
+    row_sums = jax.vmap(
+        lambda m: jnp.sum(m.values), in_axes=(jax.tree_util.tree_map(lambda _: 0, marks),)
+    )(marks)
+    np.testing.assert_allclose(
+        np.asarray(row_sums), np.asarray(marks.values).sum(axis=(1, 2)), rtol=1e-14, atol=0.0)
+    # The constructor still validates what users build.
+    with pytest.raises(ValueError, match="N_rows, N_max, N_marks"):
+        CenteredHostMarks(("logmstar",), jnp.zeros(3))

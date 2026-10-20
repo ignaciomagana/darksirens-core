@@ -107,8 +107,13 @@ class CenteredHostMarks:
 
     @classmethod
     def tree_unflatten(cls, names, children):
-        values, reference_z, reference_values = children
-        return cls(names, values, reference_z, reference_values)
+        # JAX rebuilds pytrees with non-array leaves (None, object() and
+        # ShapeDtypeStruct placeholders) in tree_map, device_put, vmap and
+        # eval_shape: restore the slots without re-running the validation.
+        obj = object.__new__(cls)
+        obj.names = names
+        obj.values, obj.reference_z, obj.reference_values = children
+        return obj
 
 
 class LogLinearHostModel:
