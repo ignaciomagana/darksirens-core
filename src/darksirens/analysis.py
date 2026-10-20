@@ -746,10 +746,18 @@ def _resolve_mixture(
                 f"{setting!r}"
             )
         if setting == "moments" and comp != "selection":
+            if comp == "complete":
+                reason = "a complete catalog's normaliser is its galaxy count"
+            elif pooled:
+                reason = (
+                    "the pooled count ratio factors as the selection curve does, "
+                    "C_p = f_p clip(R), but its moments form is not implemented"
+                )
+            else:
+                reason = "the per-row count ratio's clip at 1 does not factor"
             raise ValueError(
-                "field_normalizer='moments' is exact only for completeness='selection' "
-                "(the count ratio's clip at 1 does not factor, and a complete "
-                f"catalog's normaliser is its galaxy count){where}; use 'direct' or 'auto'"
+                "field_normalizer='moments' is implemented only for "
+                f"completeness='selection' ({reason}){where}; use 'direct' or 'auto'"
             )
         normalizers.append(
             ("moments" if comp == "selection" else "direct") if setting == "auto" else setting
@@ -1628,8 +1636,10 @@ def model(
     picks how ``Z_k`` is computed, one value or one per catalog: ``"auto"``
     (default) is chosen per catalog, ``"moments"`` for the selection
     completeness, exact and cheap, and ``"direct"`` (the full-sky row sums)
-    for the count ratio, the only exact form there, and for a complete
-    catalog (its galaxy count). The kernel pin applies per catalog (to its
+    for the count ratio, the only form implemented there (the per-row
+    estimator's clip at 1 does not factor; the pooled one factors as the
+    selection curve does, but its moments form is not implemented), and for
+    a complete catalog (its galaxy count). The kernel pin applies per catalog (to its
     compact rows and, with a survey depth, its full sky) when ``Om0``,
     ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed. The plan
     records the weighting, completeness, number of catalogs, normaliser,

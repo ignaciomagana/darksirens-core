@@ -176,7 +176,10 @@ def test_selection_mixture_plan_and_per_catalog_pins():
     [
         (dict(catalog=[A, B], catalog_sky_weighting="conditional"), ValueError, "requires catalog_sky_weighting='field'"),
         (dict(catalog=[A, B], completeness="aggregate"), ValueError, "supports completeness"),
-        (dict(catalog=[A, B], field_normalizer="moments"), ValueError, "exact only for completeness='selection'"),
+        (dict(catalog=[A, B], field_normalizer="moments"), ValueError,
+         "implemented only for completeness='selection' \\(the pooled count ratio factors"),
+        (dict(catalog=[A, B], field_normalizer="moments", count_ratio="row"), ValueError,
+         "implemented only for completeness='selection' \\(the per-row count ratio's clip"),
         (dict(catalog=A, catalog_sky_weighting="conditional", field_normalizer="direct"), ValueError, "only to catalog_sky_weighting='field'"),
         (dict(catalog=[A, B], completeness="selection", selection=SEL_A), ValueError, "one entry per catalog"),
         (dict(catalog=[A, B], completeness="selection", selection=[SEL_A]), ValueError, "1 entries for 2"),

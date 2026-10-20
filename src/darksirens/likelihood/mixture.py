@@ -57,6 +57,7 @@ import numpy as np
 
 from darksirens.catalog.completeness import (
     PooledCountRatioCache,
+    _pooled_curve,
     build_completion_state,
     completion_curves,
     gathered_completion_curves,
@@ -241,8 +242,17 @@ def _observed(cosmology, params, component):
 
 
 def _context(k, view, rows, member, ext_params, ext_data, cosmology, params,
-             completeness, row_fraction, observed_total, full_or_compact):
+             completeness, row_fraction, observed_total, full_or_compact, cache=None):
     state = build_completion_state(cosmology, params, full_or_compact)
+    if completeness == "selection":
+        curve = _selection_cbar(cosmology, params)
+    elif isinstance(cache, PooledCountRatioCache):
+        # The pooled count ratio factors as the selection curve does,
+        # C_p = f_p clip(R): its curve and the view rows' coverage.
+        curve = _pooled_curve(state, cache)
+        row_fraction = cache.row_fraction
+    else:
+        curve = None
     return MissingHostContext(
         catalog_index=k,
         view=view,
@@ -259,6 +269,7 @@ def _context(k, view, rows, member, ext_params, ext_data, cosmology, params,
         ),
         row_fraction=row_fraction,
         observed_total=observed_total,
+        completeness_curve=curve,
     )
 
 
@@ -269,7 +280,8 @@ def _missing_total(k, cosmology, params, component, completeness, normalizer,
     n_rows = int(full.zgals.shape[0])
     if extension is not None:
         ctx = _context(k, "full", None, member, ext_params, ext_data, cosmology, params,
-                       completeness, component.full_row_fraction, observed_total, full)
+                       completeness, component.full_row_fraction, observed_total, full,
+                       component.full_cache)
         total = extension.missing_total(ctx)
         if total is not None:
             total = jnp.asarray(total)
@@ -403,7 +415,7 @@ def field_mixture_log_likelihood(
             raise ValueError(f"unsupported completeness {comp!r}")
         if norm == "moments" and comp != "selection":
             raise ValueError(
-                "the moments normalizer is exact only for completeness='selection'"
+                "the moments normalizer is implemented only for completeness='selection'"
             )
     if host_mass not in ("count", "weight"):
         raise ValueError(f"unsupported host_mass {host_mass!r}")
@@ -536,6 +548,7 @@ def field_mixture_log_likelihood(
                     k, "compact", component.compact.unique_pixels, member, extension_params,
                     extension_data, cosmology, params, completeness[k],
                     component.compact_row_fraction, None, component.compact,
+                    component.compact_cache,
                 )
                 curves = modulated_curves(curves, extension.missing_density(ctx, curves.dN_miss))
             state = assemble_incomplete_catalog_prior_state(

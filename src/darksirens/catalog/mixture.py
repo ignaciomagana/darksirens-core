@@ -33,7 +33,9 @@ by ``A_k``, so the ``w_k`` are host fractions whatever the nsides.
     The full-sky row sums themselves: the completion curves of every row of
     the catalog's full sky, with the same arithmetic as the numerator's rows.
     Exact for every completeness; it is the only exact form for the per-row
-    count-ratio completeness, whose clip at 1 does not factor.
+    count-ratio completeness (``count_ratio="row"``), whose clip at 1 does not
+    factor, and the only one implemented for the pooled count ratio (the
+    default), which factors as ``C_p = f_p clip(R)``.
 ``"moments"``
     For ``completeness="selection"`` only. With ``C_p(z) = f_p Cbar(z)`` and
     ``dN_exp`` the same in every row, ``sum_p dN_miss,p(z) = dN_exp(z) [N_pix -
@@ -204,9 +206,16 @@ class MissingHostContext(NamedTuple):
     count density per row on the redshift grid, ``depth_mask`` the grid nodes
     at or below the survey depth (``None`` without one), ``selection_curve``
     the clipped radial ``Cbar(z)`` of ``completeness="selection"`` (``None``
-    for the count ratio), ``row_fraction`` the coverage fraction of this
-    view's rows (``None`` without one) and ``observed_total`` the full-sky
-    ``sum_p N_obs,p m_p`` (``None`` for the compact view).
+    for the count ratio), ``row_fraction`` the coverage fraction ``f_p`` of
+    this view's rows (``None`` without one; for the pooled count ratio the
+    pooled cache's, 1 in every row without a ``row_fraction``) and
+    ``observed_total`` the full-sky ``sum_p N_obs,p m_p`` (``None`` for the
+    compact view). ``completeness_curve`` is the clipped radial curve
+    ``Cbar(z)`` of a completeness that factors as ``C_p(z) = f_p Cbar(z)``:
+    the selection curve of ``completeness="selection"`` or the pooled ratio
+    of the pooled count ratio (the ``ds.model`` default), so that ``sum_p
+    N_miss,p = int dN_exp [N_pix - S1 Cbar] dz`` below the depth with ``S1 =
+    sum_p f_p``; ``None`` for the per-row count ratio, which does not factor.
     """
 
     catalog_index: int
@@ -222,6 +231,7 @@ class MissingHostContext(NamedTuple):
     selection_curve: Any
     row_fraction: Any
     observed_total: Any
+    completeness_curve: Any = None
 
 
 class MissingHostExtension(Protocol):

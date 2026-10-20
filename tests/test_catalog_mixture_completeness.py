@@ -202,7 +202,7 @@ def test_explicit_per_catalog_normalisers():
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["moments", "auto"]),
          "catalog 1 runs completeness='incomplete'"),
         (dict(completeness=["complete", "complete"], field_normalizer="moments"),
-         "exact only for completeness='selection'"),
+         "implemented only for completeness='selection' \\(a complete catalog's"),
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["auto"]),
          "field_normalizer has 1 entries for 2 catalogs"),
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["auto", "sum"]),
