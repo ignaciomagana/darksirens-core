@@ -141,7 +141,8 @@ PAIRING_SCALES = ("node_max", "analytic")
 #: otherwise: with the opt-in ``pairing_m1_grid`` set (which an explicit
 #: ``"per_point"`` refuses) it is the m1 grid, exactly as under
 #: ``"per_sample"``.  Set ``"per_sample"`` to reproduce a run made before the
-#: change bit for bit, or to resume its checkpoint.
+#: change bit for bit, or to resume its checkpoint; a run made before
+#: 2026-10-01 also needs ``pairing_scale="node_max"`` (:data:`PAIRING_SCALES`).
 PAIRING_NORMS = ("per_sample", "per_point", "auto")
 
 #: How the Golomb 1G models integrate the progenitor IMF against the
@@ -290,6 +291,13 @@ class NormalizationGridSettings:
     (one scalar per point plus the closed-form plateau), and inside the taper
     window it reads a table in support-relative coordinates, so no cell ever
     straddles the edge.  It needs no support sizing and no ``pairing_m_hi``.
+
+    ``pairing_scale`` (env ``DARKSIRENS_GW_PAIRING_SCALE``) is ``"analytic"``
+    (default since 2026-10-01) or ``"node_max"``, the historical arithmetic
+    (see :data:`PAIRING_SCALES`).  A run made before 2026-10-01 is reproduced
+    bit for bit, and its checkpoint resumed, with ``pairing_scale="node_max"``
+    together with ``pairing_norm="per_sample"`` (and the catalog settings of
+    :mod:`darksirens.catalog.settings`).
 
     ``golomb_quadrature`` (env ``DARKSIRENS_GW_GOLOMB_QUADRATURE``) is
     ``"grid"`` (default) or the opt-in ``"split"`` (see

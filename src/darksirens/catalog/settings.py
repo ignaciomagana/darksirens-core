@@ -95,7 +95,10 @@ with, when a binding is given).  A run under the new defaults therefore
 records them, and resuming a checkpoint written before the change under the
 new defaults is refused as a settings change: set ``kernel_layout="padded"``,
 ``missing_density="grid"`` and ``kernel_window="off"`` (with the population
-setting ``pairing_norm="per_sample"``) to resume it.
+setting ``pairing_norm="per_sample"``) to resume it.  A checkpoint written
+before 2026-10-01 also needs the population setting
+``pairing_scale="node_max"`` (env ``DARKSIRENS_GW_PAIRING_SCALE=node_max``),
+whose default became ``"analytic"`` that day.
 """
 
 from __future__ import annotations
