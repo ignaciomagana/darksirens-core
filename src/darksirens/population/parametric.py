@@ -1099,6 +1099,15 @@ class GolombRemnantMass1G(MassComponent):
     and p(m | M_I) is lognormal around the piecewise linear/quadratic
     remnant map.
 
+    There is no minimum black-hole mass: the integral starts at the mass
+    grid's lower bound ``m_lo`` (``M_LO = 1`` Msun) and
+    :class:`GolombSymmetricMassPopulationModel` is zero below its first node,
+    so the population's low-mass edge is that normalisation-grid constant.
+    Below ``M_tr`` the density follows the IMF ``(m/20)**-a``, so at the
+    registered ``golomb_1g`` fiducial most binaries sit near that edge
+    (P(m2 < 3 Msun) = 0.96, P(m1 < 5 Msun) = 0.82), and the selection
+    integral depends on how far down the injection set reaches.
+
     Parameter order
     ---------------
     a
