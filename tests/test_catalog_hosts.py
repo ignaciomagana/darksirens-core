@@ -465,3 +465,15 @@ def test_nan_normaliser_poisons_the_marked_row():
     state, prior = _state_and_prior(cat, params, values, np.nan)
     assert np.all(np.isnan(np.asarray(state.log_Z)))
     assert not np.any(np.isfinite(prior))
+
+
+def test_selection_completeness_is_refused_not_ignored():
+    """The marked prior used to run the count ratio under completeness='selection'."""
+    from darksirens.selection.catalog import GaussianMagnitudeSelection
+
+    cat, params = _catalog()
+    params = params._replace(selection=GaussianMagnitudeSelection(19.5, -20.4, 0.9))
+    with pytest.raises(ValueError, match="count-ratio completeness"):
+        _prior(cat, params, _marks(), eta=0.0)
+    with pytest.raises(ValueError, match="count-ratio completeness"):
+        _marked_likelihood(cat, _marks(), cat, _marks(), params=params)

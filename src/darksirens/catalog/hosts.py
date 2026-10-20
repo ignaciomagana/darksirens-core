@@ -561,8 +561,20 @@ def build_marked_incomplete_catalog_prior_state(
     marks: CenteredHostMarks,
     eta,
 ) -> IncompleteCatalogPriorState:
-    """Build the ordinary conditional marked-host dark-siren prior state."""
+    """Build the ordinary conditional marked-host dark-siren prior state.
 
+    The completeness is the count ratio read from ``observed_cache``; a
+    magnitude-selection model on ``params.selection``
+    (``completeness="selection"``) is refused, not ignored.
+    """
+
+    if getattr(params, "selection", None) is not None:
+        raise ValueError(
+            "the marked-host prior takes only the count-ratio completeness: "
+            "CatalogParameters.selection carries a magnitude-selection model "
+            "(completeness='selection'), which is not implemented for host "
+            "marks. Set selection=None, or use the unmarked likelihood."
+        )
     # Eager, once per catalog view: an uncentered table pins log h to the clip
     # rail across the whole eta prior and the eta posterior comes back flat with
     # nothing downstream reporting a fault.
