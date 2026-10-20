@@ -150,6 +150,24 @@ def test_ang2pix_ring_matches_healpy_at_wrapping_right_ascensions(nside):
     _assert_healpy_parity(nside, ra_g.ravel(), dec_g.ravel())
 
 
+@pytest.mark.parametrize("nside", (1, 2, 3, 4, 16, 64, 1024))
+def test_ang2pix_ring_matches_healpy_just_below_zero_right_ascension(nside):
+    # healpy reads ra modulo 2*pi in radians, so a negative ra within about
+    # 4.4e-16 of zero is exactly 2*pi, folded to 0. Folding the scaled
+    # ra * (2/pi) instead gave 3.9999999999999996 on [-4.4e-16, -3.5e-16]:
+    # one ring off at even nside, and one pixel off in the polar caps.
+    ra = np.linspace(-6e-16, 0.0, 6001)
+    dec = np.arcsin(np.random.default_rng(5).uniform(-1.0, 1.0, ra.size))
+    _assert_healpy_parity(nside, ra, dec)
+    _assert_healpy_parity(nside, ra, np.zeros(ra.size))
+
+
+def test_ang2pix_ring_folds_a_right_ascension_just_below_zero_to_zero():
+    # The healpy values, without healpy: (-4e-16, dec) is the pixel of (0, dec).
+    for nside, dec, want in ((2, 0.0, 12), (16, 0.0, 1440), (2, 0.7378, 4)):
+        assert ang2pix_ring(nside, -4e-16, dec) == want == ang2pix_ring(nside, 0.0, dec)
+
+
 @pytest.mark.parametrize("nside", PARITY_NSIDES)
 def test_ang2pix_ring_matches_healpy_at_the_exact_poles(nside):
     ra = np.linspace(0.0, _TWO_PI, 97)

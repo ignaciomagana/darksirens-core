@@ -14,6 +14,7 @@ import numpy as np
 _MAX_NSIDE = 1 << 29
 _HALF_PI = 0.5 * np.pi
 _INV_HALF_PI = 2.0 / np.pi
+_TWO_PI = 2.0 * np.pi
 _TWO_THIRDS = 2.0 / 3.0
 # healpy hands loc2pix a precomputed sin(theta) only inside these theta windows,
 # and loc2pix then uses its cancellation-free polar form there. The two limits are
@@ -61,8 +62,10 @@ def ang2pix_ring(nside, ra, dec):
     point across a ring boundary and shifts the pixel by a whole ring. In
     particular ``theta = pi/2 - dec`` and ``z = cos(theta)`` are evaluated
     explicitly rather than replaced algebraically by ``sin(dec)``; the azimuth
-    reduction is HEALPix's ``fmodulo(ra * (2/pi), 4)`` rather than
-    ``remainder(ra, 2*pi) / (pi/2)``; the equatorial ``(nside * z) * 0.75``
+    reduction folds ``ra`` into ``[0, 2*pi)`` in radians (as healpy does, an
+    exact ``2*pi`` becoming 0) and then takes HEALPix's
+    ``fmodulo(ra * (2/pi), 4)`` rather than ``remainder(ra, 2*pi) / (pi/2)``;
+    the equatorial ``(nside * z) * 0.75``
     keeps HEALPix's left-to-right association; and the polar branch switches to
     the cancellation-free ``nside * sin(theta) / sqrt((1 + |z|) / 3)`` on the
     same theta windows healpy uses.
@@ -80,6 +83,12 @@ def ang2pix_ring(nside, ra, dec):
     theta = _HALF_PI - dec_arr
     z = np.cos(theta)
     za = np.abs(z)
+    # healpy reads ra modulo 2*pi in radians first: a negative ra within
+    # about 4.4e-16 of a wrap is then exactly 2*pi, which folds to 0. The
+    # scaled fmod alone gives 3.9999999999999996 for ra in [-4.4e-16,
+    # -3.5e-16], one ring off at even nside (and one pixel off in the caps).
+    ra_arr = np.mod(ra_arr, _TWO_PI)
+    ra_arr = np.where(ra_arr >= _TWO_PI, 0.0, ra_arr)
     # HEALPix fmodulo: fmod keeps the sign of ra, and a negative ra whose
     # magnitude is below one ulp of the wrap folds to exactly 4.0, which must
     # become 0.0 or the ring index comes out one off at even nside.
