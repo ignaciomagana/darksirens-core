@@ -14,7 +14,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .types import GalaxyCatalog, row_blocks, validate_catalog
+from .types import GalaxyCatalog, check_survey_depth, row_blocks, validate_catalog
 
 
 @dataclass(frozen=True)
@@ -136,6 +136,10 @@ def load_catalog(path, *, sort_rows_by_z=True) -> CatalogStore:
         dzgals = np.asarray(handle["dzgals"])
         wgals = np.asarray(handle["wgals"])
 
+    try:
+        z_depth = check_survey_depth(z_depth)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
     _require_file_contract(path, nside, zgals, dzgals, wgals, ngals)
     if sort_rows_by_z:
         zgals, dzgals, wgals, ngals = _sort_rows_by_z(

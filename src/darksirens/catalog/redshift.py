@@ -366,11 +366,13 @@ def _renormalize_below_depth(
     renormalization.  Phase 5B uses it to scale the observed-count amplitude.
     ``log_Z_depth``, when given, is the truncated normaliser already
     evaluated (zero on padding), as :func:`_row_log_kernel_norms` returns it.
+    A depth beyond the grid's end is read as the grid's end, where every
+    kernel is already truncated (the mass below it is then one, not more).
     """
 
     if log_Z_depth is None:
         log_Z_depth = _row_log_kernel_norms(
-            zs, sig_eff, real, log_g_grid, z_hi=z_depth
+            zs, sig_eff, real, log_g_grid, z_hi=jnp.minimum(z_depth, _ZMAX)
         )
     log_m = jnp.where(
         has_galaxies,
@@ -624,7 +626,7 @@ def _galaxy_list_log_kernel_norms(catalog, sigma_kde, log_g_grid, z_depth):
     zs = jnp.asarray(catalog.zgals).reshape(-1)[flat]
     dzs = jnp.asarray(catalog.dzgals).reshape(-1)[flat]
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
-    z_his = (_ZMAX,) if z_depth is None else (_ZMAX, z_depth)
+    z_his = (_ZMAX,) if z_depth is None else (_ZMAX, jnp.minimum(z_depth, _ZMAX))
 
     def norms(z, s):
         return tuple(

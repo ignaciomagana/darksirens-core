@@ -38,7 +38,10 @@ class CatalogParameters(NamedTuple):
     ``n0`` is unused by the observed-galaxy kernel itself and is carried here
     because the Phase-5 completeness model uses the same parameter block.
     ``z_depth`` is structural runtime metadata: ``None`` means the catalog has
-    no explicit redshift-depth truncation.
+    no explicit redshift-depth truncation; otherwise it is a redshift in
+    ``(0, z_max]`` of the redshift grid, which :func:`check_survey_depth`
+    checks at load and at bind (the traced kernel reads a depth beyond the
+    grid's end as that end, and does not check the rest).
     ``selection`` is ``None`` (the default: the per-row count-ratio
     completeness) or the runtime magnitude-selection model of
     ``completeness="selection"``
@@ -141,6 +144,42 @@ def row_blocks(n_rows: int, n_max: int):
     step = max(1, _CHECK_BLOCK_SLOTS // max(1, int(n_max)))
     for start in range(0, int(n_rows), step):
         yield slice(start, start + step)
+
+
+def check_survey_depth(z_depth, *, z_max: float | None = None) -> float | None:
+    """Refuse a survey depth the catalog models cannot use (host side).
+
+    ``None`` (no depth) passes.  Any other ``z_depth`` must be a finite
+    redshift above zero and, when ``z_max`` (the upper edge of the redshift
+    grid) is given, at most ``z_max``.  A NaN depth drops every galaxy from
+    the observed branch, a depth at or below zero leaves no observed mass,
+    and a depth beyond the grid gave rows more observed hosts than galaxies;
+    each was a finite likelihood with no error.  Returns the depth as a float
+    (or ``None``).
+    """
+
+    if z_depth is None:
+        return None
+    try:
+        value = float(z_depth)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"z_depth must be None or a redshift, got {z_depth!r}"
+        ) from None
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"z_depth must be a finite redshift above 0, got {z_depth!r}; a catalog "
+            "without a survey depth has z_depth None (a file without the z_depth "
+            "attribute)"
+        )
+    if z_max is not None and value > z_max:
+        raise ValueError(
+            f"z_depth = {value!r} lies beyond the redshift grid, which ends at "
+            f"z = {float(z_max)!r}; the kernels and the completeness curves end "
+            "there, so a catalog not truncated before it has z_depth None (or set "
+            "DARKSIRENS_ZMAX above the depth before darksirens is imported)"
+        )
+    return value
 
 
 def validate_catalog(

@@ -640,3 +640,102 @@ def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         check_kernels_below_zero(edge, 0.01, 0.01)
+
+
+# ---------------------------------------------------------------------------
+# The survey depth
+
+
+def _with_depth(store, z_depth):
+    return CatalogStore(
+        path=store.path, nside=store.nside, z_depth=z_depth, catalog=store.catalog
+    )
+
+
+DEPTH_MODES = {
+    "count_ratio_row": dict(completeness="incomplete", count_ratio="row"),
+    "count_ratio_pooled": dict(completeness="incomplete", count_ratio="pooled"),
+    "selection": CATALOG_MODES["selection"],
+    "field_selection": CATALOG_MODES["field_selection"],
+    "complete": CATALOG_MODES["complete"],
+}
+
+
+@pytest.mark.parametrize("mode", sorted(DEPTH_MODES))
+@pytest.mark.parametrize("z_depth", (np.nan, np.inf, 0.0, -1.0, 6.0))
+def test_a_survey_depth_outside_the_grid_is_refused_at_bind(mode, z_depth):
+    # A NaN or zero depth dropped every galaxy from the observed branch (the
+    # selection completeness then gave the catalog-free value, +11.07 against
+    # -14.78 at H0 = 55); a depth beyond the grid gave a row more observed
+    # hosts than galaxies. Both bound and evaluated with no error.
+    analysis = ds.model(
+        cosmology=COSMOLOGY,
+        population=POPULATION,
+        catalog=_with_depth(STORE, z_depth),
+        **DEPTH_MODES[mode],
+    )
+    with pytest.raises(ValueError, match="z_depth"):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+@pytest.mark.parametrize("z_depth", (0.22, Z_TOP))
+def test_a_survey_depth_inside_the_grid_binds(z_depth):
+    for kwargs in (DEPTH_MODES["count_ratio_row"], DEPTH_MODES["selection"]):
+        assert np.isfinite(_values(_with_depth(STORE, z_depth), **kwargs)).all()
+
+
+def test_a_mixture_names_the_catalog_whose_depth_is_refused():
+    analysis = ds.model(
+        cosmology=COSMOLOGY,
+        population=POPULATION,
+        catalog=[STORE, _with_depth(catalog_store(12), np.nan)],
+        completeness="selection",
+        selection=[SELECTION, SELECTION],
+        catalog_sky_weighting="field",
+    )
+    with pytest.raises(ValueError, match=r"catalog 2 \(catalog-fixture-12\.h5\): z_depth"):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+@pytest.mark.parametrize("z_depth", (np.nan, 0.0, -0.3))
+def test_load_catalog_refuses_a_survey_depth_that_is_not_a_redshift(tmp_path, z_depth):
+    path = _write_catalog(tmp_path / "c.h5")
+    with h5py.File(path, "a") as f:
+        f.attrs["z_depth"] = z_depth
+    with pytest.raises(ValueError, match="z_depth must be a finite redshift above 0") as info:
+        load_catalog(path)
+    assert str(path) in str(info.value)
+    with h5py.File(path, "a") as f:
+        f.attrs["z_depth"] = 0.3
+    assert load_catalog(path).z_depth == 0.3
+
+
+def test_the_depth_normaliser_reads_a_depth_beyond_the_grid_as_its_end():
+    # Direct callers of the kernel are not checked at bind: there a depth
+    # beyond the grid gave a mass below the depth above one (1.058 for this
+    # row), so N_obs * m counted more hosts than galaxies.
+    from darksirens.catalog.redshift import build_catalog_kernel_state
+    from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
+    from darksirens.cosmology.parameters import CosmologyParameters
+
+    catalog = _jax_catalog(
+        GalaxyCatalog(
+            apix=1.0,
+            zgals=np.array([[0.5, 2.0, 4.5]]),
+            dzgals=np.array([[0.05, 0.2, 0.5]]),
+            wgals=np.ones((1, 3)),
+            ngals=np.array([3], dtype=np.int32),
+        )
+    )
+    cosmo = CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0)
+
+    def mass(z_depth):
+        params = CatalogParameters(sigma_kde=0.0, z_depth=z_depth)
+        state = build_catalog_kernel_state(cosmo, params, catalog)
+        return float(np.exp(state.log_depth_mass[0]))
+
+    at_top = mass(Z_TOP)
+    assert abs(at_top - 1.0) < 1e-12
+    for beyond in (6.0, 10.0):
+        assert mass(beyond) == at_top
+    assert mass(1.0) < 1.0

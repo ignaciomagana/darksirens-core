@@ -46,6 +46,7 @@ from darksirens.catalog.types import (
     CatalogMixtureParameters,
     CatalogParameters,
     GalaxyCatalog,
+    check_survey_depth,
     physical_n0,
 )
 from darksirens.cosmology.distances import threads_distance_table
@@ -1104,6 +1105,10 @@ def _bind_mixture(analysis, events, injections):
         count_ratio = completeness == "incomplete"
         complete = completeness == "complete"
         store = component.catalog
+        try:
+            check_survey_depth(store.z_depth, z_max=_ZMAX)
+        except ValueError as exc:
+            raise ValueError(f"catalog {k + 1} ({store.path}): {exc}") from None
         global_pe = ang2pix_ring(store.nside, events.columns["ra"], events.columns["dec"])
         global_sel = ang2pix_ring(
             store.nside, injections.columns["ra"], injections.columns["dec"]
@@ -1368,6 +1373,8 @@ def bind_analysis(
         z_depth = None
     else:
         catalog_store = analysis.catalog
+        # A survey depth outside (0, grid end] is refused for every completeness.
+        check_survey_depth(catalog_store.z_depth, z_max=_ZMAX)
         global_pe = ang2pix_ring(
             catalog_store.nside, events.columns["ra"], events.columns["dec"]
         )
