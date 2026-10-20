@@ -429,6 +429,9 @@ def test_fixed_log10n0_of_any_catalog_warns_once():
             catalog=[STORE, other],
             catalog_sky_weighting="field",
             fixed_survey={"log10n0": -2.0, "log10n0_c2": -2.4},
+            # The catalogs' nside differ (2 and 4): state the branch
+            # convention, which silences that warning.
+            mixture_density="pixel",
         )
     assert len(caught) == 1
 
