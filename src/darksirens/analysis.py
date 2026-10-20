@@ -811,6 +811,26 @@ def _resolve_mixture(
                 row_fraction_sha256=digest,
             )
         )
+    # One catalog split by sky region (for example by depth) into catalogs
+    # with complementary footprints is not what the mixture models.
+    covered = [
+        (k, np.asarray(c.row_fraction) > 0.0)
+        for k, c in enumerate(components)
+        if c.row_fraction is not None
+    ]
+    for i, (k, a) in enumerate(covered):
+        for m, b in covered[i + 1 :]:
+            if a.shape == b.shape and not np.any(a & b):
+                warnings.warn(
+                    f"catalogs {k + 1} and {m + 1} cover disjoint sky rows (their "
+                    "row_fraction is never positive in the same row): the field "
+                    "mixture gives each catalog one global weight, so in the rows of "
+                    "either the other counts every host as missing and each catalog's "
+                    "galaxy contrast is diluted by its weight. It is not the model of "
+                    "one catalog whose depth varies over the sky",
+                    UserWarning,
+                    stacklevel=4,
+                )
     return FieldCatalogMixtureRedshift(
         components=tuple(components),
         completeness=_collapse_setting(resolved),

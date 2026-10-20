@@ -888,3 +888,26 @@ def test_a_cache_evaluated_at_another_depth_is_nan():
         np.asarray(completion_curves(COSMO, no_depth, catalog, unchecked).C),
         np.asarray(completion_curves(COSMO, no_depth, catalog, full).C),
     )
+
+
+def test_a_mixture_of_disjoint_footprints_warns():
+    """The docs advised splitting a catalog whose depth varies over the sky into
+    one catalog per region under the field weighting. In the rows of one
+    region the other catalog counts every host as missing, so each region's
+    galaxy contrast is diluted by its mixture weight; that now warns."""
+    north = np.zeros(48)
+    north[:24] = 1.0
+    south = 1.0 - north
+    ngals = np.asarray(A.catalog.ngals)
+    halves = [
+        dataclasses.replace(
+            A, catalog=A.catalog._replace(ngals=np.where(f > 0.0, ngals, 0).astype(np.int32))
+        )
+        for f in (north, south)
+    ]
+    with pytest.warns(UserWarning, match="catalogs 1 and 2 cover disjoint sky rows"):
+        _model(halves, catalog_sky_weighting="field", row_fraction=[north, south])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _model([A, A], catalog_sky_weighting="field", row_fraction=[np.ones(48), north + 0.5 * south])
+    assert not [w for w in caught if "disjoint sky rows" in str(w.message)]
