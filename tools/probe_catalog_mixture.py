@@ -29,9 +29,14 @@ incomplete catalogs).
 
 Legacy stores the count-ratio normaliser's observed density in float32
 (``field_dN_obs_s``); core keeps it in float64. ``--legacy-f64-obs`` (legacy
-arm) replaces legacy's table by the float64 one, which isolates that storage
-difference: the comparison of the count-ratio cells is at rounding level
-with it and ~1e-8 relative without it.
+arm) replaces legacy's table by the float64 one. On this fixture the flag
+changes nothing: the legacy arm with and without it agrees exactly in every
+cell (measured 2026-10-20), and legacy against the candidate holds to
+2.8e-14 without it, as the CI gate (``--rtol 1e-12``, no flag) runs it. A
+row holds at most 5 galaxies against an expected count of order 1e6 per unit
+redshift at ``log10n0 = -2``, so the count-ratio completeness is about 0 and
+the observed density barely enters the cells. The flag would isolate the
+float32 storage only on a fixture whose completeness is of order 1.
 
 ``--compare LEGACY CANDIDATE --rtol R`` checks two outputs.
 """
