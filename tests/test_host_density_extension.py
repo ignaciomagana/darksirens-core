@@ -270,6 +270,30 @@ def test_target_builder_preserves_base_angular_model_and_extension_order():
     )
     actual = target.log_likelihood(theta)
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    # The dipole is constrained to its ball by the plan, so no offset.
+    assert target.log_prior_volume_fraction == 0.0
+
+
+def test_target_builder_declares_the_angular_prior_volume_offset():
+    """A multipole sky rejects part of its coefficient box, so ds.infer has to
+    record logZ_corrected for this target as for an ordinary analysis."""
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    pe, selection, nsamp, nsel = _runtime_events()
+    target = make_host_density_target(
+        _base_analysis(angular="multipole"),
+        redshift_model=VolumeRedshiftModel(),
+        gw_pe=pe,
+        gw_selection=selection,
+        pe_state=None,
+        selection_state=None,
+        n_events=1,
+        nsamp=nsamp,
+        n_draw=float(nsel),
+    )
+    expected = angular_log_prior_volume_correction("multipole")
+    assert expected < -0.4
+    assert target.log_prior_volume_fraction == expected
 
 
 def test_target_builder_rejects_catalog_bearing_base_analysis():

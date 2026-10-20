@@ -358,6 +358,84 @@ def test_inference_target_result_carries_no_prior_volume_keys(monkeypatch):
     assert infer(target, sampler="dynesty") == {"logZ": -4.0}
 
 
+def _fake_target_sampler(monkeypatch, result):
+    _install_fake_module(
+        monkeypatch,
+        "darksirens.inference.prior",
+        make_prior_transform=lambda *args, **kwargs: object(),
+    )
+    _install_fake_module(
+        monkeypatch,
+        "darksirens.inference.sampling",
+        run_sampler=lambda *args, **kwargs: dict(result),
+    )
+
+
+def test_inference_target_declaring_a_prior_volume_offset_is_corrected(monkeypatch):
+    """A target that declares its prior-box offset gets logZ_corrected like an
+    ordinary analysis; the raw logZ is untouched."""
+    import darksirens as ds
+
+    _fake_target_sampler(monkeypatch, {"logZ": -12.5, "logZerr": 0.1})
+    target = ds.InferenceTarget(
+        lambda theta: -1.0, _target_plan(), log_prior_volume_fraction=-0.5
+    )
+    result = infer(target, sampler="dynesty")
+    assert result["logZ"] == -12.5
+    assert result["log_prior_volume_fraction"] == -0.5
+    assert result["logZ_corrected"] == -12.0
+
+
+@pytest.mark.parametrize("fraction", [0.25, float("nan"), float("-inf")])
+def test_inference_target_refuses_an_invalid_prior_volume_offset(fraction):
+    import darksirens as ds
+
+    with pytest.raises(ValueError, match="log_prior_volume_fraction"):
+        ds.InferenceTarget(
+            lambda theta: -1.0, _target_plan(), log_prior_volume_fraction=fraction
+        )
+
+
+def test_core_built_targets_declare_the_angular_prior_volume_offset(monkeypatch):
+    """The field-mixture target over a multipole sky: ds.infer used to return
+    its raw logZ (-0.50 nat off for multipole, -3.38 for multipole_l3) with no
+    corrected value and nothing naming the offset."""
+    from _catalog_model_fixtures import (
+        COSMOLOGY,
+        FIXED_POPULATION,
+        MODEL,
+        catalog_store,
+        gw_stores,
+    )
+
+    import darksirens as ds
+    from darksirens.likelihood.mixture import make_catalog_mixture_target
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    events, injections = gw_stores()
+    catalogs = [catalog_store(11), catalog_store(23, nside=4, n_max=4)]
+    for angular in ("isotropic", "multipole", "multipole_l3"):
+        analysis = ds.model(
+            cosmology=COSMOLOGY,
+            population=ds.Population(MODEL, fixed=FIXED_POPULATION),
+            catalog=catalogs,
+            catalog_sky_weighting="field",
+            count_ratio="row",
+            angular=angular,
+        )
+        target = make_catalog_mixture_target(
+            analysis, events=events, injections=injections, max_likelihood_variance=1.0e3
+        )
+        expected = angular_log_prior_volume_correction(angular)
+        assert target.log_prior_volume_fraction == expected
+        _fake_target_sampler(monkeypatch, {"logZ": -12.5, "logZerr": 0.1})
+        result = infer(target, sampler="dynesty")
+        assert result["logZ"] == -12.5
+        assert result["log_prior_volume_fraction"] == expected
+        assert result["logZ_corrected"] == -12.5 - expected
+    assert angular_log_prior_volume_correction("multipole_l3") < -3.0
+
+
 def test_selection_neff_guard_auto_resolves_against_the_backend(monkeypatch):
     analysis = _angular_analysis("isotropic")
 

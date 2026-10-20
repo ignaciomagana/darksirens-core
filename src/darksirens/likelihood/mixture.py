@@ -726,11 +726,18 @@ def make_catalog_mixture_target(
             block["extension"] = hook()
         return block
 
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    # ds.infer records the angular prior-box offset (multipole: -0.50 nat,
+    # multipole_l3: -3.38) beside the raw logZ, as for an ordinary analysis.
     return InferenceTarget(
         log_likelihood=log_likelihood,
         parameters=plan,
         identity=identity,
         provenance=provenance,
+        log_prior_volume_fraction=angular_log_prior_volume_correction(
+            analysis.angular_model
+        ),
     )
 
 
