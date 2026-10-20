@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import warnings
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 import jax
@@ -250,6 +251,19 @@ POOLED_WARN_EFFECTIVE: float = 1000.0
 POOLED_EMPTY_ROW_WARN: float = 0.1
 
 
+@jax.tree_util.register_static
+@dataclass(frozen=True)
+class PooledCacheDepth:
+    """The survey depth a pooled count-ratio cache was built for.
+
+    A static pytree node (no leaves): inside ``jax.jit`` the depth is still a
+    Python value, compared with the catalog parameters' (never traced)
+    ``z_depth``.
+    """
+
+    z_depth: float | None
+
+
 class PooledCountRatioCache(NamedTuple):
     """Theta-independent operands of the pooled count ratio (the ``ds.model`` default).
 
@@ -258,11 +272,50 @@ class PooledCountRatioCache(NamedTuple):
     :func:`build_pooled_count_ratio_cache`.  ``row_fraction`` is the coverage
     fraction of each row of the catalog view the cache is used with.  It
     takes the place of :class:`ObservedDensityCache` wherever the count-ratio
-    curves are evaluated.
+    curves are evaluated.  ``depth`` is the :class:`PooledCacheDepth` the
+    builder records (its ``z_depth``): the operator is normalised by the
+    kernel mass inside ``(0, z_depth]``, so the completion curves refuse the
+    cache at another ``CatalogParameters.z_depth``.  ``None`` (a cache
+    assembled by hand) is not checked.
     """
 
     operator: Any
     row_fraction: Any
+    depth: Any = None
+
+
+def _require_cache_depth(cache: PooledCountRatioCache, params: CatalogParameters) -> None:
+    """Refuse a pooled cache built for another survey depth than ``params``'s.
+
+    Inside the bound likelihood ``params.z_depth`` is a Python value; the
+    public jitted entry points trace it, and then only its presence (a depth
+    or ``None``) is compared.
+    """
+
+    depth = getattr(cache, "depth", None)
+    if depth is None:
+        return
+    z_depth = params.z_depth
+    if (z_depth is None) != (depth.z_depth is None):
+        same = False
+    elif z_depth is None or isinstance(z_depth, jax.core.Tracer):
+        same = True
+    else:
+        same = float(z_depth) == depth.z_depth
+    if not same:
+        if z_depth is None:
+            shown = "None"
+        elif isinstance(z_depth, jax.core.Tracer):
+            shown = "a (traced) depth"
+        else:
+            shown = repr(float(z_depth))
+        raise ValueError(
+            f"the pooled count-ratio cache was built for z_depth={depth.z_depth!r}, "
+            f"but the catalog parameters have z_depth={shown}: its "
+            "operator is normalised by the kernel mass inside the depth it was built "
+            "for. Build it with build_pooled_count_ratio_cache(..., "
+            "z_depth=<the catalog's z_depth>)"
+        )
 
 
 def _pooled_histogram(catalog: GalaxyCatalog, z_top: float):
@@ -327,6 +380,10 @@ def build_pooled_count_ratio_cache(
     weight ``1/dN_exp(z_i)`` grows as ``z_i^-2``: within a few windows of
     ``z = 0`` a galaxy scattered there by its redshift error dominates the
     sum, the ratio exceeds 1 and the clip makes the catalog complete there.
+
+    The cache records ``z_depth`` (its ``depth``), and the completion curves
+    refuse it at another ``CatalogParameters.z_depth``: pass the depth of the
+    catalog the cache completes, ``None`` only for a catalog without one.
 
     A ``ValueError`` is raised when the kernel holds fewer than
     ``POOLED_MIN_EFFECTIVE`` effective galaxies at the catalog's median
@@ -432,7 +489,9 @@ def build_pooled_count_ratio_cache(
         0.0,
     )
     return PooledCountRatioCache(
-        operator=jnp.asarray(operator), row_fraction=jnp.asarray(fraction)
+        operator=jnp.asarray(operator),
+        row_fraction=jnp.asarray(fraction),
+        depth=PooledCacheDepth(None if z_depth is None else float(z_depth)),
     )
 
 
@@ -460,6 +519,7 @@ def _pooled_row_fraction(catalog: GalaxyCatalog, cache: PooledCountRatioCache, d
 def _pooled_completion_curves(state, params, catalog, cache) -> CompletionCurves:
     """``C_p(z) = f_p clip[R(z)]`` on the grid, assembled as the row-fraction selection."""
 
+    _require_cache_depth(cache, params)
     cbar = _pooled_curve(state, cache)
     fraction = _pooled_row_fraction(catalog, cache, cbar.dtype)
     C = fraction[:, None] * cbar[None, :]
@@ -613,6 +673,7 @@ def _gathered_completion_curves_impl(
     state = _build_completion_state_impl(cosmo, params, catalog)
     if isinstance(observed_cache, PooledCountRatioCache):
         # Pooled count ratio: the row-fraction factors.
+        _require_cache_depth(observed_cache, params)
         cbar = _pooled_curve(state, observed_cache)
         fraction = _pooled_row_fraction(catalog, observed_cache, cbar.dtype)
         depth_mask = None if params.z_depth is None else zgrid <= params.z_depth
@@ -709,6 +770,7 @@ __all__ = [
     "ObservedDensityCache",
     "POOLED_BIN_WIDTH",
     "POOLED_WINDOW_DEFAULT",
+    "PooledCacheDepth",
     "PooledCountRatioCache",
     "SIGMA_SMOOTH",
     "build_completion_state",
