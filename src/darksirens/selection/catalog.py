@@ -185,10 +185,42 @@ def validate_selection_coverage(model, z_depth):
 
 
 def _finite_scalar(value, name: str) -> float:
+    # float() would turn True into 1.0 and "21.5" into 21.5: refuse them here,
+    # as the tabulated family does.
+    kind = np.asarray(value).dtype.kind
+    if isinstance(value, (bool, np.bool_)) or kind not in "iuf":
+        raise TypeError(
+            f"{name} must be an integer or a float; got {value!r} of type "
+            f"{_KIND_NAMES.get(kind, type(value).__name__)} (strings and booleans "
+            "are not converted)"
+        )
     value = float(np.asarray(value))
     if not np.isfinite(value):
         raise ValueError(f"{name} must be finite; got {value!r}")
     return value
+
+
+def _k_corr_values(coeffs) -> tuple:
+    """The K-correction coefficients as a tuple of floats (``()`` for none).
+
+    A tuple, a list or a one-dimensional NumPy array of numbers; a string, a
+    boolean or a nested sequence is refused.
+    """
+
+    if coeffs is None:
+        return ()
+    if isinstance(coeffs, (str, bytes)):
+        raise TypeError(
+            f"k_corr_coeffs must be a sequence of numbers; got the string {coeffs!r}"
+        )
+    if np.ndim(coeffs) != 1:
+        raise ValueError(
+            f"k_corr_coeffs must be one-dimensional; got shape {np.shape(coeffs)}"
+        )
+    return tuple(
+        _finite_scalar(coeff, f"k_corr_coeffs[{i}]")
+        for i, coeff in enumerate(coeffs, start=1)
+    )
 
 
 def validate_catalog_selection(model):
@@ -205,9 +237,7 @@ def validate_catalog_selection(model):
         sigma = _finite_scalar(model.sigma_M, "sigma_M")
         if sigma <= 0.0:
             raise ValueError(f"sigma_M must be finite and > 0; got {sigma!r}")
-        coeffs = tuple(model.k_corr_coeffs or ())
-        for i, coeff in enumerate(coeffs, start=1):
-            _finite_scalar(coeff, f"k_corr_coeffs[{i}]")
+        _k_corr_values(model.k_corr_coeffs)
         return model
 
     if isinstance(model, SchechterMagnitudeSelection):
@@ -265,10 +295,10 @@ def selection_from_mapping(payload: Mapping[str, Any]):
                 f"gaussian selection payload has missing={missing}, extra={extra}"
             )
         model = GaussianMagnitudeSelection(
-            m_lim=float(data["m_lim"]),
-            M0hat=float(data["M0hat"]),
-            sigma_M=float(data["sigma_M"]),
-            k_corr_coeffs=tuple(float(x) for x in (data.get("k_corr_coeffs") or ())),
+            m_lim=_finite_scalar(data["m_lim"], "m_lim"),
+            M0hat=_finite_scalar(data["M0hat"], "M0hat"),
+            sigma_M=_finite_scalar(data["sigma_M"], "sigma_M"),
+            k_corr_coeffs=_k_corr_values(data.get("k_corr_coeffs")),
         )
         return validate_catalog_selection(model)
 
@@ -281,16 +311,16 @@ def selection_from_mapping(payload: Mapping[str, Any]):
             raise ValueError(
                 f"schechter selection payload has missing={missing}, extra={extra}"
             )
-        if data.get("k_corr_coeffs"):
+        if _k_corr_values(data.get("k_corr_coeffs")):
             raise NotImplementedError(
                 "the Schechter selection runtime carries no K(z) template; "
                 "a non-empty k_corr_coeffs field would be silently dropped"
             )
         model = SchechterMagnitudeSelection(
-            m_lim=float(data["m_lim"]),
-            Mstar_hat=float(data["Mstar_hat"]),
-            alpha=float(data["alpha"]),
-            M_faint_offset=float(data["M_faint_offset"]),
+            m_lim=_finite_scalar(data["m_lim"], "m_lim"),
+            Mstar_hat=_finite_scalar(data["Mstar_hat"], "Mstar_hat"),
+            alpha=_finite_scalar(data["alpha"], "alpha"),
+            M_faint_offset=_finite_scalar(data["M_faint_offset"], "M_faint_offset"),
         )
         return validate_catalog_selection(model)
 
@@ -322,7 +352,7 @@ def selection_to_mapping(model) -> dict[str, Any]:
             "m_lim": float(model.m_lim),
             "M0hat": float(model.M0hat),
             "sigma_M": float(model.sigma_M),
-            "k_corr_coeffs": [float(x) for x in (model.k_corr_coeffs or ())],
+            "k_corr_coeffs": list(_k_corr_values(model.k_corr_coeffs)),
         }
     if isinstance(model, TabulatedSelection):
         return {
@@ -373,7 +403,8 @@ def m0_absolute(M0hat, H0):
 def k_of_z(z, k_corr_coeffs, xp=jnp):
     """Polynomial ``K(z)=sum_j c_j z^j`` with coefficients starting at j=1."""
 
-    if not k_corr_coeffs:
+    # len(), not truth: a NumPy array of two or more coefficients has none.
+    if k_corr_coeffs is None or len(k_corr_coeffs) == 0:
         return None
     z = xp.asarray(z)
     out = xp.zeros_like(z)
