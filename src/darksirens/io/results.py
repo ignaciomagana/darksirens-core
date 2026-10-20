@@ -123,8 +123,23 @@ def write_dead_point_datasets(handle, results: dict, dataset_kwargs=None) -> boo
 _DATASET_ENTRIES = ("samples", "log_likelihood", "dead_points", "labels")
 
 
+def _as_numpy(value):
+    """A JAX (or other ``__array__``) value as a NumPy array; others unchanged.
+
+    Duck-typed so this module never imports JAX.
+    """
+    if not isinstance(value, (np.ndarray, np.generic)) and hasattr(value, "__array__"):
+        return np.asarray(value)
+    return value
+
+
 def _json_value(value):
-    """``value`` as JSON-native data; non-finite floats become ``None``."""
+    """``value`` as JSON-native data; non-finite floats become ``None``.
+
+    Arrays (NumPy, JAX) become lists, 0-d ones scalars; any other object
+    falls back to its ``str()``.
+    """
+    value = _as_numpy(value)
     if isinstance(value, dict):
         return {str(k): _json_value(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -141,7 +156,13 @@ def _json_value(value):
 
 
 def _attr_value(value):
-    """A scalar result entry as an HDF5 attribute value, or ``None`` to skip it."""
+    """A scalar result entry as an HDF5 attribute value, or ``None`` to skip it.
+
+    A 0-d NumPy or JAX array is a scalar entry.
+    """
+    value = _as_numpy(value)
+    if isinstance(value, np.ndarray) and value.ndim == 0:
+        value = value.item()
     if isinstance(value, np.generic):
         value = value.item()
     if isinstance(value, (bool, int, float, str)):
@@ -167,11 +188,12 @@ def save_result(path: str | PathLike[str], result: dict, *, labels=None) -> None
       (:func:`write_dead_point_datasets`), when the result carries them;
     - one attribute per scalar entry (``logZ``, ``logZerr``,
       ``logZ_corrected``, ``log_prior_volume_fraction``, ``stop_reason``,
-      ``dlogz_final``, ``ncall``, ``niter``, ...); an entry that is ``None``
-      is left out;
+      ``dlogz_final``, ``ncall``, ``niter``, ...), 0-d NumPy and JAX arrays
+      included; an entry that is ``None`` is left out;
     - ``result_json``: attribute, every entry except the datasets above as
       JSON (``guard_report``, sampler diagnostics, the scalars again;
-      non-finite floats as ``null``);
+      NumPy and JAX arrays as full lists, non-finite floats as ``null``, any
+      other object as its ``str()``);
     - ``result_complete`` and ``result_schema_version``: the completion
       marker (:func:`result_is_complete`).
     """
