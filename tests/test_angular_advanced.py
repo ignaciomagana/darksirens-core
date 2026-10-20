@@ -245,7 +245,9 @@ def test_shipped_sphere_gp_z_is_mean_one_at_the_prior_corners():
     # Two corners the midpoint test cannot reach: the z length-scale floor (the
     # finest structure the prior allows, measured worst 0.091) and the
     # short-sphere-length-scale corner the sphere quadrature must resolve
-    # (measured worst 0.0035).
+    # (measured worst 0.0035).  The 0.091 is the frozen 3-intervals-per-ls_z
+    # normaliser table, kept as the default; the strict check of the opt-in
+    # table is test_opt_in_z_normaliser_table_resolves_the_ls_z_floor.
     from darksirens.cosmology._grid import zMax
     from darksirens.population import angular_advanced
 
@@ -293,3 +295,90 @@ def test_z_normalisation_grid_covers_and_resolves_the_analysis_grid():
     assert d_zeta[0] <= float(np.exp(model.param_specs[2].low)) / 3.0
     np.testing.assert_allclose(np.asarray(model._zg), np.expm1(zeta_g), rtol=1e-12)
     assert float(np.asarray(model._zg)[-1]) >= float(zMax)
+
+
+def _interpolation_error(model, theta):
+    """Worst |interpolated - exact| per-shell log normaliser between table nodes.
+
+    Both on the model's own sphere quadrature, so the interpolation in zeta is
+    the only error left; the exact value is the same field tabulated AT the
+    query redshifts (midpoints between the nodes, z < 2).
+    """
+    import copy
+
+    from jax.scipy.special import logsumexp
+
+    zeta_g = np.asarray(model._zeta_g)
+    mids = 0.5 * (zeta_g[:-1] + zeta_g[1:])
+    mids = mids[np.expm1(mids) < 2.0]
+    z = jnp.asarray(np.expm1(mids))
+    one = jnp.ones(1)
+    _, fq = model._field(one, 0.0 * one, 0.0 * one, one, theta)
+    interpolated = model._log_norm(fq, z)
+    exact_model = copy.copy(model)
+    exact_model._zeta_g = jnp.asarray(mids)
+    _, fq_exact = exact_model._field(one, 0.0 * one, 0.0 * one, one, theta)
+    exact = logsumexp(fq_exact, axis=1) - jnp.log(model._Q)
+    return float(jnp.max(jnp.abs(interpolated - exact)))
+
+
+def _ls_floor_corner(specs, seed):
+    return _corner_theta(specs, seed, {0: specs[0].high, 1: specs[1].low, 2: specs[2].low})
+
+
+def test_opt_in_z_normaliser_table_resolves_the_ls_z_floor(monkeypatch):
+    """DARKSIRENS_SKY_ZNORM_PER_LS: the per-shell normaliser is interpolated in
+    zeta, and a z-dependent error does not cancel against the selection term.
+    At the prior corner (amplitude ceiling, both length scales at their floors)
+    the frozen 3-per-floor table is off by up to 0.103 in log normaliser; 12 per
+    floor brings every seed under 1e-2."""
+    from darksirens.population import angular_advanced
+
+    shipped = get_angular_model("sphere_gp_z")
+    monkeypatch.setattr(angular_advanced, "_ZNORM_PER_LS", 12.0)
+    resolved = SphereZGPAngular()
+    specs = resolved.param_specs
+    d_zeta = float(np.diff(np.asarray(resolved._zeta_g))[0])
+    assert d_zeta <= float(np.exp(specs[2].low)) / 12.0 + 1e-12
+    worst_shipped = []
+    for seed in range(4):
+        theta = _ls_floor_corner(specs, seed)
+        assert _interpolation_error(resolved, theta) < 1e-2, seed
+        worst_shipped.append(_interpolation_error(shipped, theta))
+    # The default keeps the frozen table, and this pins what it gives.
+    assert max(worst_shipped) > 0.05, worst_shipped
+
+
+def test_opt_in_z_node_ceiling_keeps_the_sky_anisotropic_up_to_zmax(monkeypatch):
+    """DARKSIRENS_SKY_Z_NODE_HI: with the z inducing nodes stopping at z = 3 the
+    field reverts to its zero mean above z ~ 3.3, so g = 1 there whatever the
+    latents say (sky_log_ls_z = log 0.1)."""
+    from darksirens.cosmology._grid import zMax
+    from darksirens.population import angular_advanced
+
+    shipped = get_angular_model("sphere_gp_z")
+    monkeypatch.setattr(angular_advanced, "_Z_NODE_HI", float(zMax))
+    wide = SphereZGPAngular()
+    assert float(np.max(np.asarray(wide._Zz))) == pytest.approx(math.log1p(float(zMax)))
+    sphere = jnp.asarray(_independent_sphere(512))
+    z = jnp.full(sphere.shape[0], 0.98 * float(zMax))
+    spread = {}
+    for label, model in (("shipped", shipped), ("wide", wide)):
+        specs = model.param_specs
+        theta = _corner_theta(specs, 5, {0: 0.0, 1: 0.0, 2: math.log(0.1)})
+        log_g = model.log_g(sphere[:, 0], sphere[:, 1], sphere[:, 2], z, theta)
+        spread[label] = float(jnp.std(log_g))
+    assert spread["shipped"] < 1e-3, spread
+    assert spread["wide"] > 0.3, spread
+
+
+def test_opt_in_sky_knobs_enter_the_fingerprint_only_when_set(monkeypatch):
+    from darksirens.inference.run_fingerprint import core_numerics_semantic
+    from darksirens.population import angular_advanced
+
+    block = core_numerics_semantic()["angular_redshift_normaliser"]
+    assert set(block) == {"z_hi", "nodes"}
+    monkeypatch.setattr(angular_advanced, "_ZNORM_PER_LS", 12.0)
+    monkeypatch.setattr(angular_advanced, "_Z_NODE_HI", 5.0)
+    block = core_numerics_semantic()["angular_redshift_normaliser"]
+    assert block["per_ls"] == 12.0 and block["z_node_hi"] == 5.0

@@ -395,6 +395,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
     ``DARKSIRENS_GP_NORM_QUADRATURE``, ``DARKSIRENS_SKY_ZNORM_HI``,
+    ``DARKSIRENS_SKY_ZNORM_PER_LS``, ``DARKSIRENS_SKY_Z_NODE_HI``,
     ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
     ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
     ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
@@ -441,6 +442,16 @@ def core_numerics_semantic(likelihood=None) -> dict:
         # Opt-in (DARKSIRENS_GP_NORM_QUADRATURE); the default enters no key, so
         # every existing fingerprint is unchanged.
         gp_normaliser["quadrature"] = gp._NORM_QUADRATURE
+    angular_normaliser = {
+        "z_hi": angular_advanced._ZNORM_HI,
+        "nodes": angular_advanced._ZNORM_N,
+    }
+    # Opt-in sky knobs (DARKSIRENS_SKY_ZNORM_PER_LS, DARKSIRENS_SKY_Z_NODE_HI);
+    # their frozen defaults enter no key.
+    if angular_advanced._ZNORM_PER_LS != 3.0:
+        angular_normaliser["per_ls"] = angular_advanced._ZNORM_PER_LS
+    if angular_advanced._Z_NODE_HI != 3.0:
+        angular_normaliser["z_node_hi"] = angular_advanced._Z_NODE_HI
     catalog_evaluation = catalog_evaluation_settings().to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
@@ -460,10 +471,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
             "mass": list(gp._GPPOP_M_EDGES),
             "redshift": list(gp._GPPOP_Z_EDGES),
         },
-        "angular_redshift_normaliser": {
-            "z_hi": angular_advanced._ZNORM_HI,
-            "nodes": angular_advanced._ZNORM_N,
-        },
+        "angular_redshift_normaliser": angular_normaliser,
         "normalization_grids": utils.normalization_grid_settings().to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
         **extra,
