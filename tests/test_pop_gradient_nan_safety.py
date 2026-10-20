@@ -102,3 +102,31 @@ def test_log_p_pop_gradient_finite_at_zero_density(pop_model):
         f"{pop_model}: non-finite hyperparameter gradient "
         f"{dict(enumerate(grad.tolist()))}"
     )
+
+
+@pytest.mark.parametrize("dm_tail", [0.6, 0.3, 0.1])
+def test_golomb_tail_gradient_finite_for_a_narrow_tail_taper(dm_tail):
+    """golomb_1g+tail's logistic tail taper overflowed exp on the low end of the
+    normalisation grid once dm_tail <~ 0.6 (prior floor 0.1): the value stayed
+    0, but its VJP was 0 * inf = NaN, and the normaliser carried it into every
+    sample's d/d(M_tr, Delta, dm_tail).  The gradient now matches central
+    differences, and the value is the same expression as before."""
+    log_p_pop = pop_model_parser("golomb_1g+tail")
+    theta = np.array(get_fixed_population_params("golomb_1g+tail"), dtype=float, copy=True)
+    theta[7] = dm_tail
+    m1 = jnp.asarray([10.0, 25.0, 40.0])
+    q = jnp.asarray([0.8, 0.7, 0.9])
+    z = jnp.asarray([0.2, 0.3, 0.1])
+    chieff = jnp.asarray([0.0, 0.05, -0.02])
+
+    def total(th):
+        return jnp.sum(log_p_pop(m1, q, z, chieff, th))
+
+    grad = np.asarray(jax.jit(jax.grad(total))(jnp.asarray(theta)))
+    assert np.all(np.isfinite(grad)), grad
+    eps = 1e-6
+    for i in (2, 3, 7):    # M_tr, Delta, dm_tail
+        e = np.zeros_like(theta)
+        e[i] = eps
+        fd = (float(total(jnp.asarray(theta + e))) - float(total(jnp.asarray(theta - e)))) / (2 * eps)
+        assert grad[i] == pytest.approx(fd, rel=1e-3, abs=1e-6), (i, grad[i], fd)

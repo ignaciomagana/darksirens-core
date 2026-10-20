@@ -1179,7 +1179,15 @@ class GolombRemnantMass1GPlusTail(GolombRemnantMass1G):
         """
         width = jnp.maximum(dm_tail, _EPS)
         x = (m - (m_bh_max - width)) / width
-        return 1.0 / (1.0 + jnp.exp(-12.0 * (x - 0.5)))
+        # Far below the window exp overflows and the logistic is exactly 0,
+        # but its VJP is then 0 * inf = NaN, and the normaliser integrates
+        # the whole mass grid, so one such node made every sample's gradient
+        # NaN (dm_tail <~ 0.6 at the fiducial).  The overflowing rows take
+        # 0 directly, with a finite exponent in the unselected branch; every
+        # other row is the same expression, so values are unchanged.
+        z = -12.0 * (x - 0.5)
+        over = jnp.isinf(jnp.exp(z))
+        return jnp.where(over, 0.0, 1.0 / (1.0 + jnp.exp(jnp.where(over, 0.0, z))))
 
     def _eval_unnorm(self, m, t):
         t_1g = t[:5]
