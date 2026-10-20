@@ -147,12 +147,34 @@ def _pe_fold_ceiling(attrs, n_events, path):
     amax = float(attrs["chi_eff_amax"])
     a1 = attrs.get("chi_eff_amax_1_per_event")
     a2 = attrs.get("chi_eff_amax_2_per_event")
-    if a1 is not None and a2 is not None:
+    if (a1 is None) != (a2 is None):
+        present, missing = (
+            ("chi_eff_amax_1_per_event", "chi_eff_amax_2_per_event")
+            if a2 is None
+            else ("chi_eff_amax_2_per_event", "chi_eff_amax_1_per_event")
+        )
+        raise RuntimeError(
+            f"PE file {path!r} declares chi_eff_in_p_pe=False and records {present} "
+            f"but not {missing}, so the per-body spin ceilings the chi_eff prior "
+            "folded into p_pe must match cannot be checked. Re-export the file."
+        )
+    if a1 is not None:
         a1 = np.atleast_1d(np.asarray(a1, dtype=float))
         a2 = np.atleast_1d(np.asarray(a2, dtype=float))
-        if a1.shape == a2.shape == (n_events,) and not (np.all(a1 == amax) and np.all(a2 == amax)):
+        if not (a1.shape == a2.shape == (n_events,)):
+            raise RuntimeError(
+                f"PE file {path!r}: chi_eff_amax_1_per_event and "
+                f"chi_eff_amax_2_per_event have shapes {a1.shape} and {a2.shape}, "
+                f"not one ceiling per event ({n_events},)"
+            )
+        # The tolerance _require_reference_ceiling (and gwcat's pair validator)
+        # uses for one ceiling recorded twice.
+        same = np.allclose(a1, amax, rtol=1e-9, atol=1e-12) and np.allclose(
+            a2, amax, rtol=1e-9, atol=1e-12
+        )
+        if not same:
             pairs = list(dict.fromkeys(zip(a1.tolist(), a2.tolist())))
-            listed = ", ".join(f"({p1:g}, {p2:g})" for p1, p2 in pairs[:6])
+            listed = ", ".join(f"({p1!r}, {p2!r})" for p1, p2 in pairs[:6])
             raise RuntimeError(
                 f"PE file {path!r} declares chi_eff_in_p_pe=False, so the loader folds "
                 f"the chi_eff prior into p_pe with one symmetric ceiling "
@@ -592,13 +614,18 @@ _PAIRING_FIELDS = (
     "sky_prior_in_density",
     "source_class",
 )
-#: The one PE/selection pair gwcat validates with unequal hashes: a chi_eff PE
-#: file and a selection file reweighted to the reference spin prior that PE
-#: file divides out. Their contracts differ only in these fields; one shared
-#: spin ceiling (checked by ``_require_reference_ceiling``) makes them one
-#: density.
+#: The one unequal (PE, selection) spin-basis pair gwcat's basis rules accept:
+#: a chi_eff PE file and a selection file reweighted to the reference spin
+#: prior that PE file divides out. One shared spin ceiling (checked by
+#: ``_require_reference_ceiling``) makes them one density. gwcat's 2.1
+#: ``contract_hash`` digests ``parameter_space`` verbatim and does not yet
+#: recognise the pair (gwcat's own pair validator refuses it on the hash and
+#: says to export it at 2.0), so core compares the remaining pairing fields
+#: directly: the contracts may differ only in ``parameter_space`` and by the
+#: reference basis's spin columns in ``advisory_columns``.
 _REFERENCE_SPACES = ("chieff", "chieff_reference")
 _REFERENCE_FIELDS = ("parameter_space", "advisory_columns")
+_REFERENCE_ADVISORY = frozenset(("a1", "a2", "cost1", "cost2", "chip"))
 
 
 def _store_contract(store) -> dict:
@@ -619,9 +646,12 @@ def require_matching_contract(events: GWStore, injections: SelectionStore) -> No
     is silently wrong, so it is refused here with the field-by-field
     difference rather than a bare hash. Stores predating the contract carry no
     hash and are exempt from that comparison; the per-store basis gates still
-    apply. The one unequal pair gwcat accepts, a ``chieff`` PE file with a
-    ``chieff_reference`` selection file, passes when its other pairing fields
-    agree.
+    apply. The one unequal spin-basis pair gwcat's basis rules accept, a
+    ``chieff`` PE file with a ``chieff_reference`` selection file, passes when
+    its other pairing fields agree and its advisory columns differ only by the
+    reference spin columns: gwcat's 2.1 hash does not yet recognise that pair
+    (gwcat's validator refuses it and says to export it at 2.0), so the fields
+    are compared directly here.
 
     Two declarations the hash leaves out are compared here directly, on every
     pair that records them (see :func:`_require_matching_event_cut`): the
@@ -632,6 +662,14 @@ def require_matching_contract(events: GWStore, injections: SelectionStore) -> No
     _require_matching_hash(events, injections)
     _require_reference_ceiling(events, injections)
     _require_matching_event_cut(events, injections)
+
+
+def _same_but_reference_spins(pe_columns, sel_columns) -> bool:
+    if not all(isinstance(c, (list, tuple)) for c in (pe_columns, sel_columns)):
+        return False
+    return set(map(str, pe_columns)) - _REFERENCE_ADVISORY == (
+        set(map(str, sel_columns)) - _REFERENCE_ADVISORY
+    )
 
 
 def _require_matching_hash(events: GWStore, injections: SelectionStore) -> None:
@@ -651,6 +689,9 @@ def _require_matching_hash(events: GWStore, injections: SelectionStore) -> None:
         == _REFERENCE_SPACES
         and all(k in pe_contract and k in sel_contract for k in _PAIRING_FIELDS)
         and not [k for k in differing if k in _PAIRING_FIELDS and k not in _REFERENCE_FIELDS]
+        and _same_but_reference_spins(
+            pe_contract["advisory_columns"], sel_contract["advisory_columns"]
+        )
     )
     if reference_pair:
         return

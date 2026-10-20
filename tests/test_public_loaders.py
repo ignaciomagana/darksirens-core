@@ -293,6 +293,11 @@ def test_reference_pair_passes_the_contract_gate_with_one_ceiling():
     pe, sel = _reference_pair(sel_extra={"sky_prior_in_density": False})
     with pytest.raises(RuntimeError, match="sky_prior_in_density: PE=True vs selection=False"):
         require_matching_contract(pe, sel)
+    # The advisory columns may differ only by the reference spin columns.
+    extra = ["m2det", "redshift", "a1", "a2", "cost1", "cost2", "chip", "snr"]
+    pe, sel = _reference_pair(sel_extra={"advisory_columns": extra})
+    with pytest.raises(RuntimeError, match="advisory_columns"):
+        require_matching_contract(pe, sel)
 
 
 def test_reference_pair_must_share_the_spin_ceiling():

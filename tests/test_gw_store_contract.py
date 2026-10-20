@@ -290,6 +290,24 @@ def test_pe_fold_refuses_per_event_ceilings_it_cannot_fold(tmp_path, scalar, a1,
         load_gw_store(path)
 
 
+@pytest.mark.parametrize(
+    "recorded, match",
+    [
+        ({"chi_eff_amax_1_per_event": np.full(NOBS, 0.99)}, "but not chi_eff_amax_2_per_event"),
+        ({"chi_eff_amax_2_per_event": np.full(NOBS, 0.99)}, "but not chi_eff_amax_1_per_event"),
+        (
+            {"chi_eff_amax_1_per_event": np.full(NOBS + 1, 0.99),
+             "chi_eff_amax_2_per_event": np.full(NOBS + 1, 0.99)},
+            r"not one ceiling per event \(2,\)",
+        ),
+    ],
+)
+def test_pe_fold_refuses_per_event_ceilings_it_cannot_check(tmp_path, recorded, match):
+    path = _write_unfolded_pe(tmp_path / "pe_partial.h5", **recorded)
+    with pytest.raises(RuntimeError, match=match):
+        load_gw_store(path)
+
+
 def test_pe_fold_keeps_one_shared_symmetric_ceiling(tmp_path):
     pytest.importorskip("gwcat.spin")
     plain = load_gw_store(_write_unfolded_pe(tmp_path / "plain.h5"))
@@ -299,6 +317,21 @@ def test_pe_fold_keeps_one_shared_symmetric_ceiling(tmp_path):
         chi_eff_amax_2_per_event=np.full(NOBS, 0.99),
     ))
     np.testing.assert_array_equal(recorded.prior_wt, plain.prior_wt)
+    # One ceiling recorded twice is compared to 1e-9, as gwcat compares it.
+    rounded = load_gw_store(_write_unfolded_pe(
+        tmp_path / "rounded.h5",
+        chi_eff_amax_1_per_event=np.full(NOBS, 0.99 * (1.0 + 1.0e-12)),
+        chi_eff_amax_2_per_event=np.full(NOBS, 0.99),
+    ))
+    np.testing.assert_array_equal(rounded.prior_wt, plain.prior_wt)
+    # A float32 record is another ceiling; the refusal shows its digits.
+    single = _write_unfolded_pe(
+        tmp_path / "single.h5",
+        chi_eff_amax_1_per_event=np.full(NOBS, 0.99, dtype=np.float32),
+        chi_eff_amax_2_per_event=np.full(NOBS, 0.99, dtype=np.float32),
+    )
+    with pytest.raises(RuntimeError, match=r"\(0\.9900000095367432, 0\.9900000095367432\)"):
+        load_gw_store(single)
 
 
 def test_pe_event_with_no_positive_p_pe_is_refused(tmp_path):
