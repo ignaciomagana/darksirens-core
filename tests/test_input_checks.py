@@ -386,6 +386,48 @@ def test_event_block_check_skips_what_it_cannot_judge():
     assert errors == [] and len(cautions) == 1
 
 
+def _alike_sorted_events(nobs, nsamp, seed=0):
+    """Events drawn from one posterior, each event's samples sorted by dL."""
+    rng = np.random.default_rng(seed)
+    n = nobs * nsamp
+    columns = {
+        "m1det": 35.0 * np.exp(rng.normal(0.0, 0.05, n)),
+        "dL": 700.0 * np.exp(rng.normal(0.0, 0.12, n)),
+        "ra": rng.uniform(1.0, 1.3, n),
+        "dec": rng.uniform(-0.2, 0.1, n),
+    }
+    order = np.argsort(columns["dL"].reshape(nobs, nsamp), axis=1)
+    return {
+        name: np.take_along_axis(values.reshape(nobs, nsamp), order, axis=1).ravel()
+        for name, values in columns.items()
+    }
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(64, 2048), (32, 32)])
+def test_alike_events_sorted_inside_each_event_only_warn(nobs, nsamp):
+    # Reading rows i, i + nobs, ... picks the same dL ranks out of every
+    # sorted event, which separates beyond chance; the layout is still valid.
+    errors, cautions = event_block_problems(_alike_sorted_events(nobs, nsamp), nobs, nsamp)
+    assert errors == []
+    (message,) = cautions
+    assert f"no column separates the {nobs} declared event blocks" in message
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(8, 64), (64, 2048)])
+def test_sample_major_order_is_an_error_when_nobs_divides_nsamp(nobs, nsamp):
+    # Here every rank of an event lands in one sample-major group, so the
+    # sorted-event comparison is live; distinct events must still be caught.
+    pe, _ = gw_stores(n_events=nobs, nsamp=nsamp)
+    sample_major = np.arange(nobs * nsamp).reshape(nobs, nsamp).T.ravel()
+    errors, _ = event_block_problems(
+        {name: np.asarray(values)[sample_major] for name, values in pe.columns.items()},
+        nobs,
+        nsamp,
+    )
+    (message,) = errors
+    assert "interleaved across events" in message
+
+
 def test_load_events_checks_the_event_blocks(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -640,3 +682,4 @@ def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         check_kernels_below_zero(edge, 0.01, 0.01)
+
