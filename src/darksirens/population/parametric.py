@@ -16,8 +16,9 @@ Frame convention
 ----------------
 Every mass argument in this module is a SOURCE-frame mass in solar masses -- the
 normalisation grids are source-frame, and the callers pass source-frame masses
-(e.g. ``model.log_p_massspin(m1src, q, chieff, ...)`` in
-:mod:`darksirens.likelihood.flow_events`).  The detector-frame conversion and its
+(``log_p_pop(m1src, q, z, chieff, ...)``, after ``m1src = m1det / (1 + z)``, in
+:func:`darksirens.likelihood.weights.log_target_density_m1det_q_dL` and the
+per-sample weights beside it).  The detector-frame conversion and its
 ``(1 + z)`` mass Jacobian are the likelihood's responsibility, never a
 component's.
 """
@@ -239,11 +240,13 @@ class Gaussian(MassComponent):
         """Exact ``int_{m_lo}^{m_hi} exp(-(m-mu)^2/2sigma^2) dm``.
 
         Same normalisation domain as the base class's grid trapezoid (the
-        component has no truncation of its own), but exact: the trapezoid carries
-        an O((h/sigma)^2) error -- 1.3% at the ``sigma`` prior floor of 1 Msun
-        against h = 0.4 -- which enters the mixture as a spurious rescaling of
-        this component's weight relative to the (now exactly normalised) power
-        laws.
+        component has no truncation of its own), but exact.  The trapezoid is
+        spectrally accurate for a peak whose tails vanish inside the grid
+        (rounding level at ``sigma = 1`` Msun against h = 0.4); its error
+        comes from the truncation at the grid ends, at most 4.0e-4 over the
+        ``GAUSS_MU`` x ``GAUSS_SIGMA`` box (``mu = 5``, ``sigma = 2.4``), and it
+        entered the mixture as a rescaling of this component's weight relative
+        to the exactly normalised power laws.
         """
         grid = get_mass_grid()
         return truncated_gaussian_norm(theta[0], theta[1], grid[0], grid[-1])
@@ -502,8 +505,9 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
     @property
     def support(self):
         """This model declares its OWN 300 Msun ceiling, above the M_HI = 200
-        normalisation grid, and normalises on a grid stretched to it
-        (:meth:`_support_grid`).  Masking to the shared grid would delete real,
+        normalisation grid, and normalises up to it: :meth:`_norm` is closed
+        form over ``[m1_low, m_high]`` plus a quadrature over the taper window
+        only, so no fixed grid is involved.  Masking to the shared grid would delete real,
         correctly-normalised support between 200 and 300 Msun -- the documented
         exception the common mask must not swallow (review PHY-08).  The
         component's own ``m < m_high`` cut makes this bound inert; it is
@@ -521,10 +525,6 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
         sigma_safe = jnp.maximum(sigma, 1.0e-12)
         support = (m >= m1_low) & (m < self.m_high)
         return jnp.where(support, jnp.exp(-0.5 * ((m - mu) / sigma_safe) ** 2), 0.0)
-
-    def _mass_grid(self):
-        base_grid = get_mass_grid()
-        return jnp.linspace(base_grid[0], self.m_high, base_grid.size)
 
     def _taper_window_grid(self, m1_low, delta_m1):
         """Quadrature nodes across the low-mass taper window.
