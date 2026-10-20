@@ -745,6 +745,17 @@ KERNEL_PIN_PROBE_ROWS: int = 8
 #: [20, 140]; the smallest violation legacy measured is 3.9e-2.
 KERNEL_PIN_TOL: float = 1.0e-9
 
+#: Rounding allowance of that comparison, in units of the compared value's
+#: float resolution: the tolerance of a slot is the larger of
+#: ``KERNEL_PIN_TOL`` and this many ``eps * |value|``.  It exceeds
+#: ``KERNEL_PIN_TOL`` only where ``|log_kw_eff|`` is above ~7e4, which a finite
+#: survey depth produces for a row whose galaxies all lie thousands of widths
+#: above it (``log_kw_eff`` ~ 2.5e7 for spectroscopic galaxies at z ~ 1
+#: against a depth of 0.3).  There the probe and the shifted pin differ by
+#: 2-3 units of float64 resolution, several times ``KERNEL_PIN_TOL``, so the
+#: absolute comparison failed on rounding alone at about half the H0 values.
+KERNEL_PIN_TOL_EPS: float = 64.0
+
 #: Version tag hashed first into every pin's ``catalog_digest``.
 KERNEL_PIN_DIGEST_SCHEME: str = "darksirens.catalog-kernel-pin.digest/1"
 
@@ -1165,7 +1176,8 @@ def pinned_catalog_kernel_state(
     ``pinned.probe_rows`` from the live ``H0``, ``Om0``, ``w0``, ``wa``,
     ``delta``, ``sigma_kde`` and ``z_depth`` with the per-proposal builder and
     returns ``True`` when every slot live in both agrees with the shifted pin
-    to ``KERNEL_PIN_TOL``.  The caller spends a ``False`` verdict on the prior
+    to ``KERNEL_PIN_TOL`` (or ``KERNEL_PIN_TOL_EPS`` units of the shifted
+    value's float resolution, when that is larger).  The caller spends a ``False`` verdict on the prior
     normaliser (see :func:`darksirens.catalog.models.build_incomplete_catalog_prior_state_from_curves`).
     """
 
@@ -1188,10 +1200,12 @@ def pinned_catalog_kernel_state(
     )
     ref_eff = pinned.log_kw_eff[rows]
     compared = (probe_eff > _KERNEL_SENTINEL_CUT) & (ref_eff > _KERNEL_SENTINEL_CUT)
-    ok = jnp.all(
-        jnp.where(compared, jnp.abs(probe_eff - (ref_eff + shift)), 0.0)
-        <= KERNEL_PIN_TOL
+    want = ref_eff + shift
+    tol = jnp.maximum(
+        KERNEL_PIN_TOL,
+        KERNEL_PIN_TOL_EPS * jnp.finfo(want.dtype).eps * jnp.abs(want),
     )
+    ok = jnp.all(jnp.where(compared, jnp.abs(probe_eff - want) <= tol, True))
 
     # -1e30 + shift is exactly -1e30 in f64 (|shift| < 10): padding stays
     # padding, and the row maximum moves with the row.
@@ -1700,6 +1714,7 @@ __all__ = [
     "KERNEL_PIN_H0_REF",
     "KERNEL_PIN_PROBE_ROWS",
     "KERNEL_PIN_TOL",
+    "KERNEL_PIN_TOL_EPS",
     "KERNEL_WIDTHS_BELOW_ZERO_MAX",
     "PinnedCatalogKernel",
     "SIGMA_EFF_FLOOR",
