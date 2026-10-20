@@ -365,6 +365,52 @@ def _counterpart_nside(value) -> int:
     return int(nside)
 
 
+def _check_counterpart(counterpart, index: int, nside: int) -> None:
+    """Refuse a counterpart whose redshift term or sky gate is ``-inf`` everywhere.
+
+    A zero or NaN ``dz``, a NaN redshift, or a gated pixel outside the
+    counterpart frame makes that event's evidence, and so every likelihood
+    value, ``-inf`` with nothing naming the counterpart (legacy refused a
+    non-finite or non-positive ``z`` and ``dz`` at parse time).
+    """
+
+    import numpy as np
+
+    def real_scalar(name):
+        value = getattr(counterpart, name)
+        array = np.asarray(value)
+        if array.ndim != 0 or array.dtype.kind not in "iuf":
+            raise ValueError(
+                f"counterpart {index}: {name} must be a real scalar, got {value!r}"
+            )
+        return float(array)
+
+    z = real_scalar("z")
+    if not (np.isfinite(z) and z > 0.0):
+        raise ValueError(
+            f"counterpart {index}: z must be a finite positive redshift, got {counterpart.z!r}"
+        )
+    dz = real_scalar("dz")
+    if not (np.isfinite(dz) and dz > 0.0):
+        raise ValueError(
+            f"counterpart {index}: dz must be a finite positive redshift width, "
+            f"got {counterpart.dz!r}"
+        )
+    if bool(counterpart.sky_marginalized):
+        return  # the sky gate is off, so the pixel is never read
+    pixel = np.asarray(counterpart.pixel)
+    npix = 12 * nside * nside
+    integral = pixel.ndim == 0 and (
+        np.issubdtype(pixel.dtype, np.integer)
+        or (np.issubdtype(pixel.dtype, np.floating) and float(pixel).is_integer())
+    )
+    if not integral or not (0 <= int(pixel) < npix):
+        raise ValueError(
+            f"counterpart {index}: pixel must be an integer RING pixel id in "
+            f"[0, {npix}) at counterpart_nside={nside}, got {counterpart.pixel!r}"
+        )
+
+
 def resolve_selection_model(selection, z_depth=None):
     """The validated runtime selection model of ``model(..., selection=...)``.
 
@@ -557,10 +603,10 @@ def _resolve_redshift(
             raise ValueError("bright sirens require at least one counterpart")
         if not all(isinstance(item, Counterpart) for item in counterpart_tuple):
             raise TypeError("counterparts must contain only darksirens.Counterpart objects")
-        return BrightRedshift(
-            counterpart_tuple,
-            _counterpart_nside(counterpart_nside),
-        ), ()
+        nside = _counterpart_nside(counterpart_nside)
+        for index, item in enumerate(counterpart_tuple):
+            _check_counterpart(item, index, nside)
+        return BrightRedshift(counterpart_tuple, nside), ()
 
     if counterpart_nside is not None:
         raise ValueError("counterpart_nside requires counterparts")
