@@ -194,6 +194,24 @@ def test_the_accepted_set_covers_every_option_a_backend_reads():
     assert missing == []
 
 
+def test_the_startup_check_names_a_remedy_that_works_for_a_target(monkeypatch):
+    # The review's scenario: a companion target whose prior draws are all
+    # guarded fails the startup check, whose remedies named only infer
+    # keywords that infer refuses for an InferenceTarget.
+    from darksirens.inference.preflight import nested_sampler_preflight
+
+    with pytest.raises(RuntimeError) as excinfo:
+        nested_sampler_preflight(lambda theta: -np.inf, lambda u: u, 2, n_probe=4)
+    message = str(excinfo.value)
+    assert "for an InferenceTarget" in message
+    assert "selection_neff_soft_guard=True or max_likelihood_variance=<cap>" in message
+
+    _fake_backend(monkeypatch)
+    target = ds.InferenceTarget(lambda theta: -1.0, _plan())
+    with pytest.raises(TypeError, match="must be omitted for an InferenceTarget"):
+        infer(target, sampler="dynesty", selection_neff_guard="soft")
+
+
 # ---------------------------------------------------------------------------
 # Resuming an ordinary analysis
 
