@@ -175,8 +175,10 @@ def spectral_siren_log_likelihood(
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     if compute_dtype is not None:
-        from .mixed_precision import make_log_weight, volume_log_prior
+        from .mixed_precision import make_log_weight, refuse_event_underflow, volume_log_prior
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         _log_weight = make_log_weight(
             dtype=compute_dtype,
             cosmology=cosmology,
@@ -392,8 +394,14 @@ def _ordinary_hierarchical_likelihood(
         pe_weight = _branch_weight(log_prior_pe, catalog_pe)
         sel_weight_core = _branch_weight(log_prior_sel, catalog_sel)
     if compute_dtype is not None:
-        from .mixed_precision import make_branch_log_weight, make_log_weight
+        from .mixed_precision import (
+            make_branch_log_weight,
+            make_log_weight,
+            refuse_event_underflow,
+        )
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         lowp = dict(
             dtype=compute_dtype,
             cosmology=cosmology,
