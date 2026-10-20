@@ -1,9 +1,23 @@
 """4-D component-spin population model (DS-08).
 
-The GWTC-3 "Default" spin model: independent, identically distributed
-component-spin magnitudes ``a_i ~ Beta(alpha_chi, beta_chi)`` on [0, 1] and a
-tilt mixture ``cos t_i ~ zeta_spin * N_trunc(cos t; 1, sigma_t) +
-(1 - zeta_spin) * 1/2`` on [-1, 1] (isotropic plus preferentially aligned).
+Independent, identically distributed component-spin magnitudes
+``a_i ~ Beta(alpha_chi, beta_chi)`` on [0, 1] and an isotropic plus
+preferentially aligned tilt mixture on [-1, 1]^2, in one of two forms
+(``ComponentSpinModel.tilt_mixture``):
+
+* ``"per_spin"`` (default, the frozen reference's form): each tilt carries
+  its own mixture, ``cos t_i ~ zeta_spin * N_trunc(cos t; 1, sigma_t) +
+  (1 - zeta_spin) * 1/2``, and the two are independent;
+* ``"binary"`` (opt-in): the GWTC-3 "Default" spin model (Talbot & Thrane
+  2017; GWTC-2 and GWTC-3 population papers), one mixture over the binary,
+  ``zeta_spin * N_trunc(cos t1) N_trunc(cos t2) + (1 - zeta_spin) / 4``.
+
+The two have the same one-tilt marginal but not the same joint density: the
+per-spin form has uncorrelated tilts and cross terms the Default model does
+not (at ``zeta_spin = 0.75``, ``sigma_t = 0.9`` it gives two anti-aligned
+spins half the Default model's density, and corr(cos t1, cos t2) is 0
+against 0.072), so its ``zeta_spin`` and ``sigma_t`` are not the published
+model's.
 
 Everything is normalised ANALYTICALLY -- the Beta by ``betaln``, the
 truncated Gaussian by ``erf`` -- so no new quadrature enters the likelihood:
@@ -35,6 +49,9 @@ from .base import ParamSpec, SpinModel
 #: Column order of the spin block this model consumes (= GWEvent.spin).
 COMPONENT_SPIN_COLUMNS = ("a1", "a2", "cost1", "cost2")
 
+#: Forms of the tilt mixture (``ComponentSpinModel.tilt_mixture``).
+TILT_MIXTURES = ("per_spin", "binary")
+
 _SQRT_HALF_PI = 1.2533141373155003  # sqrt(pi/2)
 _SQRT2 = 1.4142135623730951
 
@@ -49,6 +66,10 @@ class ComponentSpinModel(SpinModel):
     ``zeta_spin`` (aligned fraction), ``sigma_t`` (width of the aligned
     tilt Gaussian, truncated to [-1, 1] and peaked at cos t = 1).
 
+    ``tilt_mixture`` is ``"per_spin"`` (default: one mixture per tilt, the
+    two independent) or ``"binary"`` (one mixture over the binary, the GWTC-3
+    Default spin model); see the module docstring.
+
     This is a :class:`SpinModel` so it slots into every population model's
     ``spin_component`` field and its ``ParamSpec``s reach the flat
     labels/lower/upper vector through the ordinary ``param_specs`` chain --
@@ -60,11 +81,18 @@ class ComponentSpinModel(SpinModel):
     beta_chi_spec: ParamSpec
     zeta_spin_spec: ParamSpec
     sigma_t_spec: ParamSpec
+    tilt_mixture: str = "per_spin"
 
     #: Population models dispatch on this: True means __call__ requires the
     #: event spin block and the paired store must be component-basis.
     consumes_spin_block = True
     spin_columns = COMPONENT_SPIN_COLUMNS
+
+    def __post_init__(self):
+        if self.tilt_mixture not in TILT_MIXTURES:
+            raise ValueError(
+                f"tilt_mixture must be one of {TILT_MIXTURES}, got {self.tilt_mixture!r}"
+            )
 
     @property
     def param_specs(self):
@@ -104,12 +132,33 @@ class ComponentSpinModel(SpinModel):
             in_support, jnp.log(jnp.maximum(p, 1e-300)), -jnp.inf
         )
 
+    @staticmethod
+    def _log_p_tilt_binary(c1, c2, zeta, sigma_t):
+        """log of the binary tilt mixture on [-1, 1]^2; -inf outside.
+
+        ``zeta N(c1) N(c2) + (1 - zeta) / 4`` with the truncated Gaussian of
+        :meth:`_log_p_tilt`, so its one-tilt marginal is that mixture.
+        """
+        in_support = (c1 >= -1.0) & (c1 <= 1.0) & (c2 >= -1.0) & (c2 <= 1.0)
+        z_aligned = sigma_t * _SQRT_HALF_PI * erf(_SQRT2 / sigma_t)
+        p_aligned = (jnp.exp(-0.5 * (((c1 - 1.0) / sigma_t) ** 2 + ((c2 - 1.0) / sigma_t) ** 2))
+                     / (z_aligned * z_aligned))
+        p = zeta * p_aligned + (1.0 - zeta) * 0.25
+        return jnp.where(
+            in_support, jnp.log(jnp.maximum(p, 1e-300)), -jnp.inf
+        )
+
     def log_prob(self, spin, theta):
         """Normalised log density of the (..., 4) spin block ``(a1, a2, cost1, cost2)``."""
         alpha, beta, zeta, sigma_t = theta[0], theta[1], theta[2], theta[3]
-        return (
+        magnitudes = (
             self._log_p_magnitude(spin[..., 0], alpha, beta)
             + self._log_p_magnitude(spin[..., 1], alpha, beta)
+        )
+        if self.tilt_mixture == "binary":
+            return magnitudes + self._log_p_tilt_binary(spin[..., 2], spin[..., 3], zeta, sigma_t)
+        return (
+            magnitudes
             + self._log_p_tilt(spin[..., 2], zeta, sigma_t)
             + self._log_p_tilt(spin[..., 3], zeta, sigma_t)
         )
@@ -140,16 +189,23 @@ class ComponentSpinModel(SpinModel):
         return jnp.exp(self.log_prob(spin, theta))
 
 
-def default_component_spin() -> ComponentSpinModel:
-    """The default component-spin block (GWTC-3 Default-model parameterisation).
+def default_component_spin(tilt_mixture: str = "per_spin") -> ComponentSpinModel:
+    """The default component-spin block (GWTC-3 Default-model parameters).
 
-    Bounds: Beta shapes in [1, 10] (non-singular at the endpoints), aligned
-    fraction in [0, 1], aligned-tilt width in [0.1, 4] -- the LVK Default
-    spin prior ranges.
+    Bounds: aligned fraction in [0, 1] and aligned-tilt width in [0.1, 4],
+    the LVK Default ranges; Beta shapes ``alpha_chi``, ``beta_chi`` uniform
+    in [1, 10] (non-singular at the endpoints).  The magnitude prior is NOT
+    the LVK one: the LVK Default model samples the Beta through its mean and
+    variance (``E[a] ~ U(0, 1)``, ``Var[a] ~ U(0, 0.25)``, restricted to
+    shapes >= 1), a different density over the shapes, and the [1, 10] box
+    also bounds the mean magnitude below by 1/11, which that prior does not.
+    ``tilt_mixture`` is passed to :class:`ComponentSpinModel` (``"binary"``
+    is the GWTC-3 Default tilt model; the default ``"per_spin"`` is not).
     """
     return ComponentSpinModel(
         ParamSpec(r"$\alpha_\chi$", 1.0, 10.0, name="alpha_chi"),
         ParamSpec(r"$\beta_\chi$", 1.0, 10.0, name="beta_chi"),
         ParamSpec(r"$\zeta_{\rm spin}$", 0.0, 1.0, name="zeta_spin"),
         ParamSpec(r"$\sigma_t$", 0.1, 4.0, name="sigma_t"),
+        tilt_mixture=tilt_mixture,
     )

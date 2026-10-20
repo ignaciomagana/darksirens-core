@@ -966,8 +966,12 @@ class GWTC3PowerLawPeakPopulationModel:
 
     ``spin_component`` may be overridden with any :class:`SpinModel`; a model
     with ``consumes_spin_block`` (the 4-D :class:`ComponentSpinModel`) makes
-    this the Table VI mass model x the Table XII Default spin model, which
-    the chi_eff parameterisation could not represent (see __init__ note).
+    this the Table VI mass model x a component-spin model, which the chi_eff
+    parameterisation could not represent (see __init__ note).  The Table XII
+    Default spin model is ``ComponentSpinModel(..., tilt_mixture="binary")``;
+    the default ``"per_spin"`` form (what the ``gwtc3_plpeak_component_spin``
+    preset uses) has the same one-tilt marginal but a different joint tilt
+    density.
     """
 
     def __init__(self, spin_component=None):
@@ -995,8 +999,8 @@ class GWTC3PowerLawPeakPopulationModel:
         # law is likewise the repo's (1+z)^(gamma-1); only the fiducial gamma
         # is taken from the paper (its kappa), which the registry entry notes.
         # (With DS-08's ComponentSpinModel passed in instead, the Table XII
-        # Default spin model IS representable; the chi_eff default below is
-        # unchanged.)
+        # Default spin model IS representable, as tilt_mixture="binary"; the
+        # chi_eff default below is unchanged.)
         self.spin_component = spin_component if spin_component is not None else TruncatedGaussianSpin(
             ParamSpec(r"$\mu_\chi$", CHI_MU.lo, CHI_MU.hi, name="mu_chi"),
             ParamSpec(r"$\sigma_\chi$", CHI_SIGMA.lo, CHI_SIGMA.hi, name="sigma_chi"),

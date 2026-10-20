@@ -575,6 +575,13 @@ register_model(
     # directly, so source exact numbers from the LVK data release before
     # building mocks on this preset.
     #
+    # Its tilt model is the per-spin mixture (ComponentSpinModel's default
+    # tilt_mixture="per_spin"): each tilt carries its own aligned/isotropic
+    # mixture.  The Table XII Default model mixes over the BINARY
+    # (tilt_mixture="binary"); the one-tilt marginals agree, the joint
+    # density does not, so zeta_spin and sigma_t from this preset are not
+    # the published model's.
+    #
     # This preset requires a COMPONENT-basis gwcat pair: its spin model
     # consumes GWEvent.spin = (a1, a2, cost1, cost2) and raises against a
     # chieff-basis store (basis negotiation, DS-09, refuses the pairing
