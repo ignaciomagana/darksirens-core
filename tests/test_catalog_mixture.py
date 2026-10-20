@@ -494,6 +494,36 @@ def test_soft_guard_and_vmap_grad():
     assert np.all(np.isfinite(np.asarray(grad))) and abs(float(grad[-1])) > 0.0
 
 
+@pytest.mark.slow
+def test_one_catalog_soft_guard_reads_the_normalised_selection_integral():
+    """Z_1 cancels from the one-catalog likelihood but not from the soft Neff
+    guard, whose wall height tracks -N log mu. Under the soft guard the one
+    catalog is normalised by Z_1, so its wall is that of the same likelihood
+    written as two identical catalogs, also where the wall is active (at
+    max_likelihood_variance=0.065 the sparse-Neff wall is thousands of nats
+    deep; it used to be about 3.6 times shallower for one catalog)."""
+    one = _model(A)
+    two = _model([A, A])
+    th1 = theta_of(one, {"log10n0": -2.0}, seed=5)
+    labels = list(one.parameters.labels)
+    th2 = np.array([0.5 if lab == "fcat_2" else th1[labels.index(lab.replace("_c2", ""))]
+                    for lab in two.parameters.labels])
+    for cap in (CAP, 0.065):
+        soft_one = _bind(one, selection_neff_soft_guard=True, max_likelihood_variance=cap)
+        soft_two = _bind(two, selection_neff_soft_guard=True, max_likelihood_variance=cap)
+        _close(soft_one(th1), soft_two(th2), 1e-12, f"soft guard, cap={cap}")
+        d1, d2 = soft_one.diagnostics(th1), soft_two.diagnostics(th2)
+        _close(d1.log_mu, d2.log_mu, 1e-12, f"log_mu, cap={cap}")
+        assert soft_one.model_operands.components[0].full is not None
+    assert float(soft_one(th1)) < -1.0e3
+    # The hard guard keeps the unnormalised one-catalog program.
+    hard = _bind(one)
+    assert hard.model_operands.components[0].full is None
+    _close(hard(th1), _bind(two)(th2), 1e-12, "hard guard")
+    with pytest.raises(ValueError, match="normalised by Z_1"):
+        dataclasses.replace(hard, selection_neff_soft_guard=True)(th1)
+
+
 def test_decode_parameters_returns_each_catalog_and_the_weights():
     analysis = _model([A_DEPTH, B], completeness="selection", selection=[SEL_A, SEL_B],
                       n0_units="h_scaled", survey_priors={"alpha_c2": (-1.5, -0.5)})

@@ -256,7 +256,8 @@ class MissingHostExtension(Protocol):
         full-sky curves (for example from precomputed moments). ``None`` makes
         core build the full-sky curves, modulate them with
         ``missing_density`` and sum them (the direct form). Called with the
-        ``"full"`` context only, and only for ``K >= 2``.
+        ``"full"`` context only, and only where ``Z_k`` is evaluated
+        (``K >= 2``, or one catalog under the soft Neff guard).
     ``provenance()`` (optional)
         A JSON-like mapping (table hashes, realization ids, its mode) for the
         run fingerprint.

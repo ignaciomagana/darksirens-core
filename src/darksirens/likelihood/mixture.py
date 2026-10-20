@@ -11,10 +11,15 @@ samples and the detected injections alike; the GW reduction (event evidences,
 selection integral, Monte-Carlo variances and guards) is the ordinary
 hierarchical reducer's. With one catalog the density is ``n_1`` alone: ``Z_1``
 is common to every sample and cancels between the event evidences and
-``N log mu``, so it is not evaluated. Each branch is the host probability of
-the sample's row, a mass per pixel; ``mixture_density="steradian"`` (opt-in)
-divides branch k by its catalog's pixel area, which matters only when the
-catalogs' nsides differ (:mod:`darksirens.catalog.mixture`).
+``N log mu``, so it is not evaluated, except under the soft Neff guard
+(``selection_neff_soft_guard=True``): the soft wall is not invariant under a
+common factor of the density (its height tracks ``-N log mu``), so the
+one-catalog density is then ``n_1 / Z_1``, as in the frozen reference, and
+``log mu`` and the event evidences in the diagnostics are normalised. Each
+branch is the host probability of the sample's row, a mass per pixel;
+``mixture_density="steradian"`` (opt-in) divides branch k by its catalog's
+pixel area, which matters only when the catalogs' nsides differ
+(:mod:`darksirens.catalog.mixture`).
 
 Each catalog has its own completeness (``ds.model(..., completeness=[...])``):
 the count ratio and the selection curve give ``n_k = N_obs,p p_cat + dN_miss,p``
@@ -89,9 +94,11 @@ class CatalogMixtureComponent(NamedTuple):
 
     ``compact`` is the catalog view the GW samples touch (the union of the PE
     and selection rows); ``full`` is every row of the catalog store (``None``
-    for one catalog, whose normaliser cancels; without galaxy slots, only
-    ``ngals`` and the row count, for the selection completeness in the
-    moments form without a survey depth, which reads nothing else). ``compact_cache`` and
+    for one catalog, whose normaliser cancels, unless the soft Neff guard is
+    on, whose wall reads the selection integral normalised by ``Z_1``;
+    without galaxy slots, only ``ngals`` and the row count, for the selection
+    completeness in the moments form without a survey depth, which reads
+    nothing else). ``compact_cache`` and
     ``full_cache`` are the observed-density caches of the count-ratio
     completeness (``None`` for ``completeness="selection"``, and the full one
     only when the direct normaliser needs it); ``compact_pin`` and
@@ -101,7 +108,7 @@ class CatalogMixtureComponent(NamedTuple):
     fractions of the two views' rows (``None`` without one);
     ``compact_row_weight`` and ``full_row_weight`` the sum of each row's real
     galaxy weights, ``(N_rows,)``, for ``host_mass="weight"`` (``None``
-    otherwise, and the full one only with two or more catalogs).
+    otherwise, and the full one only with the full view).
     """
 
     compact: Any
@@ -398,6 +405,19 @@ def field_mixture_log_likelihood(
     # Opt-in: each branch per steradian, n_k / (Z_k A_k). With one catalog the
     # area is common to every sample and cancels.
     per_steradian = mixture_density == "steradian" and n >= 2
+    # Z_k is evaluated with two or more catalogs, where it does not cancel,
+    # and with one catalog under the soft Neff guard: Z_1 cancels from the
+    # likelihood but not from the soft wall, whose height tracks -N log mu
+    # and is calibrated on a normalised mu (the frozen reference divides its
+    # one-catalog field density by Z_1 too). The full sky is then bound for
+    # one catalog as well (bind_analysis(..., selection_neff_soft_guard=True)).
+    normalised = n >= 2 or bool(selection_neff_soft_guard)
+    if n == 1 and normalised and components[0].full is None:
+        raise ValueError(
+            "the soft Neff guard of a one-catalog field analysis reads the selection "
+            "integral normalised by Z_1, which needs the catalog's full sky; bind the "
+            "analysis with bind_analysis(..., selection_neff_soft_guard=True)"
+        )
     weighted = host_mass == "weight"
     if weighted and any(comp != "complete" for comp in completeness):
         raise ValueError(
@@ -407,7 +427,7 @@ def field_mixture_log_likelihood(
     for k, component in enumerate(components):
         has_compact = component.compact_row_weight is not None
         has_full = component.full_row_weight is not None
-        if weighted and not (has_compact and (has_full or n < 2)):
+        if weighted and not (has_compact and (has_full or not normalised)):
             raise ValueError(
                 f"host_mass='weight' needs the row weight sums of catalog {k + 1}; "
                 "bind the analysis with bind_analysis"
@@ -457,7 +477,7 @@ def field_mixture_log_likelihood(
             kernels, pin_ok = _kernels(
                 cosmology, _complete_params(params), component.compact, component.compact_pin
             )
-            if n < 2:
+            if not normalised:
                 obs = None
             elif weighted:
                 # host_mass="weight": Z_k = sum_p W_p, the catalog's total weight.
@@ -468,7 +488,7 @@ def field_mixture_log_likelihood(
             continue
         kernels, pin_ok = _kernels(cosmology, params, component.compact, component.compact_pin)
         curves = _compact_curves(cosmology, params, component, completeness[k], gather)
-        if n >= 2:
+        if normalised:
             obs, obs_poison = _observed(cosmology, params, component)
         else:
             obs, obs_poison = None, None
@@ -498,7 +518,7 @@ def field_mixture_log_likelihood(
         for k, (params, component, piece) in enumerate(zip(params_k, components, pieces)):
             if completeness[k] == "complete":
                 log_total = (
-                    jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if n >= 2 else 0.0
+                    jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if normalised else 0.0
                 )
                 if per_steradian:
                     log_total = log_total + _log_area(component)
@@ -521,7 +541,7 @@ def field_mixture_log_likelihood(
                 piece.kernels, piece.pin_ok, component.compact, curves
             )
             poison = poison_of(state.log_Z)
-            if n >= 2:
+            if normalised:
                 total = piece.observed_total + _missing_total(
                     k, cosmology, params, component, completeness[k], normalizer[k],
                     extension, member, extension_params, extension_data, piece.observed_total,
