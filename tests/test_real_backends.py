@@ -258,6 +258,41 @@ def test_resumed_dynesty_runs_report_the_termination_of_the_whole_run(tmp_path):
     assert (again["ncall"], again["niter"]) == (result["ncall"], result["niter"])
 
 
+def test_resuming_a_capped_dynesty_run_keeps_its_maxcall_stop_reason(tmp_path, capsys):
+    """run_nested saves the checkpoint after adding the final live points, so a
+    run stopped by its call cap leaves a finished checkpoint. Resuming it
+    samples nothing, and the cap test (calls made by this run_nested) found 0
+    calls: the record said "unknown" for a run that stopped on maxcall."""
+    pytest.importorskip("dynesty")
+    target = ds.InferenceTarget(
+        log_likelihood=_log_likelihood,
+        parameters=_target().parameters,
+        identity={"test": "capped-resume"},
+    )
+    checkpoint = str(tmp_path / "capped.pkl")
+    options = dict(nlive=50, dlogz=0.1, max_samples=300, show_progress=False, seed=1)
+    with pytest.warns(UserWarning, match="stopped short"):
+        capped = ds.infer(
+            target,
+            sampler="dynesty",
+            checkpoint_interval_seconds=1e-6,
+            checkpoint_file_resolved=checkpoint,
+            **options,
+        )
+    assert capped["stop_reason"] == "maxcall"
+    capsys.readouterr()
+
+    with pytest.warns(UserWarning, match="finished static run"):
+        again = ds.infer(
+            target, sampler="dynesty", resume_from_resolved=checkpoint, **options
+        )
+    assert again["stop_reason"] == "maxcall"
+    assert "checkpoint was saved at the end of a finished run" in capsys.readouterr().out
+    assert again["logZ"] == capped["logZ"]
+    assert again["dlogz_final"] == pytest.approx(capped["dlogz_final"], abs=1e-12)
+    assert (again["ncall"], again["niter"]) == (capped["ncall"], capped["niter"])
+
+
 def test_numpyro_recovers_the_analytic_posterior():
     pytest.importorskip("numpyro")
     result = ds.infer(
