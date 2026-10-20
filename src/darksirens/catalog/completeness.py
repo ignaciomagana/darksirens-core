@@ -204,17 +204,113 @@ _batched_observed_density = jit(
     vmap(_observed_density_row, in_axes=(0, None))
 )
 
+#: Real galaxies more than this many ``SIGMA_SMOOTH`` below ``z = 0`` are
+#: refused by the per-row observed-density cache: beyond about 8.3 widths the
+#: mass of their kernel inside the grid rounds to 0 in float64 and its floor
+#: (1e-300) turns the kernel into about 1e279 (at 7 widths the mass is still
+#: good to about 1e-4).
+ROW_KDE_WIDTHS_BELOW_ZERO_MAX: float = 7.0
+#: Effective galaxies per row under the 0.05 kernel at the catalog's median
+#: redshift (the median over the rows holding galaxies) below which the
+#: per-row count ratio warns that its clip at 1 biases the completeness low.
+ROW_WARN_EFFECTIVE: float = 1000.0
+#: Bytes of one batch's ``(rows, N_z, N_max)`` float64 kernel in
+#: :func:`build_observed_density_cache` when no ``batch_size`` is given.
+OBSERVED_DENSITY_BATCH_BYTES: int = 2**30
+_OBSERVED_DENSITY_BATCH_MAX: int = 512
+
+
+def _row_count_ratio_checks(catalog: GalaxyCatalog) -> None:
+    """Host checks of a catalog for the per-row count ratio (``count_ratio="row"``).
+
+    Refuses real galaxies more than ``ROW_KDE_WIDTHS_BELOW_ZERO_MAX`` kernel
+    widths below ``z = 0`` (``ValueError``), and warns when the rows are too
+    sparse for the clip of each row's ratio: the Kish effective number of a
+    row's galaxies under the 0.05 kernel at the catalog's median redshift,
+    the median over the rows holding galaxies, below ``ROW_WARN_EFFECTIVE``.
+    A row's ratio is unbiased before the clip and its noise is about
+    ``1 / sqrt(N)``, so the clip lowers its mean by about ``0.4 / sqrt(N)``
+    where the catalog is complete, more at lower redshift where a row holds
+    fewer galaxies, and more as the rows get smaller (higher nside): those
+    missing hosts are made by the estimator.  Neither check changes a value.
+    """
+
+    z = np.asarray(catalog.zgals)
+    ng = np.asarray(catalog.ngals)
+    if z.shape[0] == 0 or z.shape[1] == 0:
+        return
+    cols = np.arange(z.shape[1])[None, :]
+    floor = -ROW_KDE_WIDTHS_BELOW_ZERO_MAX * SIGMA_SMOOTH
+    n_deep, lowest = 0, np.inf
+    n_bins = int(np.ceil(_ZMAX / POOLED_BIN_WIDTH))
+    counts = np.zeros(n_bins, dtype=np.int64)
+    for rows in row_blocks(z.shape[0], z.shape[1]):
+        zr = np.asarray(z[rows], dtype=np.float64)
+        real = cols < ng[rows, None]
+        deep = real & (zr < floor)
+        if deep.any():
+            n_deep += int(np.count_nonzero(deep))
+            lowest = min(lowest, float(zr[deep].min()))
+        zp = zr[real & (zr > 0.0) & (zr <= _ZMAX)]
+        idx = np.minimum((zp / POOLED_BIN_WIDTH).astype(np.int64), n_bins - 1)
+        counts += np.bincount(idx, minlength=n_bins)
+    if n_deep:
+        raise ValueError(
+            f"count_ratio='row': {n_deep} real galaxies lie more than "
+            f"{ROW_KDE_WIDTHS_BELOW_ZERO_MAX:g} widths of the per-row count ratio's "
+            f"fixed {SIGMA_SMOOTH:g} kernel below z = 0 (z < {floor:g}; the lowest "
+            f"is {lowest:.6g}): the kernel's mass inside the redshift grid rounds to "
+            "0 in float64 there, and the row would read as complete far beyond z = 0. "
+            "Remove them, or use count_ratio='pooled', which does not count "
+            "galaxies at z <= 0"
+        )
+    if counts.sum() == 0:
+        return
+    median = (np.searchsorted(np.cumsum(counts), 0.5 * counts.sum()) + 0.5) * POOLED_BIN_WIDTH
+    effective = []
+    for rows in row_blocks(z.shape[0], z.shape[1]):
+        zr = np.asarray(z[rows], dtype=np.float64)
+        real = (cols < ng[rows, None]) & (ng[rows, None] > 0)
+        g = np.where(real, np.exp(-0.5 * ((zr - median) / SIGMA_SMOOTH) ** 2), 0.0)
+        s1 = g.sum(axis=1)
+        s2 = (g * g).sum(axis=1)
+        held = ng[rows] > 0
+        effective.append(np.where(s2 > 0.0, s1 * s1 / np.where(s2 > 0.0, s2, 1.0), 0.0)[held])
+    effective = np.concatenate(effective)
+    if effective.size == 0:
+        return
+    typical = float(np.median(effective))
+    if typical < ROW_WARN_EFFECTIVE:
+        warnings.warn(
+            f"count_ratio='row': the per-row count ratio's {SIGMA_SMOOTH:g} kernel holds "
+            f"a median of {typical:.0f} effective galaxies per row at the catalog's "
+            f"median redshift {median:.3f}, fewer at lower redshift: the clip at 1 of "
+            "each row's noisy ratio biases its completeness low (by about "
+            f"{0.4 / np.sqrt(max(typical, 1.0)):.2f} where the catalog is complete), "
+            "which adds missing hosts that grow as the rows get smaller (higher "
+            "nside). count_ratio='pooled' pools the rows before the clip",
+            UserWarning,
+            stacklevel=3,
+        )
+
 
 def build_observed_density_cache(
     catalog: GalaxyCatalog,
     *,
-    batch_size: int = 512,
+    batch_size: int | None = None,
 ) -> ObservedDensityCache:
     """Precompute the theta-independent observed count KDE row-for-row.
 
     The even-split/padded batching is numerically inert and mirrors the mature
     legacy cache builder while using compact row ids directly.  No dense global
-    pixel lookup is constructed.
+    pixel lookup is constructed.  Each batch forms a ``(rows, N_z, N_max)``
+    float64 kernel before its sum, so without a ``batch_size`` the rows per
+    batch are sized from ``OBSERVED_DENSITY_BATCH_BYTES`` (at most 512, the
+    legacy batch, and at least 1).
+
+    The catalog is checked first (:func:`_row_count_ratio_checks`): real
+    galaxies more than ``ROW_KDE_WIDTHS_BELOW_ZERO_MAX`` kernel widths below
+    ``z = 0`` raise ``ValueError``, and rows too sparse for the clip warn.
     """
 
     n_rows = int(np.shape(catalog.zgals)[0])
@@ -222,6 +318,12 @@ def build_observed_density_cache(
     if n_rows == 0:
         return ObservedDensityCache(jnp.asarray(out))
 
+    _row_count_ratio_checks(catalog)
+    if batch_size is None:
+        per_row = int(zgrid.size) * max(1, int(np.shape(catalog.zgals)[1])) * 8
+        batch_size = max(
+            1, min(_OBSERVED_DENSITY_BATCH_MAX, OBSERVED_DENSITY_BATCH_BYTES // per_row)
+        )
     requested = max(1, min(int(batch_size), n_rows))
     n_chunks = -(-n_rows // requested)
     block = -(-n_rows // n_chunks)
