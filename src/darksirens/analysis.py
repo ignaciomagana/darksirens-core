@@ -65,8 +65,9 @@ CATALOG_SKY_WEIGHTINGS = ("conditional", "field")
 FIELD_NORMALIZER_SETTINGS = ("auto", "direct", "moments")
 #: Completeness of one catalog of a field-weighted analysis (``model(...,
 #: catalog_sky_weighting="field", completeness=...)``, one value or one per
-#: catalog): the per-row count ratio, the magnitude-selection curve, or a
-#: complete catalog (every host is in it).
+#: catalog): the count ratio (its estimator set by ``model(...,
+#: count_ratio=...)``), the magnitude-selection curve, or a complete catalog
+#: (every host is in it).
 FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
 #: Settings of ``model(..., host_mass=...)``: what a sky row's host mass is
 #: under the field weighting. ``"count"`` (the default) is the row's galaxy
@@ -166,8 +167,8 @@ class FieldCatalogMixtureRedshift:
 
     ``components`` are the catalogs in order (catalog ``k + 1`` of the
     labels' ``_c{k+1}`` suffix). ``completeness`` is one of
-    :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the per-row count
-    ratio; ``"selection"``; ``"complete"``) when every catalog has the same
+    :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the count ratio of
+    ``count_ratio``; ``"selection"``; ``"complete"``) when every catalog has the same
     one, else a tuple with one entry per catalog. ``n0_units`` is the unit of
     every ``log10n0``. ``normalizer`` is the resolved form of the catalogs'
     survey-global normalisers (``"direct"`` or ``"moments"``, see
@@ -278,9 +279,11 @@ class ParameterPlan:
     ``n0_units`` records ``model(..., n0_units=...)`` for an incomplete-catalog
     analysis (``"physical"`` otherwise).
     ``kernel_pin`` records ``model(..., kernel_pin=...)`` (``"auto"`` or
-    ``"off"``) and ``kernel_pin_active`` whether it applies: an
+    ``"off"``) and ``kernel_pin_active`` whether it applies: a conditional
     incomplete-catalog analysis under ``"auto"`` that samples none of
-    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``. The bound likelihood of
+    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``, or a field-weighted
+    analysis under ``"auto"`` with any catalog pinned (complete catalogs
+    included; :func:`catalog_kernel_pins_active`). The bound likelihood of
     such a plan evaluates the catalog kernel quadrature once, at bind time.
     ``catalog_model`` is the canonical JSON text of the catalog model's
     non-default settings (for example ``completeness="selection"`` and its
@@ -468,15 +471,30 @@ def _count_ratio_window(count_ratio, window):
                 "legacy estimator's (count_ratio='row') kernel width is fixed at 0.05"
             )
         return None
-    from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
+    from numbers import Real
+
+    import numpy as np
+
+    from darksirens.catalog.completeness import POOLED_BIN_WIDTH, POOLED_WINDOW_DEFAULT
 
     if window is None:
         return POOLED_WINDOW_DEFAULT
-    if isinstance(window, bool) or not isinstance(window, (int, float)):
+    if isinstance(window, (bool, np.bool_)) or not isinstance(window, Real):
         raise TypeError(f"count_ratio_window must be a number, got {window!r}")
     window = float(window)
     if not 0.0 < window < float("inf"):
         raise ValueError(f"count_ratio_window must be finite and > 0, got {window!r}")
+    if window < POOLED_BIN_WIDTH:
+        # The galaxies enter in redshift bins of POOLED_BIN_WIDTH and the
+        # kernel is evaluated at the bin centres: narrower than a bin, a
+        # redshift node between two centres sees no galaxy at all.
+        raise ValueError(
+            f"count_ratio_window must be at least the pooled histogram's bin "
+            f"width {POOLED_BIN_WIDTH:g}, got {window!r}: the galaxies are "
+            "binned at that width, and a narrower kernel evaluated at the "
+            "redshift nodes depends on where they fall between bin centres "
+            "(about half the nodes see no galaxy)"
+        )
     return window
 
 
@@ -522,12 +540,17 @@ def _resolve_redshift(
             f"catalog={'None' if catalog is None else 'set'} and "
             f"completeness={completeness!r}"
         )
-    if selection is not None and completeness != "selection" or (
-        row_fraction is not None and completeness != "selection" and not pooled
-    ):
+    if selection is not None and completeness != "selection":
         raise ValueError(
-            "selection and row_fraction apply only to completeness='selection', got "
+            "selection applies only to completeness='selection', got "
             f"completeness={completeness!r}"
+        )
+    if row_fraction is not None and completeness != "selection" and not pooled:
+        raise ValueError(
+            "row_fraction applies only to completeness='selection' and to the "
+            "pooled count ratio (count_ratio='pooled', the default of "
+            f"completeness='incomplete'), got completeness={completeness!r} and "
+            f"count_ratio={count_ratio!r}"
         )
     if n0_units is not None:
         if n0_units not in N0_UNITS_SETTINGS:
@@ -699,8 +722,8 @@ def _resolve_mixture(
             where = f" for catalog {k + 1}" if per_catalog else ""
             raise ValueError(
                 "catalog_sky_weighting='field' supports completeness='incomplete' (the "
-                "per-row count ratio), 'selection' or 'complete'"
-                f"{where}, got completeness={entry!r}"
+                "count ratio, its estimator set by count_ratio), 'selection' or "
+                f"'complete'{where}, got completeness={entry!r}"
             )
     resolved = tuple(entry or "incomplete" for entry in entries)
     count_ratio, count_ratio_window = _default_count_ratio(
@@ -725,6 +748,14 @@ def _resolve_mixture(
                 )
     if n0_units is not None and n0_units not in N0_UNITS_SETTINGS:
         raise ValueError(f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}")
+    if n0_units is not None and not any(c in ("incomplete", "selection") for c in resolved):
+        # As for one conditional catalog: with every catalog complete there is
+        # no log10n0 for the unit to apply to.
+        raise ValueError(
+            "n0_units applies only to an incomplete-catalog analysis (a catalog "
+            "with completeness='incomplete' or 'selection'), got "
+            f"completeness={completeness!r}: a complete catalog has no log10n0"
+        )
     per_catalog_normalizer = isinstance(field_normalizer, (list, tuple))
     if per_catalog_normalizer:
         settings = tuple(field_normalizer)
@@ -760,13 +791,17 @@ def _resolve_mixture(
     import numpy as np
 
     fractions = _per_catalog(row_fraction, n, "row_fraction", (np.ndarray,))
-    if "selection" not in resolved and (
-        any(s is not None for s in selections)
-        or (not pooled and any(f is not None for f in fractions))
-    ):
+    if "selection" not in resolved and any(s is not None for s in selections):
         raise ValueError(
-            "selection and row_fraction apply only to completeness='selection', got "
+            "selection applies only to completeness='selection', got "
             f"completeness={completeness!r}"
+        )
+    if "selection" not in resolved and not pooled and any(f is not None for f in fractions):
+        raise ValueError(
+            "row_fraction applies only to completeness='selection' and to the "
+            "pooled count ratio (count_ratio='pooled', the default of "
+            f"completeness='incomplete'), got completeness={completeness!r} and "
+            f"count_ratio={count_ratio!r}"
         )
     if n >= 2:
         for k, store in enumerate(catalogs):
@@ -796,9 +831,10 @@ def _resolve_mixture(
             or (frac is not None and not (pooled and comp == "incomplete"))
         ):
             raise ValueError(
-                f"catalog {k + 1} runs completeness={comp!r}: selection and "
-                "row_fraction apply only to completeness='selection'; give None "
-                "for its entry"
+                f"catalog {k + 1} runs completeness={comp!r}: selection applies "
+                "only to completeness='selection', and row_fraction to it and to "
+                "the pooled count ratio (count_ratio='pooled' with "
+                "completeness='incomplete'); give None for its entry"
             )
         fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
         try:
@@ -1484,9 +1520,11 @@ def catalog_kernel_pins_active(redshift, sampled_labels, setting="auto") -> tupl
 def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     """Whether the bound likelihood pins the catalog kernel at bind time.
 
-    True for an incomplete-catalog analysis under ``setting="auto"`` whose
-    sampled labels include none of ``Om0``, ``w0``, ``wa``, ``delta``,
-    ``sigma_kde``: the kernel's redshift dependence is then fixed up to the
+    True for a conditional incomplete-catalog analysis under
+    ``setting="auto"`` whose sampled labels include none of ``Om0``, ``w0``,
+    ``wa``, ``delta``, ``sigma_kde``, and for a field-weighted analysis with
+    any catalog pinned (:func:`catalog_kernel_pins_active`, which pins a
+    complete catalog too): the kernel's redshift dependence is then fixed up to the
     scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never values,
     as legacy's ``kernel_pin_admissible`` does
     (``likelihood/factory.py:1031-1052``, which also restricts the pin to
@@ -1606,10 +1644,13 @@ def model(
     quadrature. The plan records the setting and whether the
     pin applies (``ParameterPlan.kernel_pin``,
     ``ParameterPlan.kernel_pin_active``). It has no effect on spectral,
-    bright-siren or complete-catalog analyses.
+    bright-siren or conditional complete-catalog analyses. Under
+    ``catalog_sky_weighting="field"`` it applies to every catalog, complete
+    ones included (see below), whose value then differs from
+    ``kernel_pin="off"`` by rounding.
 
     ``completeness="selection"`` (opt-in) completes an incomplete catalog with
-    an explicit magnitude-selection model instead of the per-row count ratio:
+    an explicit magnitude-selection model instead of the count ratio:
     ``selection`` is a :class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
     a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, or
     its runtime payload mapping (``darksirens-catalog-selection-1.0``, as
@@ -1626,8 +1667,10 @@ def model(
     samples them; ``m_lim``, ``M_faint_offset`` and the K-correction are never
     sampled. The plan records the selection model and the row fraction's
     digest (``ParameterPlan.catalog_model``) and a run fingerprint changes with
-    them. ``selection`` and ``row_fraction`` are refused with any other
-    completeness.
+    them. ``selection`` is refused with any other completeness, and
+    ``row_fraction`` with any other except the pooled count ratio
+    (``count_ratio="pooled"``, the default of ``completeness="incomplete"``,
+    whose rows it covers the same way; see ``count_ratio`` below).
 
     ``selection`` may instead be a
     :class:`~darksirens.selection.catalog.TabulatedSelection` (payload family
@@ -1661,7 +1704,8 @@ def model(
     divided by catalog k's full-sky total ``Z_k``, for PE and selection
     samples alike. ``completeness`` is one value for every catalog or a list
     with one entry per catalog (for example ``["incomplete", "selection"]``):
-    ``"incomplete"`` (``None``; the per-row count ratio), ``"selection"`` (the
+    ``"incomplete"`` (``None``; the count ratio, its estimator set by
+    ``count_ratio``), ``"selection"`` (the
     magnitude-selection curve) or ``"complete"`` (the catalog holds every
     host: ``n_k = N_obs,p p_cat(z | p)``, no missing hosts and no survey
     depth, and ``Z_k = sum_p N_obs,p``, the frozen reference's field
@@ -1684,7 +1728,8 @@ def model(
     for the count ratio, the only exact form there, and for a complete
     catalog (its galaxy count). The kernel pin applies per catalog (to its
     compact rows and, with a survey depth, its full sky) when ``Om0``,
-    ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed. The plan
+    ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed, whatever
+    the catalog's completeness: a complete catalog is pinned too. The plan
     records the weighting, completeness, number of catalogs, normaliser,
     per-catalog pin activity and selection payloads in
     ``ParameterPlan.catalog_model``; the completeness and the normaliser are
@@ -1727,7 +1772,11 @@ def model(
     ``completeness="selection"`` does with a fitted curve
     (:func:`~darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
     ``count_ratio_window`` is its Gaussian width in redshift (default 0.02;
-    refused with ``"row"``; a window alone asks for ``"pooled"``). The catalog
+    refused with ``"row"``; a window alone asks for ``"pooled"``): any real
+    number, at least the galaxy histogram's bin width
+    (:data:`~darksirens.catalog.completeness.POOLED_BIN_WIDTH`, 1e-4), below
+    which the kernel at the redshift nodes depends on where they fall
+    between the bin centres and is refused. The catalog
     is one completeness cell: a catalog whose depth varies over the sky must
     be given as one catalog per depth (``catalog_sky_weighting="field"``, each
     with its ``row_fraction``). Binding refuses a window that holds fewer than

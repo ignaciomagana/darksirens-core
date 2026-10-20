@@ -516,12 +516,14 @@ def test_the_plan_records_the_pooled_estimator_and_its_window(weighting):
               completeness="complete", fixed_survey=None, n0_units=None),
          ValueError, "applies only to the count-ratio completeness"),
         (dict(catalog=A, count_ratio="row", row_fraction=np.ones(48)), ValueError,
-         "selection and row_fraction apply only to completeness='selection'"),
+         "row_fraction applies only to completeness='selection' and to the pooled "
+         r"count ratio \(count_ratio='pooled'"),
         (dict(catalog=A, count_ratio="row", catalog_sky_weighting="field",
               row_fraction=np.ones(48)), ValueError,
-         "selection and row_fraction apply only to completeness='selection'"),
+         "row_fraction applies only to completeness='selection' and to the pooled "
+         r"count ratio \(count_ratio='pooled'"),
         (dict(catalog=A, count_ratio="pooled", selection=SEL), ValueError,
-         "selection and row_fraction apply only to completeness='selection'"),
+         "selection applies only to completeness='selection'"),
         (dict(catalog=A, count_ratio="pooled", row_fraction=np.ones(7)), ValueError,
          "one value per catalog row"),
         (dict(catalog=[A, B], count_ratio="pooled", catalog_sky_weighting="field",

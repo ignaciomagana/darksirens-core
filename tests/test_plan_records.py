@@ -121,6 +121,84 @@ def test_the_recorded_set_is_every_angular_model_whose_coordinates_are_shared():
 
 
 # ---------------------------------------------------------------------------
+# The pooled count ratio's window
+
+
+@pytest.mark.parametrize(
+    "window, expected",
+    [
+        (np.float32(0.02), float(np.float32(0.02))),
+        (np.float64(0.02), 0.02),
+        (np.int64(1), 1.0),
+        (0.02, 0.02),
+    ],
+)
+def test_count_ratio_window_accepts_any_real_number(window, expected):
+    # The review's scenario: a window read from a config array or an HDF5
+    # attribute (np.float32, np.int64) was refused as "not a number".
+    analysis = ds.model(cosmology=COSMOLOGY, population=FIXED_POP, catalog=_catalog(),
+                        count_ratio_window=window)
+    assert analysis.redshift.count_ratio == "pooled"
+    assert analysis.redshift.count_ratio_window == expected
+    assert type(analysis.redshift.count_ratio_window) is float
+
+
+@pytest.mark.parametrize("window", [True, np.bool_(True), "0.02", 1j])
+def test_count_ratio_window_refuses_what_is_not_a_number(window):
+    with pytest.raises(TypeError, match="count_ratio_window must be a number"):
+        ds.model(cosmology=COSMOLOGY, population=FIXED_POP, catalog=_catalog(),
+                 count_ratio_window=window)
+
+
+def test_count_ratio_window_below_the_histogram_bin_is_refused():
+    # The review's scenario: window=1e-5 passed every check, and about half
+    # the redshift nodes fell between bin centres and saw no galaxy (R ~ 0).
+    from darksirens.catalog.completeness import POOLED_BIN_WIDTH
+
+    for window in (1e-5, 0.5 * POOLED_BIN_WIDTH):
+        with pytest.raises(ValueError, match="at least the pooled histogram's bin width"):
+            ds.model(cosmology=COSMOLOGY, population=FIXED_POP, catalog=_catalog(),
+                     count_ratio_window=window)
+    at_the_bin = ds.model(cosmology=COSMOLOGY, population=FIXED_POP, catalog=_catalog(),
+                          count_ratio_window=POOLED_BIN_WIDTH)
+    assert at_the_bin.redshift.count_ratio_window == POOLED_BIN_WIDTH
+
+
+# ---------------------------------------------------------------------------
+# Field-weighted options of complete catalogs
+
+
+def test_n0_units_is_refused_for_an_all_complete_field_mixture():
+    # The review's scenario: accepted and fingerprinted although no catalog
+    # has a log10n0, while the conditional complete catalog refuses it.
+    kwargs = dict(cosmology=COSMOLOGY, population=FIXED_POP, catalog_sky_weighting="field")
+    for catalog in ([_catalog("a.h5"), _catalog("b.h5")], _catalog()):
+        with pytest.raises(ValueError, match="n0_units applies only to an incomplete-catalog"):
+            ds.model(**kwargs, catalog=catalog, completeness="complete", n0_units="h_scaled")
+    with pytest.raises(ValueError, match="n0_units applies only to an incomplete-catalog"):
+        ds.model(cosmology=COSMOLOGY, population=FIXED_POP, catalog=_catalog(),
+                 completeness="complete", n0_units="h_scaled")
+    mixed = ds.model(**kwargs, catalog=[_catalog("a.h5"), _catalog("b.h5")],
+                     completeness=["incomplete", "complete"], count_ratio="row",
+                     n0_units="h_scaled")
+    assert mixed.parameters.n0_units == "h_scaled"
+    assert "log10n0" in mixed.parameters.labels
+
+
+def test_the_kernel_pin_applies_to_a_field_weighted_complete_catalog_only():
+    fixed = dict(cosmology=ds.Cosmology(H0=(20.0, 140.0), Om0=0.3075, w0=-1.0, wa=0.0),
+                 population=FIXED_POP, catalog=_catalog(), completeness="complete",
+                 fixed_survey={"delta": 0.0, "sigma_kde": 0.01})
+    conditional = ds.model(**fixed)
+    field = ds.model(**fixed, catalog_sky_weighting="field")
+    assert conditional.parameters.kernel_pin_active is False
+    assert field.parameters.kernel_pin_active is True
+    assert field.parameters.catalog_model_settings["kernel_pin_active"] == [True]
+    off = ds.model(**fixed, catalog_sky_weighting="field", kernel_pin="off")
+    assert off.parameters.kernel_pin_active is False
+
+
+# ---------------------------------------------------------------------------
 # Partially fixed joint prior pairs
 
 _GWTC5 = "gwtc5_fiducial_bpl2peaks"
