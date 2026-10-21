@@ -23,7 +23,7 @@ from darksirens.inference.run_fingerprint import (
 from darksirens.inference.target import InferenceTarget, combine_parameter_plans
 from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
-from .hierarchical import _ordinary_hierarchical_likelihood
+from .hierarchical import _ordinary_hierarchical_likelihood, _require_ndraw_covers_injections
 
 
 class RedshiftModel(Protocol):
@@ -227,6 +227,9 @@ def make_host_density_target(
         raise ValueError("base_analysis must be catalog-free SpectralRedshift")
     if not isinstance(gw_pe, GWEvent) or not isinstance(gw_selection, GWEvent):
         raise TypeError("gw_pe and gw_selection must be darksirens.gw.GWEvent objects")
+    # The target's jit traces the injections, where the reducer cannot count
+    # them; they are concrete here.
+    _require_ndraw_covers_injections(gw_selection, n_draw)
 
     extension_plan = _parameter_spec(redshift_model)
     combined_plan = combine_parameter_plans(
