@@ -52,7 +52,9 @@ def classify_guard(diagnostics, n_events, max_likelihood_variance):
     (a NaN fires it, as in the likelihood). It is ``"selection_neff"`` when
     ``n_eff`` fails the bound with no PE variance at all, and
     ``"pe_mc_variance"`` when it would pass that bound, i.e. when the
-    per-event PE variances used up the budget.
+    per-event PE variances used up the budget (always so when they exhaust it,
+    i.e. come within ``1e-12`` of ``max_likelihood_variance`` or exceed it,
+    whatever ``n_eff`` is).
     """
     from darksirens.selection.gw import _MIN_VARIANCE_BUDGET
 
@@ -61,7 +63,8 @@ def classify_guard(diagnostics, n_events, max_likelihood_variance):
     n_eff = float(np.asarray(diagnostics.n_eff, dtype=float))
     cap = float(max_likelihood_variance)
     budget = max(cap - pe_variance, _MIN_VARIANCE_BUDGET)
-    if not math.isnan(budget) and n_eff > max(5.0 * n, n * n / budget):
+    exhausted = budget <= _MIN_VARIANCE_BUDGET
+    if not math.isnan(budget) and not exhausted and n_eff > max(5.0 * n, n * n / budget):
         return None
     if n_eff > max(5.0 * n, n * n / max(cap, _MIN_VARIANCE_BUDGET)):
         return "pe_mc_variance"

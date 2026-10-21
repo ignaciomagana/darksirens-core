@@ -386,6 +386,48 @@ def test_event_block_check_skips_what_it_cannot_judge():
     assert errors == [] and len(cautions) == 1
 
 
+def _alike_sorted_events(nobs, nsamp, seed=0):
+    """Events drawn from one posterior, each event's samples sorted by dL."""
+    rng = np.random.default_rng(seed)
+    n = nobs * nsamp
+    columns = {
+        "m1det": 35.0 * np.exp(rng.normal(0.0, 0.05, n)),
+        "dL": 700.0 * np.exp(rng.normal(0.0, 0.12, n)),
+        "ra": rng.uniform(1.0, 1.3, n),
+        "dec": rng.uniform(-0.2, 0.1, n),
+    }
+    order = np.argsort(columns["dL"].reshape(nobs, nsamp), axis=1)
+    return {
+        name: np.take_along_axis(values.reshape(nobs, nsamp), order, axis=1).ravel()
+        for name, values in columns.items()
+    }
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(64, 2048), (32, 32)])
+def test_alike_events_sorted_inside_each_event_only_warn(nobs, nsamp):
+    # Reading rows i, i + nobs, ... picks the same dL ranks out of every
+    # sorted event, which separates beyond chance; the layout is still valid.
+    errors, cautions = event_block_problems(_alike_sorted_events(nobs, nsamp), nobs, nsamp)
+    assert errors == []
+    (message,) = cautions
+    assert f"no column separates the {nobs} declared event blocks" in message
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(8, 64), (64, 2048)])
+def test_sample_major_order_is_an_error_when_nobs_divides_nsamp(nobs, nsamp):
+    # Here every rank of an event lands in one sample-major group, so the
+    # sorted-event comparison is live; distinct events must still be caught.
+    pe, _ = gw_stores(n_events=nobs, nsamp=nsamp)
+    sample_major = np.arange(nobs * nsamp).reshape(nobs, nsamp).T.ravel()
+    errors, _ = event_block_problems(
+        {name: np.asarray(values)[sample_major] for name, values in pe.columns.items()},
+        nobs,
+        nsamp,
+    )
+    (message,) = errors
+    assert "interleaved across events" in message
+
+
 def test_load_events_checks_the_event_blocks(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -640,3 +682,86 @@ def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         check_kernels_below_zero(edge, 0.01, 0.01)
+
+
+# ---------------------------------------------------------------------------
+# A draw count below the number of detected injections: 1/N_eff = S2/S^2 -
+# 1/n_draw went negative, its round-off clamp made N_eff = +inf, and every
+# reliability guard passed (the HDF5 loader refused it; in-memory stores and
+# the likelihood seams did not).
+
+
+def test_bind_refuses_ndraw_below_the_detected_injections():
+    from dataclasses import replace
+
+    analysis = ds.model(cosmology=COSMOLOGY, population=POPULATION)
+    short = replace(INJECTIONS, ndraw=INJECTIONS.n_injections // 4)
+    with pytest.raises(ValueError, match="ndraw=192 is smaller than its 768 detected injections"):
+        bind_analysis(analysis, events=EVENTS, injections=short)
+    # Every injection detected (a no-selection mock) is legal.
+    bind_analysis(analysis, events=EVENTS, injections=replace(INJECTIONS, ndraw=INJECTIONS.n_injections))
+
+
+class _VolumeRedshift:
+    """A host-density extension with no parameters: the comoving-volume prior."""
+
+    def parameter_spec(self):
+        from darksirens.analysis import ParameterPlan
+
+        return ParameterPlan(labels=(), lower=(), upper=(), prior_kinds=(), joint_constraints=())
+
+    def log_density(self, z, pixel, cosmology, parameters, state):
+        from darksirens.cosmology.volume import log_comoving_volume_prior
+
+        return log_comoving_volume_prior(z, cosmology)
+
+    def log_auxiliary_likelihood(self, parameters, state):
+        return 0.0
+
+
+def _spectral_seam(pe, sel, n_draw):
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.likelihood.hierarchical import spectral_siren_log_likelihood
+    from darksirens.population import get_fixed_population_params
+
+    return spectral_siren_log_likelihood(
+        CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0),
+        jnp.asarray(get_fixed_population_params(MODEL)),
+        pe, sel, EVENTS.n_events, EVENTS.nsamp, n_draw,
+        pop_model=MODEL, max_likelihood_variance=1.0e6,
+    )
+
+
+def _host_density_seam(pe, sel, n_draw):
+    # The ordinary reducer (_validate_hierarchy_inputs) behind a host-density
+    # companion's sampler target, jitted as a sampler runs it: the injections
+    # are concrete constants of the traced program.
+    from darksirens.likelihood.host_density import make_host_density_target
+
+    target = make_host_density_target(
+        ds.model(cosmology=COSMOLOGY, population=POPULATION),
+        redshift_model=_VolumeRedshift(),
+        gw_pe=pe, gw_selection=sel, pe_state=None, selection_state=None,
+        n_events=EVENTS.n_events, nsamp=EVENTS.nsamp, n_draw=n_draw,
+        max_likelihood_variance=1.0e6,
+    )
+    plan = target.parameters
+    theta = 0.5 * (np.asarray(plan.lower, dtype=float) + np.asarray(plan.upper, dtype=float))
+    return jax.jit(target.log_likelihood)(jnp.asarray(theta))
+
+
+@pytest.mark.parametrize("seam", [_spectral_seam, _host_density_seam])
+def test_likelihood_seams_refuse_ndraw_below_the_live_injections(seam):
+    from darksirens.gw.runtime import make_gw_event
+
+    def event(store):
+        c = store.columns
+        return make_gw_event(
+            m1det=c["m1det"], m2det=c["m2det"], dL=c["dL"], chieff=c["chieff"],
+            prior_wt=store.prior_wt, pixels=np.zeros(len(c["dL"]), dtype=np.int32),
+        )
+
+    pe, sel = event(EVENTS), event(INJECTIONS)
+    with pytest.raises(ValueError, match="n_draw=192.0 is smaller than the 768 live"):
+        seam(pe, sel, 192.0)
+    assert np.isfinite(float(seam(pe, sel, 768.0)))

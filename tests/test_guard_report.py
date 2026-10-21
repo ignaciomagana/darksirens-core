@@ -37,6 +37,12 @@ def test_classify_guard_names_the_guard_that_fired():
     assert verdict(0.0, float("nan")) == "selection_neff"
     assert verdict(float("nan"), 1.0e6) == "pe_mc_variance"
     assert verdict(0.0, float("inf")) is None
+    # Over budget from the PE variance alone, whatever N_eff is.
+    assert verdict(3.0, 1.0e15) == "pe_mc_variance"
+    assert verdict(3.0, float("inf")) == "pe_mc_variance"
+    assert verdict(1.0, float("inf")) == "pe_mc_variance"
+    # Within 1e-12 of the cap the threshold has saturated: exhausted too.
+    assert verdict(1.0 - 5.0e-13, float("inf")) == "pe_mc_variance"
 
 
 def test_classify_guard_agrees_with_the_hard_guard():
@@ -52,6 +58,17 @@ def test_classify_guard_agrees_with_the_hard_guard():
             max_likelihood_variance=cap, pe_variance_sum=jnp.asarray(pe),
         )
         assert guarded == (not np.isfinite(float(value))), (n, cap, pe, n_eff)
+    # The exhausted budget, where N_eff = +inf or 1e13 passes the saturated
+    # threshold, and its edge.
+    for cap in (1.0, 0.01):
+        for pe in (cap - 5.0e-13, cap, 3.0 * cap, cap - 1.0e-9):
+            for n_eff in (1.0e13, float("inf")):
+                guarded = classify_guard(Record(0.0, np.array([pe]), n_eff), 2, cap) is not None
+                value = selection_log_correction(
+                    jnp.asarray(0.0), jnp.asarray(n_eff), 2,
+                    max_likelihood_variance=cap, pe_variance_sum=jnp.asarray(pe),
+                )
+                assert guarded == (not np.isfinite(float(value))), (cap, pe, n_eff)
 
 
 class _FakeBound:

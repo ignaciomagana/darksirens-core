@@ -1340,6 +1340,13 @@ def bind_analysis(
         raise ValueError("events store must contain at least one event and sample")
     if injections.ndraw <= 0:
         raise ValueError("selection store ndraw must be positive")
+    n_live = int(np.count_nonzero(np.asarray(injections.prior_wt) > 0.0))
+    if injections.ndraw < n_live:
+        raise ValueError(
+            f"selection store ndraw={injections.ndraw} is smaller than its {n_live} "
+            "detected injections; ndraw counts every generated injection, so the "
+            "detected set and the draw count come from different campaigns"
+        )
 
     if isinstance(analysis.redshift, SpectralRedshift):
         pe_pixels = np.zeros_like(np.asarray(events.columns["dL"]), dtype=np.int32)

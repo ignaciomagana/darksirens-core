@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from darksirens.cosmology.distances import (
     dL_of_z,
@@ -120,6 +122,7 @@ def spectral_siren_log_likelihood(
         raise ValueError(f"nsamp must be >= 1, got {nsamp}")
     if n_draw <= 0:
         raise ValueError(f"n_draw must be positive, got {n_draw}")
+    _require_ndraw_covers_injections(gw_sel, n_draw)
 
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
@@ -231,7 +234,26 @@ def spectral_siren_log_likelihood(
     return total
 
 
-def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw):
+def _require_ndraw_covers_injections(gw_sel, n_draw):
+    """Refuse ``n_draw`` below the number of live detected injections.
+
+    ``1/N_eff = S2/S^2 - 1/n_draw`` is clamped at zero for round-off, so a
+    draw count smaller than the detected set turns a materially negative value
+    into ``N_eff = +inf``, which passes every reliability guard and drops the
+    Farr correction. Checked when the inputs are concrete (not traced).
+    """
+    valid, prior_wt = gw_sel.valid, gw_sel.prior_wt
+    if any(isinstance(v, jax.core.Tracer) for v in (valid, prior_wt, n_draw)):
+        return
+    n_live = int(np.count_nonzero(np.asarray(valid) & (np.asarray(prior_wt) > 0.0)))
+    if float(n_draw) < n_live:
+        raise ValueError(
+            f"n_draw={n_draw} is smaller than the {n_live} live detected injections; "
+            "n_draw counts every generated injection (detected or not)"
+        )
+
+
+def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw, gw_sel):
     pop_params = jnp.asarray(pop_params)
     if pop_params.ndim == 0 or int(pop_params.shape[0]) == 0:
         raise ValueError(f"empty pop_params for {pop_model!r}")
@@ -241,6 +263,7 @@ def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw):
         raise ValueError(f"nsamp must be >= 1, got {nsamp}")
     if n_draw <= 0:
         raise ValueError(f"n_draw must be positive, got {n_draw}")
+    _require_ndraw_covers_injections(gw_sel, n_draw)
     return pop_params
 
 
@@ -315,7 +338,7 @@ def _ordinary_hierarchical_likelihood(
     """
 
     pop_params = _validate_hierarchy_inputs(
-        pop_params, pop_model, n_events, nsamp, n_draw
+        pop_params, pop_model, n_events, nsamp, n_draw, gw_sel
     )
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
@@ -708,7 +731,7 @@ def bright_siren_log_likelihood(
     )
 
     pop_params = _validate_hierarchy_inputs(
-        pop_params, pop_model, n_events, nsamp, n_draw
+        pop_params, pop_model, n_events, nsamp, n_draw, gw_sel
     )
     counterparts = tuple(counterparts)
     if len(counterparts) != n_events:

@@ -307,6 +307,18 @@ def event_block_problems(
     sample-major reading (event ``i`` is rows ``i, i + nobs, ...``) does
     separate them beyond chance, and a warning otherwise (a store of
     near-identical events is legitimate).
+
+    Order inside an event carries no meaning, but it moves the sample-major
+    reading: in a store of alike events each sorted (say by ``dL``), reading
+    ``i, i + nobs, ...`` picks the same ranks out of every event and separates
+    beyond chance. The sample-major reading is therefore an error only when it
+    separates the blocks ``EVENT_BLOCK_MIN_RATIO`` times more than the same
+    column sorted inside every declared block does (and at least that ratio);
+    a column whose declared blocks repeat one event row for row fits both
+    readings and is not judged. Sorting is a reference point, not a bound: a
+    contrived order inside each event can still be refused, and when ``nobs``
+    shares large factors with ``nsamp`` real interleaving of weakly separated
+    events only warns.
     """
     if nobs < 2 or nsamp < 2:
         return [], []
@@ -328,10 +340,21 @@ def event_block_problems(
         f"interchangeable rows: {found})"
     )
     for name in ratios:
-        strided = np.asarray(columns[name]).reshape(nsamp, nobs).T
+        values = np.asarray(columns[name], dtype=np.float64)
+        blocks = values.reshape(nobs, nsamp)
+        if np.array_equal(blocks, np.broadcast_to(blocks[:1], blocks.shape)):
+            continue
+        strided = values.reshape(nsamp, nobs).T
         ratio = _block_separation(strided, nobs, nsamp)
         chance = float(f_distribution.sf(ratio, nobs - 1, nobs * (nsamp - 1)))
-        if ratio >= EVENT_BLOCK_MIN_RATIO and chance < EVENT_BLOCK_MAX_CHANCE:
+        if ratio < EVENT_BLOCK_MIN_RATIO or chance >= EVENT_BLOCK_MAX_CHANCE:
+            continue
+        # The strided signal that sorting inside each event makes: the common
+        # order the rule exempts, not the largest an order inside an event can
+        # make (one that puts the top ranks at rows 0 mod nobs separates more).
+        ranked = np.sort(blocks, axis=1).reshape(nsamp, nobs).T
+        by_order = _block_separation(ranked, nobs, nsamp)
+        if ratio >= EVENT_BLOCK_MIN_RATIO * max(by_order, 1.0):
             return [
                 f"{summary}, while reading event i as rows i, i + nobs, ... does "
                 f"({name}: {ratio:.3g}); the samples are interleaved across events, "
