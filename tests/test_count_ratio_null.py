@@ -9,8 +9,11 @@ that null at fixed ``n0`` (``h_scaled`` at the truth) over H0 = 25 to 100:
 - spectroscopic redshifts under the default (pooled) count ratio: flat;
 - photometric redshifts (0.03 (1 + z)) under the default: not flat, because
   galaxies scattered toward z = 0 push the pooled ratio of point redshifts
-  above 1 there and the clip removes the missing hosts (the test can fail on
-  that defect: it shipped as the default in #68 with the suite green);
+  above 1 there and the clip removes the missing hosts. That is a known defect
+  of the default (it shipped in #68 with the suite green). Its test asserts
+  the null and is an expected failure: it records the measured spread
+  (``default_null_spread_nats`` in the test report) and passes, without
+  failing the suite, the day the default is fixed;
 - photometric redshifts under ``count_ratio="pooled_kernel"``: flat.
 
 Shot noise of the difference over four pairs of catalog and GW seeds: a
@@ -47,10 +50,8 @@ H0_TRUE = 70.0
 OM0 = 0.3075
 LOG10N0 = -3.6  # h^3 Mpc^-3 (n0_units="h_scaled")
 H0S = (25.0, 30.0, 40.0, 55.0, 70.0, 85.0, 100.0)
-#: Spread of ln L_cat - ln L_spec over H0S below which the null holds, and
-#: above which the photometric default fails it.
+#: Spread of ln L_cat - ln L_spec over H0S below which the null holds.
 FLAT = 1.5
-BROKEN = 3.0
 POPULATION = Population(MODEL, fixed=FIXED_POPULATION)
 COSMOLOGY = ds.Cosmology(H0=(20.0, 140.0), Om0=OM0)
 EVENTS, INJECTIONS = gw_stores(seed=3, n_events=24, nsamp=64, n_sel=2000)
@@ -126,12 +127,31 @@ def test_the_null_holds_with_spectroscopic_redshifts_by_default(spectral):
     assert np.ptp(diff) < FLAT, diff
 
 
-def test_the_photometric_null_fails_by_default_and_holds_with_kernel_counts(spectral):
-    photo = _store(0.03)
-    default = _null(spectral, photo)
-    assert np.ptp(default) > BROKEN, default
-    kernel = _null(spectral, photo, count_ratio="pooled_kernel")
+@pytest.fixture(scope="module")
+def photometric():
+    return _store(0.03)
+
+
+def test_the_photometric_null_holds_with_kernel_counts_conditional(
+    spectral, photometric
+):
+    kernel = _null(spectral, photometric, count_ratio="pooled_kernel")
     assert np.ptp(kernel) < FLAT, kernel
+
+
+@pytest.mark.xfail(
+    reason=(
+        "known defect of the default pooled count ratio with photometric redshifts: "
+        "galaxies scattered toward z = 0 push the pooled ratio of point redshifts "
+        "above 1 and the clip removes the missing hosts (spread 5.3 to 8.0 nats over "
+        "four seed pairs); count_ratio='pooled_kernel' holds the null"
+    ),
+    strict=False,
+)
+def test_the_photometric_null_holds_by_default(spectral, photometric, record_property):
+    default = _null(spectral, photometric)
+    record_property("default_null_spread_nats", float(np.ptp(default)))
+    assert np.ptp(default) < FLAT, default
 
 
 @pytest.mark.slow
