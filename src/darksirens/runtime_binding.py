@@ -575,6 +575,12 @@ class BoundAnalysis:
         ``selection_log_correction``): the same likelihood function evaluated
         with ``return_diagnostics=True``, in its own jitted program, built on
         the first call. :meth:`__call__` and its program are untouched.
+        For a one-catalog field analysis (``catalog_sky_weighting="field"``)
+        under the hard guard, ``log_mu`` and every ``event_log_evidence`` are
+        unnormalised, each offset by ``+log Z_1``, which cancels from the
+        likelihood; under the soft guard (``selection_neff_soft_guard=True``)
+        the density is ``n_1 / Z_1`` and they are normalised (the frozen
+        reference normalises them under either guard).
         """
         fn = self.__dict__.get("_diagnostics")
         if fn is None:
@@ -726,6 +732,7 @@ class BoundAnalysis:
                 completeness=self.analysis.redshift.completeness,
                 normalizer=self.analysis.redshift.normalizer,
                 host_mass=self.analysis.redshift.host_mass,
+                mixture_density=getattr(self.analysis.redshift, "mixture_density", "pixel"),
                 **ordinary_common,
             )
 
@@ -1083,11 +1090,14 @@ def _pooled_count_ratio_cache(redshift, component):
     )
 
 
-def _bind_mixture(analysis, events, injections):
+def _bind_mixture(analysis, events, injections, normalise_single=False):
     """Per-catalog compact and full-sky views, caches, pins and row fractions.
 
     Returns the PE and selection sample rows (``(N,)`` for one catalog,
     ``(N, K)`` otherwise) and the :class:`~darksirens.likelihood.mixture.CatalogMixtureOperands`.
+    The full-sky views feed the normalisers ``Z_k``: with two or more
+    catalogs, and with one when ``normalise_single`` (the soft Neff guard,
+    whose wall reads the selection integral normalised by ``Z_1``).
     """
     from darksirens.catalog.completeness import ObservedDensityCache
     from darksirens.catalog.field import build_pinned_field_kernel
@@ -1103,6 +1113,7 @@ def _bind_mixture(analysis, events, injections):
     )
     galaxy_list = catalog_evaluation_settings().kernel_layout == "galaxy_list"
     weighted = redshift.host_mass == "weight"
+    full_views = n >= 2 or bool(normalise_single)
     pe_rows, sel_rows, components = [], [], []
     for k, (component, completeness, normalizer) in enumerate(
         zip(redshift.components, redshift.catalog_completeness, redshift.catalog_normalizers)
@@ -1124,7 +1135,7 @@ def _bind_mixture(analysis, events, injections):
             # host_mass="weight": the rows' weight sums, from the stored weights
             # before the full view below drops them. With two or more catalogs
             # the compact rows read the full sky's sums (one pass).
-            if n >= 2:
+            if full_views:
                 sums = _row_weight_sums(store.catalog)
                 full_weight = jnp.asarray(sums)
                 compact_weight = jnp.asarray(
@@ -1134,7 +1145,7 @@ def _bind_mixture(analysis, events, injections):
                 compact_weight = jnp.asarray(_row_weight_sums(views.catalog))
         full = None
         light = False
-        if n >= 2:
+        if full_views:
             # The normaliser Z_k reads every row of the catalog's sky; row r of
             # the full view is store row r. The selection completeness in the
             # moments form without a survey depth reads only the row count and
@@ -1375,7 +1386,9 @@ def bind_analysis(
         cache = None
         z_depth = None
     elif isinstance(analysis.redshift, FieldCatalogMixtureRedshift):
-        pe_pixels, sel_pixels, model_operands = _bind_mixture(analysis, events, injections)
+        pe_pixels, sel_pixels, model_operands = _bind_mixture(
+            analysis, events, injections, normalise_single=selection_neff_soft_guard
+        )
         catalog = None
         cache = None
         z_depth = None

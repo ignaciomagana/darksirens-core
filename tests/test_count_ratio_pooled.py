@@ -920,3 +920,69 @@ def test_a_mixture_of_disjoint_footprints_warns():
         warnings.simplefilter("always")
         _model([A, A], catalog_sky_weighting="field", row_fraction=[np.ones(48), north + 0.5 * south])
     assert not [w for w in caught if "disjoint sky rows" in str(w.message)]
+
+
+class _MomentsExtension:
+    """``Q_k(p, z)`` on the missing hosts, with ``missing_total`` (optionally)
+    in the moments form, from the context alone: ``sum_p int Q_p (1 - f_p
+    Cbar) dN_exp`` below the depth and ``Q_p dN_exp`` above it."""
+
+    n_members = 0
+
+    def __init__(self, tables, supply_total):
+        self.data = {"q": tuple(tables)}
+        self.supply_total = supply_total
+
+    def parameter_spec(self):
+        from darksirens.analysis import ParameterPlan
+
+        return ParameterPlan(labels=(), lower=(), upper=(), prior_kinds=(), joint_constraints=())
+
+    def _q(self, ctx):
+        q = ctx.data["q"][ctx.catalog_index]
+        return q[jnp.asarray(ctx.rows)] if ctx.view == "compact" else q
+
+    def missing_density(self, ctx, dN_miss):
+        return dN_miss * self._q(ctx)
+
+    def missing_total(self, ctx):
+        if not self.supply_total:
+            return None
+        miss = (1.0 - ctx.row_fraction[:, None] * ctx.completeness_curve[None, :]) * ctx.dN_exp[None, :]
+        if ctx.depth_mask is not None:
+            miss = jnp.where(ctx.depth_mask[None, :], miss, ctx.dN_exp[None, :])
+        return jnp.sum(jnp.trapezoid(self._q(ctx) * miss, zgrid, axis=-1))
+
+
+def test_an_extension_sees_the_pooled_curve_and_the_row_coverage():
+    """The pooled count ratio factors as C_p = f_p clip(R), so an extension can
+    give missing_total in the moments form from its context: the context
+    carries the pooled curve (completeness_curve) and the pooled cache's row
+    coverage (row_fraction). The row fraction used to be None and there was
+    no curve, so a moments total treated every row as fully covered."""
+    from darksirens.likelihood.mixture import make_catalog_mixture_target
+
+    fraction = np.random.default_rng(7).uniform(0.3, 1.0, 48)
+    # A zero coverage only in the empty row 3: the pooled count ratio refuses a
+    # fraction of 0 on rows that hold galaxies; the others get a low coverage.
+    fraction[3] = 0.0
+    fraction[[0, 7, 11, 20, 33, 40]] = 0.05
+    analysis = _pooled([A_DEEP, B], catalog_sky_weighting="field", row_fraction=[fraction, None])
+    rng = np.random.default_rng(3)
+    tables = [
+        jnp.asarray(np.exp(0.3 * rng.normal(size=(rows, 1)) * np.sin(np.linspace(0.0, 3.0, Z.size))))
+        for rows in (48, 192)
+    ]
+
+    def target(supply_total):
+        return make_catalog_mixture_target(
+            analysis, events=EVENTS, injections=INJECTIONS, max_likelihood_variance=CAP,
+            extension=_MomentsExtension(tables, supply_total),
+        )
+
+    direct, moments = target(False), target(True)
+    plain = _bind(analysis)
+    for theta in _points(analysis, n=2):
+        a, b = float(direct.log_likelihood(theta)), float(moments.log_likelihood(theta))
+        assert np.isfinite(a) and abs(a - b) <= 1e-10 * max(1.0, abs(a)), (a, b)
+        assert abs(a - float(plain(theta))) > 1e-6

@@ -39,6 +39,7 @@ from darksirens.catalog.field import (
     eval_field_incomplete_catalog_prior_state_vmap,
 )
 from darksirens.catalog.geometry import ang2pix_ring
+from darksirens.catalog.io import CatalogStore
 from darksirens.catalog.mixture import stick_breaking_log_weights
 from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.catalog.types import CatalogMixtureParameters, CatalogParameters, GalaxyCatalog, physical_n0
@@ -175,7 +176,10 @@ def test_selection_mixture_plan_and_per_catalog_pins():
     [
         (dict(catalog=[A, B], catalog_sky_weighting="conditional"), ValueError, "requires catalog_sky_weighting='field'"),
         (dict(catalog=[A, B], completeness="aggregate"), ValueError, "supports completeness"),
-        (dict(catalog=[A, B], field_normalizer="moments"), ValueError, "exact only for completeness='selection'"),
+        (dict(catalog=[A, B], field_normalizer="moments"), ValueError,
+         "implemented only for completeness='selection' \\(the pooled count ratio factors"),
+        (dict(catalog=[A, B], field_normalizer="moments", count_ratio="row"), ValueError,
+         "implemented only for completeness='selection' \\(the per-row count ratio's clip"),
         (dict(catalog=A, catalog_sky_weighting="conditional", field_normalizer="direct"), ValueError, "only to catalog_sky_weighting='field'"),
         (dict(catalog=[A, B], completeness="selection", selection=SEL_A), ValueError, "one entry per catalog"),
         (dict(catalog=[A, B], completeness="selection", selection=[SEL_A]), ValueError, "1 entries for 2"),
@@ -185,6 +189,10 @@ def test_selection_mixture_plan_and_per_catalog_pins():
         (dict(catalog=[A, B], survey_priors={"fcat_2": (0.0, 0.5)}), ValueError, "unknown survey parameter"),
         (dict(catalog=[A, B], fixed_survey={"delta_c3": 0.0}), ValueError, "unknown survey parameter"),
         (dict(catalog=[A, B], catalog_sky_weighting="sideways"), ValueError, "catalog_sky_weighting must be"),
+        (dict(catalog=[A, B], mixture_density="sideways"), ValueError, "mixture_density must be one of"),
+        (dict(catalog=A, mixture_density="steradian"), ValueError, "two or more catalogs"),
+        (dict(catalog=A, catalog_sky_weighting="conditional", mixture_density="pixel"), ValueError,
+         "mixture_density applies only to catalog_sky_weighting='field'"),
         (dict(catalog=[A, dataclasses.replace(B, catalog=B.catalog._replace(
             zgals=B.catalog.zgals[:100], dzgals=B.catalog.dzgals[:100], wgals=B.catalog.wgals[:100],
             ngals=B.catalog.ngals[:100]))]), ValueError, "must hold every HEALPix row"),
@@ -489,6 +497,36 @@ def test_soft_guard_and_vmap_grad():
     assert np.all(np.isfinite(np.asarray(grad))) and abs(float(grad[-1])) > 0.0
 
 
+@pytest.mark.slow
+def test_one_catalog_soft_guard_reads_the_normalised_selection_integral():
+    """Z_1 cancels from the one-catalog likelihood but not from the soft Neff
+    guard, whose wall height tracks -N log mu. Under the soft guard the one
+    catalog is normalised by Z_1, so its wall is that of the same likelihood
+    written as two identical catalogs, also where the wall is active (at
+    max_likelihood_variance=0.065 the sparse-Neff wall is thousands of nats
+    deep; it used to be about 3.6 times shallower for one catalog)."""
+    one = _model(A)
+    two = _model([A, A])
+    th1 = theta_of(one, {"log10n0": -2.0}, seed=5)
+    labels = list(one.parameters.labels)
+    th2 = np.array([0.5 if lab == "fcat_2" else th1[labels.index(lab.replace("_c2", ""))]
+                    for lab in two.parameters.labels])
+    for cap in (CAP, 0.065):
+        soft_one = _bind(one, selection_neff_soft_guard=True, max_likelihood_variance=cap)
+        soft_two = _bind(two, selection_neff_soft_guard=True, max_likelihood_variance=cap)
+        _close(soft_one(th1), soft_two(th2), 1e-12, f"soft guard, cap={cap}")
+        d1, d2 = soft_one.diagnostics(th1), soft_two.diagnostics(th2)
+        _close(d1.log_mu, d2.log_mu, 1e-12, f"log_mu, cap={cap}")
+        assert soft_one.model_operands.components[0].full is not None
+    assert float(soft_one(th1)) < -1.0e3
+    # The hard guard keeps the unnormalised one-catalog program.
+    hard = _bind(one)
+    assert hard.model_operands.components[0].full is None
+    _close(hard(th1), _bind(two)(th2), 1e-12, "hard guard")
+    with pytest.raises(ValueError, match="normalised by Z_1"):
+        dataclasses.replace(hard, selection_neff_soft_guard=True)(th1)
+
+
 def test_decode_parameters_returns_each_catalog_and_the_weights():
     analysis = _model([A_DEPTH, B], completeness="selection", selection=[SEL_A, SEL_B],
                       n0_units="h_scaled", survey_priors={"alpha_c2": (-1.5, -0.5)})
@@ -503,6 +541,117 @@ def test_decode_parameters_returns_each_catalog_and_the_weights():
     np.testing.assert_allclose(np.exp(np.asarray(decoded.catalog.log_weights)), [0.75, 0.25], rtol=1e-15)
     with pytest.raises(ValueError, match="takes each catalog's z_depth"):
         ds.decode_parameters(analysis, theta, z_depth=0.3)
+
+
+def _uniform_store(z_list, nside, copies, tag):
+    """A sky-uniform field: every row holds ``copies`` copies of ``z_list``."""
+    npix = 12 * nside * nside
+    z = np.tile(np.tile(z_list, copies), (npix, 1))
+    return CatalogStore(
+        path=f"uniform-{tag}.h5", nside=nside, z_depth=None,
+        catalog=GalaxyCatalog(apix=np.pi / (3.0 * nside * nside), zgals=z, dzgals=0.01 * (1.0 + z),
+                              wgals=np.ones_like(z), ngals=np.full(npix, z.shape[1], dtype=np.int32),
+                              unique_pixels=None),
+    )
+
+
+_Z_F = np.sort(np.random.default_rng(7).uniform(0.04, 0.08, 40))
+_Z_G = np.sort(np.random.default_rng(8).uniform(0.15, 0.22, 40))
+
+
+@pytest.mark.slow
+def test_steradian_branches_do_not_depend_on_the_pixelization():
+    """One host field stored at nside 1 (four copies of a row's galaxies) and at
+    nside 2 (one copy) has the same host density per steradian. Each branch
+    n_k / Z_k is the host probability of the sample's row, which carries the
+    pixel area (A_1 = 4 A_2): by default the mixture [field, G] moves with
+    the field's nside, and mixture_density="steradian" removes the area, so
+    the likelihood is the same at either nside and every weight.
+
+    The soft Neff guard's wall reads log mu, which a common factor of the
+    density moves: "steradian" keeps every branch on the finest catalog's
+    pixel scale (A_min / A_k), so with equal nsides it is the default bit for
+    bit under the soft guard too, also where the wall is active (at
+    max_likelihood_variance=0.065 it is about 6e4 nats deep here). Dividing
+    by A_k alone moved log mu by -log A_2 and the likelihood by +3e3 nats."""
+    field_1 = _uniform_store(_Z_F, 1, 4, "F-n1")
+    field_2 = _uniform_store(_Z_F, 2, 1, "F-n2")
+    other = _uniform_store(_Z_G, 2, 1, "G-n2")
+    with pytest.warns(UserWarning, match="different HEALPix resolutions"):
+        pixel_1 = _model([field_1, other])
+    assert pixel_1.redshift.mixture_density == "pixel"
+    steradian_1 = _model([field_1, other], mixture_density="steradian")
+    pixel_2 = _model([field_2, other])
+    steradian_2 = _model([field_2, other], mixture_density="steradian")
+    bound = {name: _bind(a) for name, a in (("p1", pixel_1), ("s1", steradian_1),
+                                             ("p2", pixel_2), ("s2", steradian_2))}
+    base = dict(H0=70.0, log10n0=-4.0, delta=0.0, sigma_kde=0.01,
+                log10n0_c2=-4.0, delta_c2=0.0, sigma_kde_c2=0.01)
+    for f in (0.1, 0.5, 0.9):
+        theta = theta_of(pixel_1, dict(base, fcat_2=f))
+        s1, s2 = float(bound["s1"](theta)), float(bound["s2"](theta))
+        p1, p2 = float(bound["p1"](theta)), float(bound["p2"](theta))
+        _close(s1, s2, 1e-10, f"steradian fcat_2={f}")
+        # Equal nsides: the area is common to both branches and cancels.
+        _close(p2, s2, 1e-12, f"equal nside fcat_2={f}")
+        assert abs(p1 - p2) > 1e-3, (f, p1, p2)
+        # The per-pixel weights act as w_k A_k / sum_j w_j A_j.
+        f_eff = f / (f + 4.0 * (1.0 - f))
+        _close(p1, float(bound["s2"](theta_of(pixel_1, dict(base, fcat_2=f_eff)))), 1e-10,
+               f"effective weight fcat_2={f}")
+    soft = {name: _bind(a, selection_neff_soft_guard=True, max_likelihood_variance=0.065)
+            for name, a in (("s1", steradian_1), ("p2", pixel_2), ("s2", steradian_2))}
+    for f in (0.1, 0.5):
+        theta = theta_of(pixel_1, dict(base, fcat_2=f))
+        s1, s2, p2 = (float(soft[name](theta)) for name in ("s1", "s2", "p2"))
+        assert p2 < float(bound["p2"](theta)) - 1.0e3, (f, p2)  # the wall is active
+        # Equal nsides: steradian is the default, log mu included.
+        assert s2 == p2, (f, s2, p2)
+        assert float(soft["s2"].diagnostics(theta).log_mu) == float(
+            soft["p2"].diagnostics(theta).log_mu
+        )
+        # The same finest nside: the coarser field's pixelization does not enter.
+        _close(s1, s2, 1e-10, f"soft guard, steradian fcat_2={f}")
+
+
+def test_mixture_density_is_recorded_only_when_steradian():
+    with pytest.warns(UserWarning, match="different HEALPix resolutions"):
+        default = parameter_plan_semantic(_model([A, B]).parameters)
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")
+        pixel = parameter_plan_semantic(_model([A, B], mixture_density="pixel").parameters)
+        steradian = parameter_plan_semantic(_model([A, B], mixture_density="steradian").parameters)
+        same_nside = _model([A, C])
+    assert same_nside.redshift.mixture_density == "pixel"
+    assert "mixture_density" not in default["catalog_model"]
+    assert pixel == default
+    assert steradian["catalog_model"]["mixture_density"] == "steradian"
+    assert str(steradian) != str(default)
+
+
+def test_normalized_state_carries_the_row_mass_poison():
+    """eval_normalized_field_prior_vmap is the field numerator over Z, and a
+    NaN on the state's row masses (a failed pin probe, galaxy list or kernel
+    window) makes it NaN; it used to return a finite value from the stale
+    kernel, since every row's normaliser was replaced by the scalar Z."""
+    from darksirens.catalog.mixture import eval_normalized_field_prior_vmap
+    from darksirens.cosmology.parameters import CosmologyParameters
+
+    catalog = _jax_catalog(A.catalog)
+    cosmo = CosmologyParameters(H0=70.0, Om0=0.3075)
+    params = CatalogParameters(n0=1.0e-2, delta=0.0, sigma_kde=0.0, z_depth=None)
+    curves = completion_curves(cosmo, params, catalog, build_observed_density_cache(catalog))
+    state = build_field_incomplete_catalog_prior_state_from_curves(cosmo, params, catalog, curves)
+    log_Z = logsumexp(state.log_row_mass)
+    z = jnp.asarray([0.1, 0.15, 0.2])
+    rows = jnp.asarray([4, 10, 20], dtype=jnp.int32)
+    got = np.asarray(eval_normalized_field_prior_vmap(z, rows, state, catalog, log_Z))
+    want = np.asarray(eval_field_incomplete_catalog_prior_state_vmap(z, rows, state, catalog)) - float(log_Z)
+    np.testing.assert_allclose(got, want, rtol=1e-13)
+    poisoned = state._replace(log_row_mass=state.log_row_mass.at[0].set(jnp.nan))
+    assert np.all(np.isnan(np.asarray(eval_normalized_field_prior_vmap(z, rows, poisoned, catalog, log_Z))))
 
 
 def test_fingerprint_records_the_mixture_only_when_set():
@@ -674,3 +823,97 @@ def test_a_failed_catalog_check_makes_the_mixture_likelihood_minus_inf():
     wide = theta.copy()
     wide[list(pair.parameters.labels).index("sigma_kde_c2")] = 0.05
     assert float(windowed(wide)) == -np.inf
+
+
+class _NaNExtension(_TableExtension):
+    """The identity modulation, except a NaN missing-host density for catalog 2."""
+
+    def missing_density(self, ctx, dN_miss):
+        return dN_miss * jnp.nan if ctx.catalog_index == 1 else dN_miss
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("settings", [{}, dict(kernel_layout="padded", kernel_window="off")],
+                         ids=("defaults", "padded_window_off"))
+def test_a_nan_branch_makes_the_mixture_likelihood_minus_inf_under_every_layout(settings):
+    """A NaN in one catalog's branch (here its missing-host density) poisons
+    its normaliser. The mixture's logsumexp drops a non-finite term, so the
+    poison of every branch is added to every term; it used to be added only
+    when some catalog carried a pin, galaxy list or kernel window, so under
+    the padded layout with the window off the likelihood came back finite and
+    equal to catalog 1 alone."""
+    analysis = _model([A, B])
+    ones = [jnp.ones((48, zgrid.size)), jnp.ones((192, zgrid.size))]
+    theta = _points(analysis, n=1)[0]
+    with catalog_settings(**settings):
+        identity = _target(analysis, _TableExtension(ones))
+        poisoned = _target(analysis, _NaNExtension(ones))
+        assert np.isfinite(float(identity.log_likelihood(theta)))
+        assert float(poisoned.log_likelihood(theta)) == -np.inf
+
+
+class _RowTotalExtension(_TableExtension):
+    """A supplied missing mass that is wrong: per row, or shifted by ``offset``."""
+
+    def __init__(self, tables, per_row=False, offset=0.0):
+        super().__init__(tables, supply_total=True)
+        self.per_row, self.offset = per_row, offset
+
+    def missing_total(self, ctx):
+        total = super().missing_total(ctx)
+        if self.per_row and ctx.catalog_index == 0:
+            # Every row's N_miss (here their mean) instead of their sum, for
+            # catalog 1, whose compact view holds every row of its sky.
+            rows = int(ctx.data["q"][ctx.catalog_index].shape[0])
+            return jnp.full((rows,), total / rows)
+        return total + self.offset
+
+
+@pytest.mark.slow
+def test_a_supplied_missing_total_must_be_a_finite_non_negative_scalar():
+    """missing_total is sum_p N_miss,p, a scalar. A per-row vector used to be
+    broadcast against the compact rows' normalisers (a finite, wrong
+    likelihood whenever the compact view held every row); it is refused. A
+    non-finite or negative total poisons the likelihood to -inf."""
+    analysis = _model([A_DEPTH, B_DEPTH], completeness="selection", selection=[SEL_A, SEL_B],
+                      row_fraction=[FRACTION_A, None])
+    tables = [_q_table(A_DEPTH, 3), _q_table(B_DEPTH, 4)]
+    theta = _points(analysis, n=1)[0]
+    good = _target(analysis, _TableExtension(tables, supply_total=True))
+    assert np.isfinite(float(good.log_likelihood(theta)))
+    assert int(_bind(analysis).model_operands.components[0].compact.zgals.shape[0]) == 48
+    with pytest.raises(ValueError, match="must return sum_p N_miss,p, a scalar"):
+        _target(analysis, _RowTotalExtension(tables, per_row=True)).log_likelihood(theta)
+    for offset in (-1.0e12, np.inf, np.nan):
+        bad = _target(analysis, _RowTotalExtension(tables, offset=offset))
+        assert float(bad.log_likelihood(theta)) == -np.inf, offset
+
+
+class _BandExtension(_TableExtension):
+    """``Q(z)`` (one curve for every row) on catalog 1's missing-host density."""
+
+    def __init__(self, q):
+        super().__init__([])
+        self.data = {"q": jnp.asarray(q)}
+
+    def missing_density(self, ctx, dN_miss):
+        return dN_miss * ctx.data["q"][None, :] if ctx.catalog_index == 0 else dN_miss
+
+
+@pytest.mark.slow
+def test_a_negative_modulation_is_clipped_in_the_numerator_and_in_Z_alike():
+    """Q(z) = 1 + b delta below 0 (here -0.5 for 0.5 < z < 1.5): the
+    per-sample numerator reads no missing hosts where the density is not
+    positive, so Z_k must integrate the same clipped density. It used to
+    integrate the negative mass, so catalog 1's branch summed to more than 1
+    and the likelihood differed from the clipped modulation's."""
+    analysis = _model([A, B])
+    z = np.asarray(zgrid)
+    negative = np.where((z > 0.5) & (z < 1.5), -0.5, 1.0)
+    clipped = np.maximum(negative, 0.0)
+    with_negative = _target(analysis, _BandExtension(negative))
+    with_clipped = _target(analysis, _BandExtension(clipped))
+    plain = _bind(analysis)
+    for theta in _points(analysis, n=2):
+        _close(with_negative.log_likelihood(theta), with_clipped.log_likelihood(theta), 1e-12)
+        assert abs(float(with_clipped.log_likelihood(theta)) - float(plain(theta))) > 1e-6

@@ -85,6 +85,7 @@ def model(
     host_mass="count",
     count_ratio=None,
     count_ratio_window=None,
+    mixture_density=None,
 ):
     """Construct a typed ordinary analysis without executing inference."""
     configure_jax_runtime()
@@ -112,6 +113,7 @@ def model(
         host_mass=host_mass,
         count_ratio=count_ratio,
         count_ratio_window=count_ratio_window,
+        mixture_density=mixture_density,
     )
 
 
