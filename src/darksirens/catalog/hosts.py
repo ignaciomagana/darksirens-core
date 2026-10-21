@@ -25,6 +25,7 @@ from .redshift import (
     _inv_sig_eff,
     _log_kw_eff_rowmax,
     _map_rows,
+    _padding_safe_widths,
     _renormalize_below_depth,
     _row_log_kernel_norms,
     _row_real_mask,
@@ -396,6 +397,7 @@ def _row_marked_kernel_state(
     """Legacy marked catalog kernel for one padded row."""
 
     real = _row_real_mask(zs, ws, ngal)
+    dzs = _padding_safe_widths(dzs, real)
     sig_eff = jnp.maximum(
         jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR
     )

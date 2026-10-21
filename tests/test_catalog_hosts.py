@@ -581,3 +581,29 @@ def test_marks_survive_standard_jax_tree_operations():
     # The constructor still validates what users build.
     with pytest.raises(ValueError, match="N_rows, N_max, N_marks"):
         CenteredHostMarks(("logmstar",), jnp.zeros(3))
+
+
+def test_non_finite_padded_widths_leave_the_marked_gradients_finite():
+    # As in the unmarked kernel: a NaN padded width is masked out of the
+    # value, but the reverse pass through the masked branch was 0 * NaN.
+    cat, params = _catalog(z_depth=0.25)
+    cache = build_observed_density_cache(cat)
+    pad = np.arange(3)[None, :] >= np.asarray(cat.ngals)[:, None]
+    z = jnp.asarray([0.1, 0.2, 0.22])
+    rows = jnp.asarray([0, 1, 0], dtype=jnp.int32)
+
+    def total(theta, catalog):
+        state = build_marked_incomplete_catalog_prior_state(
+            COSMO._replace(H0=theta[0]), params._replace(sigma_kde=theta[1]),
+            catalog, cache, MODEL, _marks(), jnp.asarray([0.7]),
+        )
+        return jnp.sum(eval_incomplete_catalog_prior_state_vmap(z, rows, state, catalog))
+
+    theta = jnp.asarray([67.74, 0.01])
+    want = jax.value_and_grad(total)(theta, cat)
+    got = jax.value_and_grad(total)(
+        theta, cat._replace(dzgals=jnp.where(jnp.asarray(pad), jnp.nan, cat.dzgals))
+    )
+    assert np.all(np.isfinite(np.asarray(want[1])))
+    assert float(got[0]) == float(want[0])
+    np.testing.assert_allclose(np.asarray(got[1]), np.asarray(want[1]), rtol=1e-12, atol=0.0)

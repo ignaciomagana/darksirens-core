@@ -537,8 +537,8 @@ def field_mixture_log_likelihood(
 
     # A failed pin probe, galaxy list or kernel window poisons its catalog's
     # normaliser with NaN, and so does a NaN normaliser or missing-host
-    # density from any other source (an extension, a selection model, a
-    # curve). With two or more catalogs the mixture's logsumexp would drop
+    # density or budget from any other source (an extension, a selection
+    # model, a curve). With two or more catalogs the mixture's logsumexp would drop
     # that branch as a non-finite term and return a finite value from the
     # others, so the poison of every branch is also added to every term (0
     # when nothing failed, which leaves every value as it was; NaN makes every

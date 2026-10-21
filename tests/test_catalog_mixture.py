@@ -917,3 +917,22 @@ def test_a_negative_modulation_is_clipped_in_the_numerator_and_in_Z_alike():
     for theta in _points(analysis, n=2):
         _close(with_negative.log_likelihood(theta), with_clipped.log_likelihood(theta), 1e-12)
         assert abs(float(with_clipped.log_likelihood(theta)) - float(plain(theta))) > 1e-6
+
+
+@pytest.mark.parametrize("stores", ("A", "AB"))
+def test_a_nan_missing_host_density_makes_the_likelihood_minus_inf(stores):
+    """An extension's density that is NaN in one row of catalog 1. The row's
+    normaliser used to read as log Z = 0 (a finite row with an inflated host
+    density); with two catalogs and no pin, galaxy list or kernel window the
+    mixture's logsumexp also dropped the NaN branch. Both were finite."""
+    catalogs = {"A": A, "B": B}
+    analysis = _model([catalogs[name] for name in stores])
+    with catalog_settings(kernel_layout="padded", kernel_window="off"):
+        rows = np.asarray(_bind(analysis).model_operands.components[0].compact.unique_pixels)
+        tables = [jnp.ones((48, zgrid.size)), jnp.ones((192, zgrid.size))][: len(stores)]
+        ones = _target(analysis, _TableExtension(tables))
+        tables = [tables[0].at[int(rows[len(rows) // 2])].set(jnp.nan), *tables[1:]]
+        poisoned = _target(analysis, _TableExtension(tables))
+        for theta in _points(analysis, n=2):
+            assert np.isfinite(float(ones.log_likelihood(theta)))
+            assert float(poisoned.log_likelihood(theta)) == -np.inf

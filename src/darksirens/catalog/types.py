@@ -38,12 +38,16 @@ class CatalogParameters(NamedTuple):
     ``n0`` is unused by the observed-galaxy kernel itself and is carried here
     because the Phase-5 completeness model uses the same parameter block.
     ``z_depth`` is structural runtime metadata: ``None`` means the catalog has
-    no explicit redshift-depth truncation.
-    ``selection`` is ``None`` (the default: the per-row count-ratio
-    completeness) or the runtime magnitude-selection model of
-    ``completeness="selection"``
-    (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection` or
-    :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`), with
+    no explicit redshift-depth truncation; otherwise it is a redshift in
+    ``(0, z_max]`` of the redshift grid, which :func:`check_survey_depth`
+    checks at load and at bind (the traced kernel reads a depth beyond the
+    grid's end as that end, and does not check the rest).
+    ``selection`` is ``None`` (the default: the count-ratio completeness,
+    pooled over the sky by default or per row, ``ds.model(count_ratio=...)``)
+    or the runtime selection model of ``completeness="selection"``
+    (:class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
+    :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection` or
+    :class:`~darksirens.selection.catalog.TabulatedSelection`), with
     any sampled nuisance in place. Only the likelihoods' completeness step
     reads it; the kernel, the depth convention and the missing-host budget
     never do. The marked-host prior
@@ -83,9 +87,9 @@ class GalaxyIndex(NamedTuple):
     ``flat[k] = row * N_max + slot`` for every real galaxy (``slot <
     ngals[row]``), in strictly increasing order, so ``flat // N_max`` is each
     galaxy's row.  It is derived from ``ngals`` on the host
-    (:func:`darksirens.catalog.redshift.galaxy_index`) and lets the opt-in
-    ``kernel_layout="galaxy_list"`` evaluate per-galaxy quantities on the real
-    galaxies only (:mod:`darksirens.catalog.settings`).
+    (:func:`darksirens.catalog.redshift.galaxy_index`) and lets the
+    ``kernel_layout="galaxy_list"`` default evaluate per-galaxy quantities on
+    the real galaxies only (:mod:`darksirens.catalog.settings`).
     """
 
     flat: Any
@@ -95,17 +99,21 @@ class GalaxyCatalog(NamedTuple):
     """Padded, pixel-row catalog in the core standardized schema.
 
     The first ``ngals[row]`` columns of each row are real galaxies.  Remaining
-    columns are padding and are ignored regardless of their stored values.
+    columns are padding: their widths and weights are ignored whatever they
+    hold, and their redshifts must be finite (:func:`validate_catalog`).
     ``unique_pixels`` maps compact rows back to global HEALPix ids; ``None``
     means row ``r`` is global pixel ``r``.  ``galaxy_index`` is ``None``
     (default) or the :class:`GalaxyIndex` of this catalog's real galaxies,
     attached with :func:`darksirens.catalog.redshift.with_galaxy_index`; only
-    the opt-in galaxy-list kernel layout reads it.  ``kernel_window`` is
-    ``None`` (default) or the
+    the galaxy-list kernel layout (the default ``kernel_layout``) reads it.
+    ``kernel_window`` is ``None`` (default) or the
     :class:`~darksirens.catalog.redshift.CatalogKernelWindow` of this catalog,
     attached with :func:`darksirens.catalog.redshift.with_kernel_window`; only
-    the opt-in ``kernel_window`` setting attaches it, and only the per-sample
-    kernel sum reads it.
+    the ``kernel_window`` setting attaches it (``"auto"`` by default, on every
+    view it can serve), and only the per-sample kernel sum reads it.  Under
+    the defaults :func:`darksirens.runtime_binding.bind_analysis` attaches
+    the window to the views it builds, and the galaxy list to those of an
+    incomplete catalog.
     """
 
     apix: Any
@@ -143,6 +151,42 @@ def row_blocks(n_rows: int, n_max: int):
     step = max(1, _CHECK_BLOCK_SLOTS // max(1, int(n_max)))
     for start in range(0, int(n_rows), step):
         yield slice(start, start + step)
+
+
+def check_survey_depth(z_depth, *, z_max: float | None = None) -> float | None:
+    """Refuse a survey depth the catalog models cannot use (host side).
+
+    ``None`` (no depth) passes.  Any other ``z_depth`` must be a finite
+    redshift above zero and, when ``z_max`` (the upper edge of the redshift
+    grid) is given, at most ``z_max``.  A NaN depth drops every galaxy from
+    the observed branch, a depth at or below zero leaves no observed mass,
+    and a depth beyond the grid gave rows more observed hosts than galaxies;
+    each was a finite likelihood with no error.  Returns the depth as a float
+    (or ``None``).
+    """
+
+    if z_depth is None:
+        return None
+    try:
+        value = float(z_depth)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"z_depth must be None or a redshift, got {z_depth!r}"
+        ) from None
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"z_depth must be a finite redshift above 0, got {z_depth!r}; a catalog "
+            "without a survey depth has z_depth None (a file without the z_depth "
+            "attribute)"
+        )
+    if z_max is not None and value > z_max:
+        raise ValueError(
+            f"z_depth = {value!r} lies beyond the redshift grid, which ends at "
+            f"z = {float(z_max)!r}; the kernels and the completeness curves end "
+            "there, so a catalog not truncated before it has z_depth None (or set "
+            "DARKSIRENS_ZMAX above the depth before darksirens is imported)"
+        )
+    return value
 
 
 def validate_catalog(
