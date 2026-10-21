@@ -302,7 +302,14 @@ def parameter_plan_semantic(plan) -> dict:
 #     different cap moves where the hard guard returns -inf and the size of
 #     the soft penalty);
 #   * selection_neff_soft_guard=True replaces the hard -inf wall below the
-#     selection N_eff threshold by a smooth penalty.
+#     selection N_eff threshold by a smooth penalty.  For a binding of a
+#     one-catalog field analysis it also records
+#     "one_catalog_field_density": "normalised": since 2026-10-20 that
+#     analysis's density under the soft guard is n_1 / Z_1, as in the frozen
+#     reference (before, n_1 alone, and the soft wall read log mu offset by
+#     +log Z_1), so a checkpoint from before that change is not resumed on the
+#     new likelihood.  The mapping form cannot tell the analysis and records
+#     the guard alone.
 # sel_batch_size and pe_event_block are layout only.  A selection batch is a
 # log-sum-exp over a disjoint slice of the injections, combined by another
 # log-sum-exp (log-sum-exp is additive over disjoint index sets); the padding
@@ -336,7 +343,11 @@ def likelihood_options_semantic(source) -> dict:
     values (e.g. the options a companion passed to a core likelihood seam).
     Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
     is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
-    the default cap, and ``selection_neff_soft_guard`` when it is ``True``.
+    the default cap, and ``selection_neff_soft_guard`` when it is ``True``;
+    a binding of a one-catalog field analysis under the soft guard also
+    records ``"one_catalog_field_density": "normalised"`` (its density is
+    ``n_1 / Z_1`` there since 2026-10-20; see the note above
+    ``_LIKELIHOOD_LAYOUT_OPTIONS``).
     ``sel_batch_size`` and ``pe_event_block`` never enter: they change the
     memory layout of the same sums, not their value (see the note above
     ``_LIKELIHOOD_LAYOUT_OPTIONS``).  A mapping key that is not a
@@ -387,7 +398,22 @@ def likelihood_options_semantic(source) -> dict:
         )
     if bool(soft):
         out["selection_neff_soft_guard"] = True
+        if not isinstance(source, Mapping) and _is_one_catalog_field(source):
+            out["one_catalog_field_density"] = "normalised"
     return canonical_semantic(out, "semantic.core_numerics.likelihood_options")
+
+
+def _is_one_catalog_field(bound) -> bool:
+    """Whether a binding evaluates a one-catalog field analysis
+    (``ds.model(..., catalog_sky_weighting="field")`` with one catalog)."""
+
+    from darksirens.analysis import FieldCatalogMixtureRedshift
+
+    redshift = getattr(getattr(bound, "analysis", None), "redshift", None)
+    return (
+        isinstance(redshift, FieldCatalogMixtureRedshift)
+        and len(redshift.components) == 1
+    )
 
 
 def _bound_kernel_window(likelihood):

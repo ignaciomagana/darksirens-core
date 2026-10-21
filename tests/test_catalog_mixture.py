@@ -666,6 +666,58 @@ def test_fingerprint_records_the_mixture_only_when_set():
     assert len({str(conditional), str(field), str(pair)}) == 3
 
 
+def test_fingerprint_tells_the_normalised_one_catalog_soft_guard_from_before(tmp_path):
+    """Since 2026-10-20 a one-catalog field analysis under the soft Neff guard
+    has the density n_1 / Z_1 (before, n_1 alone), so its run fingerprint
+    records that: a checkpoint fingerprinted before the change is refused on
+    resume, and the hard guard and two-catalog mixtures keep their digests."""
+    from darksirens.inference.run_fingerprint import (
+        ResumeFingerprintError,
+        check_resume_fingerprint,
+        core_numerics_semantic,
+        fingerprint_from_semantic,
+        likelihood_options_semantic,
+        save_run_fingerprint,
+    )
+
+    one, two = _model(A), _model([A, B])
+    soft_one = _bind(one, selection_neff_soft_guard=True)
+    assert likelihood_options_semantic(soft_one) == {
+        "max_likelihood_variance": CAP,
+        "one_catalog_field_density": "normalised",
+        "selection_neff_soft_guard": True,
+    }
+    # Unchanged: the hard guard, two catalogs, and the options mapping alone.
+    assert "one_catalog_field_density" not in likelihood_options_semantic(_bind(one))
+    assert "one_catalog_field_density" not in likelihood_options_semantic(
+        _bind(two, selection_neff_soft_guard=True)
+    )
+    assert likelihood_options_semantic({"selection_neff_soft_guard": True}) == {
+        "selection_neff_soft_guard": True
+    }
+    # The mixture target's provenance carries the same entry.
+    target = make_catalog_mixture_target(one, events=EVENTS, injections=INJECTIONS,
+                                         selection_neff_soft_guard=True,
+                                         max_likelihood_variance=CAP)
+    block = inference_target_semantic(target, sampler="numpyro", options={})
+    options = block["inference_target"]["provenance"]["likelihood_options"]
+    assert options["one_catalog_field_density"] == "normalised"
+    # A checkpoint fingerprinted before the change (the entry absent) is refused.
+    plan = parameter_plan_semantic(one.parameters)
+    now = core_numerics_semantic(soft_one)
+    before = dict(now)
+    before["likelihood_options"] = {
+        k: v for k, v in now["likelihood_options"].items() if k != "one_catalog_field_density"
+    }
+    save_run_fingerprint(
+        str(tmp_path), fingerprint_from_semantic({"parameters": plan, "core_numerics": before})
+    )
+    with pytest.raises(ResumeFingerprintError, match="one_catalog_field_density"):
+        check_resume_fingerprint(
+            str(tmp_path), fingerprint_from_semantic({"parameters": plan, "core_numerics": now})
+        )
+
+
 # ---------------------------------------------------------------------------
 # The missing-host extension
 

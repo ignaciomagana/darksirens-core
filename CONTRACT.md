@@ -467,7 +467,10 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `darksirens.inference.run_fingerprint`) adds a `"likelihood_options"`
   entry with a non-default `compute_dtype`, `max_likelihood_variance` and
   `selection_neff_soft_guard=True`, and no entry for a default binding, so
-  every existing digest is unchanged. For a binding without a catalog view
+  every existing digest is unchanged. A binding of a one-catalog field
+  analysis under the soft guard also records
+  `"one_catalog_field_density": "normalised"` (its density is `n_1 / Z_1`
+  there since 2026-10-20). For a binding without a catalog view
   `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
   catalog binding always records the kernel window it was bound with (the
   tolerance, or no entry when `"auto"` attached none) in place of the
