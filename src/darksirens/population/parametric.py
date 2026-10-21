@@ -28,7 +28,14 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 from jax.scipy.special import erf, erfc
 
-from .base import MassComponent, PairingModel, ParamSpec, SpinModel, pack_specs
+from .base import (
+    MassComponent,
+    PairingModel,
+    ParamSpec,
+    SpinModel,
+    log_madau_dickinson_rate,
+    pack_specs,
+)
 from .components import (
     ALPHA,
     ALPHA_BPL,
@@ -1016,6 +1023,225 @@ class GWTC3PowerLawPeakPopulationModel:
         )
         log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
         return log_p + (gamma - 1.0) * jnp.log1p(z)
+
+
+# ============================================================
+# GWTC-5 MultiPeak (MLTP) -- arXiv:2605.27227 Sec. 2.3 and Table 5, with the
+# equations of arXiv:2509.04348 (GWTC-4.0 cosmology) App. C, Eqs. C1-C9.
+# ============================================================
+# Same structure as GWTC3PowerLawPeakMass (one low-mass taper multiplying the
+# WHOLE mixture), with two peaks instead of one and the peaks truncated on
+# ``[m_min, m_max]`` as Eq. C9 writes.  icarogw 2.0.3 ``massprior_MultiPeak``
+# (wrappers.py) truncates them on ``[m_min, mu + 5 sigma]`` instead, so its
+# peaks can reach above ``m_max``; see GWTC5MultiPeakPopulationModel.
+
+@dataclass
+class GWTC5MultiPeakMass(MassComponent):
+    r"""GWTC-5 MultiPeak primary-mass model: Eq. C9 of arXiv:2509.04348 for
+    the bracket, times the low-mass taper ``S`` that Eq. C4 applies to the
+    whole primary-mass density of the PLP and MLTP models::
+
+        pi(m1) = [(1 - lambda_g) P(m1 | -alpha, m_min, m_max)
+                  + lambda_g lambda_low G(m1 | mu_low, sigma_low)
+                  + lambda_g (1 - lambda_low) G(m1 | mu_high, sigma_high)]
+                 x S(m1 | m_min, delta_m)
+
+    ``P`` is the power law and each ``G`` a Gaussian, all normalised on
+    ``[m_min, m_max]``; ``S`` is the Eq. C5-C6 low-mass taper, identical to
+    :func:`~darksirens.population.utils.sfilter_low`.
+
+    Parameter order is GWTC-5 Table 5 with the mass-ratio slope removed (it
+    lives on the pairing component): ``alpha``, ``m_min``, ``m_max``,
+    ``delta_m``, ``mu_low``, ``sigma_low``, ``mu_high``, ``sigma_high``,
+    ``lambda_g``, ``lambda_low``.
+
+    A peak whose mass on ``[m_min, m_max]`` underflows to zero (inside Table 5:
+    ``mu = 100``, ``sigma = 0.4``, ``m_max = 50``) contributes nothing, and
+    :meth:`_norm` renormalises the rest instead of dividing by zero.
+    """
+
+    alpha_spec: ParamSpec
+    m_min_spec: ParamSpec
+    m_max_spec: ParamSpec
+    delta_m_spec: ParamSpec
+    mu_low_spec: ParamSpec
+    sigma_low_spec: ParamSpec
+    mu_high_spec: ParamSpec
+    sigma_high_spec: ParamSpec
+    lambda_g_spec: ParamSpec
+    lambda_low_spec: ParamSpec
+
+    @property
+    def param_specs(self):
+        return [
+            self.alpha_spec,
+            self.m_min_spec,
+            self.m_max_spec,
+            self.delta_m_spec,
+            self.mu_low_spec,
+            self.sigma_low_spec,
+            self.mu_high_spec,
+            self.sigma_high_spec,
+            self.lambda_g_spec,
+            self.lambda_low_spec,
+        ]
+
+    def _powerlaw_pdf(self, m, alpha, m_min, m_max):
+        """``P(m | -alpha, m_min, m_max)``: normalized over ``[m_min, m_max]``.
+
+        Table 5's ``m_min`` U(2, 10) and ``m_max`` U(50, 200) are disjoint, so
+        the segment is never degenerate.
+        """
+        norm = _powerlaw_segment_norm(m_min, m_max, 1.0, alpha)
+        raw = jnp.where((m >= m_min) & (m <= m_max), m ** (-alpha), 0.0)
+        return raw / _pos(norm)
+
+    def _peak_pdf(self, m, mu, sigma, m_min, m_max):
+        """Gaussian normalized over ``[m_min, m_max]`` (Eq. C9), and whether it
+        carries any mass there in floating point."""
+        s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+        norm = truncated_gaussian_norm(mu, s, m_min, m_max)
+        raw = jnp.where((m >= m_min) & (m <= m_max),
+                        jnp.exp(-0.5 * ((m - mu) / s) ** 2), 0.0)
+        return raw / _pos(norm), norm > 0.0
+
+    def _mixture_weights(self, lambda_g, lambda_low):
+        """Weights of (power law, low peak, high peak) in Eq. C9."""
+        w_pl = 1.0 - lambda_g
+        w_lo = lambda_g * lambda_low
+        w_hi = lambda_g * (1.0 - lambda_low)
+        return w_pl, w_lo, w_hi
+
+    def _mixture_pretaper(self, m, t):
+        """Weighted sum of the three members before the taper, plus the
+        mass it carries (1 unless a peak underflows to zero on its window)."""
+        alpha, m_min, m_max = t[0], t[1], t[2]
+        mu_lo, sig_lo, mu_hi, sig_hi = t[4], t[5], t[6], t[7]
+        w_pl, w_lo, w_hi = self._mixture_weights(t[8], t[9])
+        g_lo, alive_lo = self._peak_pdf(m, mu_lo, sig_lo, m_min, m_max)
+        g_hi, alive_hi = self._peak_pdf(m, mu_hi, sig_hi, m_min, m_max)
+        p = (w_pl * self._powerlaw_pdf(m, alpha, m_min, m_max)
+             + w_lo * g_lo + w_hi * g_hi)
+        mass = (w_pl + jnp.where(alive_lo, w_lo, 0.0)
+                + jnp.where(alive_hi, w_hi, 0.0))
+        return p, mass
+
+    def _norm(self, theta) -> jnp.ndarray:
+        r"""Normalisation of the tapered mixture -- exact up to the taper window.
+
+        Every member is truncated at ``m_min``, so the taper removes mass only
+        inside ``[m_min, m_min + delta_m]``; that deficit is the only
+        quadrature, on window-relative nodes (same construction as
+        :meth:`GWTC3PowerLawPeakMass._taper_window_grid`).
+        """
+        m_min, delta_m = theta[1], theta[3]
+        t = jnp.linspace(0.0, 1.0, get_mass_grid().size)
+        m_w = m_min + t * jnp.maximum(delta_m, 0.0)
+        p_w, mass = self._mixture_pretaper(m_w, theta)
+        deficit = jnp.trapezoid(p_w * (1.0 - sfilter_low(m_w, m_min, delta_m)), m_w)
+        return jnp.clip(mass - deficit, 0.0, mass)
+
+    def _eval_unnorm(self, m, t):
+        p, _ = self._mixture_pretaper(m, t)
+        return p * sfilter_low(m, t[1], t[3])
+
+
+class GWTC5MultiPeakPopulationModel:
+    """GWTC-5 MultiPeak mass model with a Madau-Dickinson merger rate.
+
+    Mass and pairing priors are GWTC-5 Table 5 (arXiv:2605.27227, p.30);
+    the rate is Eq. A.2 with the Table 8 priors (p.32), evaluated by
+    :func:`~darksirens.population.base.log_madau_dickinson_rate`.
+
+    Pairing is GWTC-4 Eq. C8, ``p(m2 | m1) ~ m2^beta S(m2)`` on
+    ``[m_min, m1]`` -- exactly :class:`PowerLawPairing` at the mass model's
+    own ``(m_min, delta_m)``.  Since every primary-mass member ends at
+    ``m_max``, ``m2 <= m1 <= m_max`` always.  icarogw's secondary is a power
+    law on ``[m_min, m_max]`` conditioned on ``m1``, which is the same density
+    there; the two models differ only through icarogw's peaks, which run to
+    ``mu + 5 sigma`` and so can place ``m1`` above ``m_max``.
+
+    ``spin_component`` defaults to the repo's chi_eff block, as for the
+    GWTC-3 model.  It is NOT a GWTC-5 spin model: the fiducial MLTP analysis
+    keeps the PE spin prior (uniform magnitudes, isotropic tilts), and the
+    GAUSSIAN and second spin models of Sec. 2.3 (p.14-15) model component
+    spins, which a chi_eff block cannot represent.
+    """
+
+    def __init__(self, spin_component=None):
+        self.mass_component = GWTC5MultiPeakMass(
+            ParamSpec(r"$\alpha$", 1.5, 12.0),
+            ParamSpec(r"$m_{\min}$", 2.0, 10.0),
+            ParamSpec(r"$m_{\max}$", 50.0, 200.0),
+            ParamSpec(r"$\delta_m$", 1.0e-3, 10.0),
+            ParamSpec(r"$\mu_{\rm low}$", 5.0, 100.0),
+            ParamSpec(r"$\sigma_{\rm low}$", 0.4, 10.0),
+            ParamSpec(r"$\mu_{\rm high}$", 5.0, 100.0),
+            ParamSpec(r"$\sigma_{\rm high}$", 0.4, 15.0),
+            ParamSpec(r"$\lambda_g$", 0.0, 1.0),
+            ParamSpec(r"$\lambda_{g,\rm low}$", 0.0, 1.0),
+        )
+        self.pairing_component = PowerLawPairing(ParamSpec(r"$\beta$", -4.0, 12.0))
+        self.spin_component = spin_component if spin_component is not None else TruncatedGaussianSpin(
+            ParamSpec(r"$\mu_\chi$", CHI_MU.lo, CHI_MU.hi, name="mu_chi"),
+            ParamSpec(r"$\sigma_\chi$", CHI_SIGMA.lo, CHI_SIGMA.hi, name="sigma_chi"),
+        )
+        self.rate_specs = [
+            ParamSpec(r"$\gamma$", 0.0, 12.0, name="gamma"),
+            ParamSpec(r"$\kappa$", 0.0, 6.0, name="kappa"),
+            ParamSpec(r"$z_{\rm peak}$", 0.0, 4.0, name="z_peak"),
+        ]
+
+    @property
+    def param_specs(self):
+        return [
+            *self.mass_component.param_specs,
+            *self.pairing_component.param_specs,
+            *self.spin_component.param_specs,
+            *self.rate_specs,
+        ]
+
+    @property
+    def constraint_groups(self):
+        """None: Table 5 has one ``m_min`` and disjoint ``m_min``/``m_max``
+        priors, and imposes no ordering on ``mu_low``/``mu_high``."""
+        return ()
+
+    def prior_bounds(self):
+        return pack_specs(*self.param_specs)
+
+    def prepare(self, theta, dtype):
+        """Per-likelihood-point pairing state for ``log_p_pop(..., prepared=)``, or ``None``."""
+        n_m = self.mass_component.n_params
+        tm = theta[:n_m]
+        tp = theta[n_m : n_m + self.pairing_component.n_params]
+        return self.pairing_component.prepare(tm[1], tm[3], tp, dtype)
+
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None, prepared=None):
+        idx = 0
+        tm = theta[idx : idx + self.mass_component.n_params]
+        idx += self.mass_component.n_params
+        tp = theta[idx : idx + self.pairing_component.n_params]
+        idx += self.pairing_component.n_params
+        ts = theta[idx : idx + self.spin_component.n_params]
+        idx += self.spin_component.n_params
+        gamma, kappa, z_peak = theta[idx], theta[idx + 1], theta[idx + 2]
+
+        m_min, delta_m = tm[1], tm[3]
+
+        mass_norm = self.mass_component._norm(tm)
+        spin_norm = self.spin_component._norm(ts)
+        if getattr(self.spin_component, "consumes_spin_block", False):
+            p_spin = self.spin_component(chieff, ts, norm=spin_norm, spin=spin)
+        else:
+            p_spin = self.spin_component(chieff, ts, norm=spin_norm)
+        p = (
+            self.mass_component(m1, tm, norm=mass_norm)
+            * self.pairing_component(m1, q, m_min, delta_m, tp, prepared=prepared)
+            * p_spin
+        )
+        log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
+        return log_p + log_madau_dickinson_rate(z, gamma, kappa, z_peak)
 
 
 _LOG_SQRT_2PI = 0.9189385332046727

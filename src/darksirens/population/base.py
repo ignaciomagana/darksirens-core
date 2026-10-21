@@ -1355,6 +1355,21 @@ class MixtureModel:
 
 # ── Population model ─────────────────────────────────────────────────────────
 
+def log_madau_dickinson_rate(z, gamma, kappa, z_peak):
+    """``log[psi(z)/(1+z)]`` for the unnormalised Madau-Dickinson ``psi``.
+
+    ``psi(z) = (1+z)^gamma / (1 + ((1+z)/(1+z_peak))^(gamma+kappa))``; the
+    constant ``[1 + (1+z_peak)^-(gamma+kappa)]`` is omitted (see
+    :class:`PopulationModel`).  Softplus keeps the turnover term stable at any
+    slope.  Shared by the ``@md`` decoration and the bespoke models that carry
+    a Madau-Dickinson rate of their own.
+    """
+    log_turnover = jnp.logaddexp(
+        0.0, (gamma + kappa) * (jnp.log1p(z) - jnp.log1p(z_peak))
+    )
+    return (gamma - 1.0) * jnp.log1p(z) - log_turnover
+
+
 @dataclass
 class PopulationModel:
     """Full compact-binary population model used by the likelihood.
@@ -1473,15 +1488,7 @@ class PopulationModel:
         :attr:`has_additive_rate_split` is True.
         """
         if self.rate_evolution == "md":
-            gamma = theta[-3]
-            kappa = theta[-2]
-            z_pk  = theta[-1]
-            # log[psi(z)/(1+z)] with psi the (unnormalised) Madau-Dickinson
-            # form; softplus keeps the turnover term stable at any slope.
-            log_turnover = jnp.logaddexp(
-                0.0, (gamma + kappa) * (jnp.log1p(z) - jnp.log1p(z_pk))
-            )
-            return (gamma - 1.0) * jnp.log1p(z) - log_turnover
+            return log_madau_dickinson_rate(z, theta[-3], theta[-2], theta[-1])
 
         if self.shared_gamma or self.mixture.k == 1:
             gamma = theta[-1]
