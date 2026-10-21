@@ -12,7 +12,9 @@ permissions:
 jobs:
   inference-io:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # The full suite (1970 tests on 2026-10-21) takes 52-86 min on a hosted
+    # runner, past the former 75-minute ceiling on the slower ones.
+    timeout-minutes: 120
     env:
       JAX_PLATFORMS: cpu
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
