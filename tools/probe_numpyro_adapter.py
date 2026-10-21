@@ -26,6 +26,45 @@ _STATE = {
     "extra": {},
 }
 
+#: Declared divergence from the frozen reference: core's lognormal NUTS site
+#: gives its ExpTransform the truncation interval [log lower, log upper] as its
+#: domain, so the site's support is [lower, upper] rather than (0, inf)
+#: (MIGRATION.md, "Review fixes (2026-10-20)", "Samplers and prior
+#: transforms", "NumPyro lognormal"). Each arm checks every transformed site
+#: against its own declared form (the candidate's domain must be exactly its
+#: base's low and high), and both arms then report the legacy transform, so
+#: every other event and field stays compared exactly.
+DECLARED_LOGNORMAL_TRANSFORM = "ExpTransform"
+
+
+def _apply_declared_lognormal_transform(behavior, implementation):
+    """Check each transformed site's declared transform, then report the legacy one."""
+    seen = 0
+    for name, row in behavior.items():
+        for event in row["events"]:
+            dist = event.get("dist") if event.get("op") == "sample" else None
+            if not dist or dist.get("kind") != "TransformedDistribution":
+                continue
+            seen += 1
+            if implementation == "legacy":
+                declared = DECLARED_LOGNORMAL_TRANSFORM
+            else:
+                base = dist["base"]["kwargs"]
+                declared = (
+                    f"{DECLARED_LOGNORMAL_TRANSFORM}(domain=interval("
+                    f"{base['low']!r}, {base['high']!r}))"
+                )
+            if dist["transform"] != declared:
+                raise SystemExit(
+                    f"{name}: site {event['name']!r} has transform {dist['transform']!r}, "
+                    f"declared {declared!r} for the {implementation} arm; update "
+                    "DECLARED_LOGNORMAL_TRANSFORM deliberately"
+                )
+            dist["transform"] = DECLARED_LOGNORMAL_TRANSFORM
+    if not seen:
+        raise SystemExit("no lognormal site was sampled; the declaration checks nothing")
+    return behavior
+
 
 def _jsonable(value):
     if value is None or isinstance(value, (str, bool, int)):
@@ -494,6 +533,7 @@ def main():
     }
 
     behavior = {name: _run_case(fn, case) for name, case in cases.items()}
+    behavior = _apply_declared_lognormal_transform(behavior, args.implementation)
     Path(args.out).write_text(json.dumps(behavior, indent=2, sort_keys=True))
 
 
