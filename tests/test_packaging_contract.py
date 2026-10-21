@@ -104,6 +104,20 @@ def test_runtime_dependencies_are_pinned():
         assert not any(dep.startswith(backend) for dep in deps), (backend, deps)
 
 
+def test_the_live_cov_remedy_names_the_tinyns_ci_validates():
+    # The base pin (TINYNS_COMMIT, tinyns 0.1.0) runs the isotropic presets;
+    # the live-cov presets' refusal names the TinyNS the real-backends job
+    # installs and runs them against, so the remedy cannot go stale.
+    from darksirens.inference.tinyns_config import TINYNS_LIVECOV_VALIDATED_COMMIT
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "real-backends.yml").read_text()
+    pins = re.findall(r"tinyns\.git@([0-9a-f]{40})", workflow)
+    assert pins == [TINYNS_LIVECOV_VALIDATED_COMMIT], pins
+    assert TINYNS_LIVECOV_VALIDATED_COMMIT != TINYNS_COMMIT
+    regression = (REPO_ROOT / ".github" / "workflows" / "phase8-regression.yml").read_text()
+    assert re.findall(r"tinyns\.git@([0-9a-f]{40})", regression) == [TINYNS_COMMIT]
+
+
 def test_optional_backends_stay_in_extras():
     extras = _project()["optional-dependencies"]
     for extra, backend in OPTIONAL_BACKENDS.items():

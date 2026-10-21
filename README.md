@@ -21,7 +21,12 @@ pip install ".[dynesty]"
 
 Without the extra, `ds.infer` with the default sampler raises an `ImportError`
 that names the extra; `ds.infer(..., sampler="tinyns")` runs on the base
-install. Optional integrations are explicit:
+install with the isotropic TinyNS presets. The base install pins TinyNS 0.1.0
+(the validated reconstruction stack); the live-cov presets (`livecov`,
+`bounded_single`, `bounded_multi`, `fused_bounded_multi`) need TinyNS >= 0.2.0
+and are refused before sampling on the pin, with the TinyNS commit the
+real-backends CI job validates as the remedy. Optional integrations are
+explicit:
 
 ```bash
 pip install ".[gp]"       # tinygp/equinox population models
