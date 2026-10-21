@@ -298,8 +298,9 @@ on a 196,608 x 70 catalog); the reference keeps five such arrays. The pin is bui
 by the per-call kernel builder, run once at bind, so binding needs the
 transient memory of one unpinned kernel build: on that catalog the CPU
 compiler gives the build 14.9 GB of scratch, while the per-call catalog terms
-need 3.2 GB pinned against 15.4 GB unpinned. Complete-catalog analyses are
-not pinned, as in the reference. `kernel_pin="off"` keeps the per-call
+need 3.2 GB pinned against 15.4 GB unpinned. A conditional complete catalog
+is not pinned, as in the reference; under `catalog_sky_weighting="field"`
+the pin applies to every catalog, complete ones included. `kernel_pin="off"` keeps the per-call
 quadrature, and the bound program is then byte-identical to the previous
 release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
 `run_fingerprint.parameter_plan_semantic(plan)` records both.
@@ -370,9 +371,13 @@ optional entries are added).
   single pass by reassociation only (the pinned 1e-12 relative contract; 4e-16
   on the DESI P12.4 target, consumer Phase 12J), so recording them would only
   make a requeue with another memory budget refuse its own checkpoint, as the
-  frozen reference's exclusion of both says. A default binding adds no entry:
-  default digests equal those of the previous release (pinned in
-  `tests/test_run_fingerprint_coverage.py`).
+  frozen reference's exclusion of both says. A default binding adds no
+  `"likelihood_options"` entry: default digests equal those of the previous
+  release (pinned in `tests/test_run_fingerprint_coverage.py`). That does not
+  make `core_numerics_semantic(bound)` equal to `core_numerics_semantic()`
+  for a catalog binding: since 2026-10-02 a catalog binding records the
+  kernel window it was bound with in place of the setting `"auto"`, so a
+  fingerprint and its resume check must be built the same way.
 - **InferenceTarget runs.** Before, no core module called the resume gate, so
   `ds.infer` on a target wrote no fingerprint and resumed any checkpoint. A
   target run that writes or resumes a dynesty or TinyNS checkpoint is now
@@ -540,7 +545,11 @@ where the explicit faster value refuses, without raising. An explicit
   opt-in `pairing_m1_grid` is set (then it is the m1 grid, exactly as under
   `"per_sample"`).
 - `kernel_layout="galaxy_list"`: refuses no case, so it is the default value
-  itself; its values equal the padded layout's bit for bit.
+  itself; its values equal the padded layout's to rounding, and bit for bit
+  under the unrolled schedule `_GALAXY_MAP="auto"` picks on CPU. Off CPU it
+  runs a loop (see "Galaxy-list build on GPU" below), which with a survey
+  depth differs from the padded state by a few ulp (`log_kw_eff` 3.6e-15 at
+  a loop chunk of 4, 2.3e-13 at 1, measured with `z_depth = 0.8`).
 - `missing_density="auto"`: gathered, except with a missing-host extension
   (`make_catalog_mixture_target`), where the grid is kept.
 - `kernel_window="auto"`: a window of tolerance `1e-10` on every catalog view
@@ -557,9 +566,13 @@ when they are set explicitly. The new defaults are recorded
 (`normalization_grids.pairing_norm = "auto"`, `catalog_evaluation =
 {kernel_layout: "galaxy_list", missing_density: "auto", kernel_window:
 "auto"}`; with a catalog binding, `kernel_window` is the tolerance it was
-bound with, `1e-10`, or absent when `"auto"` attached no window). Resuming a
-checkpoint written before the change under the new defaults is therefore
-refused as a settings change, and the refusal now names the fix: set
+bound with, `1e-10`, or absent when `"auto"` attached no window). A
+fingerprinted resume of a checkpoint written before the change under the new
+defaults is therefore refused as a settings change: an `InferenceTarget` run,
+which `ds.infer` fingerprints, or a run whose caller writes and checks its
+own fingerprint. An ordinary `ds.infer` resume is not fingerprinted; it warns
+when no `run_fingerprint.json` lies beside the checkpoint (see "Review fixes
+(2026-10-20)"). The refusal names the fix: set
 `pairing_norm="per_sample"`, `kernel_layout="padded"`,
 `missing_density="grid"` and `kernel_window="off"` (or the environment
 variables `DARKSIRENS_GW_PAIRING_NORM=per_sample`,
@@ -587,7 +600,15 @@ on T, 1.7e-5 on R1, 5.5e-6 against 5.0e-6 on real).
 new defaults, so they keep running at the defaults; the population and
 spectral probes evaluate the per-point normaliser, and the mixture and
 selection-completeness probes bind through `bind_analysis` with the galaxy
-list, the gathered density and the window.
+list and the gathered density. They do not exercise the window: in every
+bind-level probe fixture the window is as long as the rows (`W = N_max = 5`
+at the pinned `sigma_kde` and at the prior edge), so the windowed sum never
+runs there, and no CI probe binds the default conditional count-ratio
+analysis with a kernel pin against the reference. The window is checked
+core against core (`tests/test_catalog_kernel_window.py`); a local
+bind-level comparison with an active window (`W = 9 < 60`, pin active)
+matched the reference to 1.3e-15 (review of 2026-10-20). A probe cell with
+an active window is still to be added.
 
 
 ### Public API gaps found by the examples (default sampler changes; no likelihood change)
@@ -744,7 +765,9 @@ changes in two entries: `mu_chi` 0.0633 to 0.04 and `sigma_chi` 0.3654 to
 `ds.model(catalog=..., catalog_sky_weighting="field", completeness="complete",
 host_mass="weight")` makes the host mass of a sky row the sum of its galaxy
 weights. By default (`host_mass="count"`) the row's host mass is its galaxy
-count and the weights only share that mass among the galaxies of the row.
+count and the weights only share that mass among the galaxies of the row,
+which sets the row's redshift shape (see "Catalogs with galaxy weights"
+below for what that does with an incomplete catalog).
 That is the frozen reference's convention, and it means a row with one heavy
 galaxy weighs the same as a row with one light galaxy. With
 `host_mass="weight"` the row's density is `W_p p_cat(z | p) = sum_i w_i
@@ -775,7 +798,9 @@ to its own weight in every row. Inside a row nothing changes.
   is added and the per-call work is unchanged. The sums are taken before the
   full-sky view of a complete catalog drops its galaxy slots.
 - **Fingerprint.** `ParameterPlan.catalog_model` records `host_mass` when it
-  is `"weight"`, so a checkpoint of one mode is not resumed in the other.
+  is `"weight"`, so a fingerprinted checkpoint (an `InferenceTarget` run, or
+  a fingerprint its caller gates) of one mode is not resumed in the other;
+  an ordinary `ds.infer` resume is not fingerprinted and only warns.
 - **Legacy parity.** The reference has no such mode. The tests compare the
   option on a catalog with integer weights against the same catalog with each
   galaxy written weight-many times at unit weight, evaluated by count.
@@ -1029,6 +1054,16 @@ there and the missing term is the full `n0 dV_c/dz (1 + z)^delta`). Core
 does not check any of this, and `host_mass="weight"` remains refused with an
 incomplete catalog.
 
+The count-ratio completeness (`completeness="incomplete"`, the default) has
+no such remedy. Its estimator counts raw galaxies, whatever the weights,
+while the observed term still carries them: the row's kernels are weighted,
+so the weights set the row's redshift shape. Weights that vary with redshift
+inside a row (a union catalog that down-weights its photometric galaxies,
+for example) tilt the observed hosts against the missing ones and bias
+`H0`, and no weight-fraction completeness can be supplied to the count
+ratio. Use unit weights there, or weights that do not vary with redshift
+inside a row.
+
 ### Real galaxies outside the redshift range of the kernel (new errors and a warning at bind; no likelihood change for accepted catalogs)
 
 Each galaxy's redshift distribution is its Gaussian truncated to the grid
@@ -1176,10 +1211,13 @@ catalog before the clip and gives row `p` the completeness `f_p C(z)`, with
   not help there: with about 180 galaxies per row the clip of each row's
   noisy ratio takes over (+0.59 +- 0.28 at 0.02, +1.28 +- 0.37 at 0.01).
 - **Pooling.** The catalog is one completeness cell: every row shares the
-  same radial curve, scaled by its coverage. Core does not know the survey's
-  selection strata; a catalog whose depth or magnitude limit varies over the
-  sky must be split by the caller into one catalog per stratum (a
-  field-weighted mixture, each with its `row_fraction`). Galaxy-free rows
+  same radial curve, scaled by its coverage. It does not model a depth or
+  magnitude limit that varies over the sky. Splitting such a catalog into one
+  catalog per stratum under `catalog_sky_weighting="field"` is a different
+  model: in each stratum's rows the other catalogs count every host as
+  missing, so each stratum's galaxy contrast is diluted by its mixture weight
+  (`ds.model` warns when two catalogs' row fractions cover disjoint rows;
+  this advice, given here before 2026-10-20, is withdrawn). Galaxy-free rows
   count as surveyed unless `row_fraction` says otherwise (a warning above
   10% of the rows). Clustering along the line of sight is averaged over the
   whole sky rather than per row.
@@ -1188,7 +1226,10 @@ catalog before the clip and gives row `p` the completeness `f_p C(z)`, with
   the expected density vanishes, so within about three windows of `z = 0`
   the pooled ratio is far above 1 (6 at z = 0.05 with w = 0.02 on the
   examples mock) and the clip makes it 1: the estimator takes the catalog
-  to be complete there, as a magnitude-limited catalog is.
+  to be complete there, whatever its completeness, and removes its missing
+  hosts there. For a catalog that carries no host information this gives a
+  spurious preference in H0; binding now warns, and the opt-in
+  `count_ratio="pooled_kernel"` avoids it (see "Review fixes (2026-10-20)").
 - **Noise.** Binding refuses a window with fewer than 100 effective galaxies
   at the catalog's median redshift and warns below 1000: the clip at 1 then
   biases the curve low.
@@ -1224,9 +1265,12 @@ legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
   - the likelihood (the pooled curve in place of the per-row one), and so
     the posterior;
   - the plan record and the run fingerprint: `ParameterPlan.catalog_model`
-    now records `count_ratio="pooled"` and the window. Resuming a
-    checkpoint written before the change is refused as a settings change,
-    and the refusal names the fix (`ds.model(..., count_ratio="row")`);
+    now records `count_ratio="pooled"` and the window. A fingerprinted
+    resume of a checkpoint written before the change (an `InferenceTarget`
+    run, or a fingerprint its caller gates) is refused as a settings
+    change, and the refusal names the fix (`ds.model(...,
+    count_ratio="row")`); an ordinary `ds.infer` resume is not
+    fingerprinted and only warns;
   - binding: it builds one `(N_z, N_z)` pooled operator in place of the
     per-row observed-density cache, and it now **refuses** a catalog with
     fewer than 100 effective galaxies under the kernel at its median
@@ -1239,9 +1283,11 @@ legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
   - a `count_ratio_window` alone now asks for `"pooled"` (it was refused
     without `count_ratio="pooled"`).
   - The catalog is one completeness cell: every row shares the radial
-    curve, scaled by its coverage. A catalog whose depth or magnitude limit
-    varies over the sky should be split into one catalog per stratum
-    (`catalog_sky_weighting="field"`, each with its `row_fraction`).
+    curve, scaled by its coverage. It does not model a depth or magnitude
+    limit that varies over the sky, and splitting such a catalog into one
+    catalog per stratum under `catalog_sky_weighting="field"` is a different
+    model (each stratum's galaxy contrast is diluted by its mixture weight;
+    see "Pooling" in the previous section).
 - **Who is affected.** Anyone calling `ds.model` with a catalog and
   `completeness=None` or `"incomplete"` without `count_ratio`.
   Unchanged: spectral and bright-siren analyses, `completeness="complete"`
@@ -1288,3 +1334,916 @@ legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
   `test_count_ratio_pooled` pins the default (pooled, window 0.02, bit for
   bit the explicit setting), its inert resolution without a count-ratio
   catalog, and that `"row"` keeps the previous record.
+
+## Review fixes (2026-10-20)
+
+A multi-agent review on 2026-10-20 confirmed 130 findings against this tree
+and the frozen reference. They were fixed in twelve packages, merged in this
+order on one branch: completeness and selection budget, GW loaders, field
+mixture, marked hosts, catalog, parametric populations, GP models and
+registry, runtime binding, public API, samplers, likelihood, and cosmology and
+packaging. Each finding was fixed, guarded (now refused or warned), put behind
+an opt-in option, deferred with a reason, or found not reproducible.
+
+**Default numerics.** Every default log-likelihood of a valid input is
+unchanged bit for bit, except in these places, each a crash, a silent wrong
+answer outside the frozen reference's code, or a declared divergence:
+
+- a selection-variance budget already exhausted by the PE variances is now
+  rejected whatever `N_eff` is (before, `N_eff = +inf` or `N_eff > N_obs^2
+  1e12` passed with a finite value);
+- a one-catalog field analysis under the soft Neff guard
+  (`ds.infer(sampler="numpyro")` turns it on by default) now has the
+  reference's density `n_1 / Z_1`, so its soft wall has its calibrated height;
+- the kernel pin's probe tolerance is relative where the kernel's log weights
+  are huge, so pinned likelihoods that were `-inf` by rounding alone are now
+  finite (a declared divergence: the reference has the same holes);
+- `ang2pix_ring` matches healpy for right ascensions within about 4.4e-16
+  below a multiple of 2 pi;
+- an integer or float32 `theta` is converted to float64 before decoding.
+
+The parity probes the packages touched give candidate outputs byte-identical
+to `main` at 1022429, except the three sampler probes listed under "Samplers
+and prior transforms" (one item each). Some results gain keys or change keys
+that are not likelihood values: `log_prior_volume_fraction` and
+`logZ_corrected` for partially fixed joint prior pairs and for core-built
+targets, `guard_report["selection_coverage"]`, and the fingerprints of
+host-density targets and of plans that record a new non-default option.
+
+Where two packages fixed the same thing, the branch keeps one behaviour,
+stated in the subsection it belongs to: the pooled cache's depth (both checks
+are kept), unknown `ds.infer` keywords (refused, not warned), a target's
+prior-volume offset (the public API package's), the partial-fixing warning
+(the public API package's, with the samplers package's wording), and the
+float32 column check of a binding (the likelihood package's).
+
+### Completeness and the selection budget (default numerics unchanged)
+
+Every default log-likelihood is unchanged bit for bit. This was checked on
+nine bound analyses: the pooled and the row count ratio, conditional, field
+and two-catalog, with a depth and a row fraction, and completeness="selection"
+with a row fraction. The completeness, selection, likelihood and mixture
+parity probes write the same output as before and pass against the frozen
+reference. What changes is warnings, the refusal of inputs that gave a
+silently wrong answer, and three opt-in options.
+
+- **The pooled count ratio near z = 0 (warning).** The default counts each
+  galaxy at its point redshift, with the weight 1/dN_exp, which grows as z^-2.
+  With photometric redshifts some galaxies scatter to z_obs near 0, and the
+  ratio is far above 1 below z ≈ 0.07: about 300 at z = 0.01 on a mock catalog
+  that is 50% complete with errors 0.03(1+z). The clip then makes the catalog
+  complete there and removes every missing host there, whatever the
+  completeness. For a catalog that carries no host information, ln L_cat − ln
+  L_spec was +7.3 nats at H0 = 20 and fell by 1.4 nats from H0 = 50 to 100 (64
+  events). The marginal H0 moved by −1.0 km/s/Mpc (−0.15 sd); scaled to four
+  times the events it moved by −0.33 sd. Building the cache now warns where
+  this ratio exceeds the one of the catalog's own host density (below) by more
+  than a factor 1.5, and names the redshifts. Spectroscopic catalogs,
+  including ones with a 450 km/s peculiar-velocity error, do not warn.
+- **count_ratio="pooled_kernel" (opt-in).** The pooled count ratio with each
+  galaxy counted through its redshift kernel instead of its point redshift.
+  The kernel width is dzgals; sigma_kde is not included, because it may be
+  sampled. This is the pooled ratio of the catalog's own host density, so the
+  observed and the missing hosts add up to the expected density for a catalog
+  that carries no host information, with or without redshift errors. Galaxies
+  at z <= 0 count through the part of their kernel above 0. On the mock above,
+  ln L_cat − ln L_spec is flat to 0.22 nats over H0 = 20 to 140 at the true n0
+  and to 0.15 nats when marginalised over n0. A falling completeness gives at
+  most 0.33 nats. With spectroscopic redshifts it gives the default's curve to
+  1e-3 in the ratio. The plan records it with its window; at the low level it
+  is build_pooled_count_ratio_cache(..., redshift_errors=True). The default
+  stays "pooled".
+- **A row fraction of 0 on rows that hold galaxies.** Under the pooled count
+  ratio this is now refused (ds.model and build_pooled_count_ratio_cache).
+  Those galaxies entered every row's ratio but none of the coverage (+20% with
+  8 of 48 rows), and were counted twice in their own row. Under
+  completeness="selection", which keeps the frozen reference's values (the
+  reference accepts such rows), it is a warning.
+  build_pooled_count_ratio_cache also refuses fractions that are not finite or
+  lie outside [0, 1].
+- **The depth a pooled cache was built for.** A cache built for the grid top
+  and evaluated at a depth of 0.35 gave C = 0.29 instead of about 0.55 at z =
+  0.349, silently. PooledCountRatioCache gains two records, written by
+  build_pooled_count_ratio_cache: `z_top`, the 0-d depth its operator was
+  normalised to (z_depth, or the top of the grid), and `depth`, a static
+  PooledCacheDepth holding its z_depth. completion_curves and
+  gathered_completion_curves raise ValueError where the comparison can be
+  decided when they are traced: in the bound likelihood, whose z_depth is a
+  Python value, exactly; inside their own jit, where z_depth is traced, a
+  depth against none. A traced depth of another value makes the curves NaN
+  (z_top), so the likelihood is -inf. BoundAnalysis also refuses a cache of
+  another depth than its own. A cache constructed without these records is not
+  checked. Pass the catalog's z_depth when building a cache yourself.
+- **A depth that varies over the sky.** The advice to split such a catalog
+  into one catalog per depth under catalog_sky_weighting="field" is withdrawn
+  (README, CONTRACT and the pooled sections above now say so). Each catalog
+  has one global weight, so in the rows of one region the other catalog counts
+  every host as missing. Each region's galaxy contrast is then diluted by its
+  mixture weight, which pulls the result toward the catalog-free one. ds.model
+  now warns when two catalogs' row fractions are never positive in the same
+  row. The pooled estimator models one completeness for the whole catalog.
+  Only count_ratio="row" lets the completeness vary by row, and it is biased
+  where the completeness falls and where rows are sparse.
+- **count_ratio="row" (legacy; values unchanged).**
+  - build_observed_density_cache refuses real galaxies more than 7 widths of
+    its 0.05 kernel below z = 0 (z < −0.35). There the kernel's mass rounds to
+    0, and a galaxy at z = −0.5 made its row complete out to z ≈ 1.3.
+  - It warns when a typical row holds fewer than 1000 effective galaxies under
+    the kernel at the catalog's median redshift. The clip of each row's noisy
+    ratio then biases the completeness low: a complete catalog with 13
+    galaxies per row (nside 128) reads 0.59 at z = 0.02. The missing hosts
+    this adds grow with nside.
+  - Without a batch_size, the rows per batch keep the (rows, N_z, N_max)
+    kernel within 2^30 bytes, at most the previous 512. The values are the
+    same bit for bit; peak memory fell from 13 GB to 3.5 GB for 2.5 million
+    galaxies at nside 8.
+- **selection_budget_audit(..., budget="likelihood", row_fraction=None)
+  (opt-in).** The completeness is 0 above z_depth and the footprint is the
+  summed row fraction. The default N_obs_total is the likelihood's observed
+  count: each row's galaxies times its catalog kernel's mass below the depth.
+  The default budget="frozen" keeps the legacy definitions and values. With a
+  depth, the frozen budget can be many times the count the likelihood
+  predicts: 18.6 times for GaussianMagnitudeSelection(22, −20.2, 1) at z_depth
+  = 0.25.
+- **Selection payloads.** The Gaussian and Schechter decoders and
+  validate_catalog_selection refuse booleans and strings, as the tabulated
+  family does. Before, m_lim=True decoded to a first-magnitude limit (every
+  host missing) and k_corr_coeffs="01" to the coefficients (0, 1). A NumPy
+  array of K-correction coefficients is now accepted; it raised "truth value
+  of an array ... is ambiguous".
+- **Tests.** tests/test_count_ratio_null.py pins the uninformative-catalog
+  null: spectroscopic redshifts flat under the default, photometric ones not
+  flat under the default and flat under "pooled_kernel".
+
+### GW loaders and the PE/selection pair gate (stricter input checks; default likelihood values unchanged except where noted)
+
+- Pair gate: the detection cut and redshift truncation are now compared. gwcat
+  records z_max, the detection statistic, the FAR threshold and snr_min, but
+  leaves them out of contract_hash. bind_analysis now compares them on every
+  pair that records them (top-level attrs first, then the 2.1 contract). Two
+  stated values that differ are refused. A value stated on one side only
+  raises a RuntimeWarning. Two stated detection statistics must agree: a
+  FAR-only event list paired with a "far_or_snr" injection mask is refused,
+  where gwcat only warns. Expect the one-sided warning on every bind of the
+  current production pairs ("FAR: PE far_max=nan vs selection
+  far_threshold=1.0").
+- chieff_reference selections: spin_reference_amax must equal the PE chi_eff
+  ceiling (chi_eff_amax_1/2_per_event, or chi_eff_amax) to rtol 1e-9,
+  otherwise the pair is refused, for hashless 2.0 pairs too.
+  spin_reference_coverage_ok=False raises a RuntimeWarning. Core now ACCEPTS a
+  2.1 (chieff PE, chieff_reference selection) pair when every other pairing
+  field agrees and the advisory columns differ only by a1, a2, cost1, cost2,
+  chip. gwcat's own validate refuses such a pair on the hash (its 2.1 hash
+  does not yet recognise it, and gwcat says to export it at 2.0).
+- chi_eff fold (chi_eff_in_p_pe=False / chi_eff_swap_applied=False): needs a
+  gwcat that provides chi_eff_prior_logprob_in_support (the gwcat extra now
+  pins one; see "Packaging" below). Folded values inside the support are
+  unchanged. Refused now: PE samples or injections beyond the ceiling; a NaN
+  or non-positive ceiling; per-event (amax_1, amax_2) ceilings that differ
+  from the scalar chi_eff_amax; a store that records only one of
+  chi_eff_amax_1/2_per_event, or per-event arrays that are not one value per
+  event.
+- PE events with p_pe == 0 for every sample are refused. Zero-weighted samples
+  in other events raise a RuntimeWarning.
+- Bootstrapped PE events: a RuntimeWarning at every load names the events
+  gwcat resampled with replacement (n_unique_samples_per_event < nsamp). Their
+  per-event MC variance is too small by about 1 + nsamp/n (bounded by 1 +
+  nsamp/n_unique). The current production stores warn for GW150914_095045
+  (2383 unique rows) and GW200129_065458 (1732), bound up to 3.36. The
+  variance used by the guard is not rescaled.
+- Event-block layout check: a contiguous store of alike events sorted inside
+  each event now warns instead of being refused.
+- Injection count: bind_analysis refuses a selection ndraw smaller than the
+  number of injections with positive pdraw. The likelihood seams (spectral,
+  ordinary, bright, host-density) refuse n_draw below the live injections when
+  their inputs are concrete.
+- Selection variance guard: an exhausted budget (sum of per-event PE variances
+  >= max_likelihood_variance - 1e-12) is now rejected whatever N_eff is. The
+  hard guard returns -inf, and the soft guard keeps its wall at full depth.
+  Before, N_eff = +inf or N_eff > N_obs^2*1e12 passed with a finite value.
+  Default likelihood values change only in those cases; everywhere else the
+  jitted bound likelihood is bitwise equal to the previous release.
+  guard_report's classify_guard follows the same rule.
+- compute_dtype="float32" (opt-in): selection padding keeps float32 columns
+  and the bound q. With a sel_batch_size that does not divide the injections,
+  float32 ln L values move at the ~1e-8 to 2e-7 nats level. Float64 results
+  are bit-identical.
+
+### Field mixture
+
+- New ds.model(..., mixture_density=...) for a field mixture of two or more
+  catalogs.
+  - "pixel" (the default) is the frozen reference's convention. Each branch
+    n_k / Z_k is the host probability of the sample's row, a mass per pixel.
+    When the catalogs' nsides differ, branch k carries its pixel area A_k, so
+    the weights act as w_k A_k / sum_j w_j A_j and fcat_k are not host
+    fractions.
+  - "steradian" (opt-in) multiplies each branch by A_min / A_k, its pixel area
+    relative to the smallest in the mixture. Each branch is then a host
+    density per steradian on the finest catalog's pixel scale, and the weights
+    are host fractions whatever the nsides.
+  - With equal nsides the factor is exactly 1, so "steradian" gives the
+    default's values bit for bit under the hard and the soft Neff guard alike,
+    log mu included. The common scale A_min keeps log mu, which the soft wall
+    reads, on a per-pixel scale.
+  - ds.model now warns when the nsides differ and mixture_density is not
+    given. Pass mixture_density="pixel" to keep the reference convention
+    without the warning.
+  - mixture_density is refused with one catalog and with
+    catalog_sky_weighting="conditional".
+  - The plan records "steradian" in catalog_model. "pixel" is not recorded, so
+    existing fingerprints are unchanged.
+- One-catalog field analysis under the soft Neff guard
+  (selection_neff_soft_guard=True; ds.infer(sampler="numpyro") turns it on by
+  default):
+  - The density is now n_1 / Z_1, as in the frozen reference. With
+    tools/probe_catalog_mixture.py --soft-guard 0.08, the one-catalog cells
+    now match the reference to a relative 3.7e-14; before, they differed by up
+    to 2.7e4 nats.
+  - Changed outputs:
+    - log L where the soft wall is active: the wall now has its calibrated
+      height. Before, log mu was offset by +log Z_1 and the wall was much
+      shallower: on the test fixture at max_likelihood_variance=0.065, log L
+      moves from -19016.6 to -67614.7.
+    - log L where the wall is inactive: changes only by rounding (about
+      4e-15).
+    - Diagnostics: log_mu and every event_log_evidence are now normalised,
+      shifted by -log Z_1.
+  - Extra cost: bind_analysis now also binds the catalog's full sky (and a
+    full-sky kernel pin when the catalog has a survey depth). The likelihood
+    evaluates Z_1 on every proposal, by the direct full-sky sum for the count
+    ratio (the pooled default has no moments form). That is the same
+    per-catalog Z_k work a two-catalog mixture does: about 12 nside^2 rows
+    times the redshift grid (196,608 rows at nside 128). Expect more run time
+    and device memory for every one-catalog field run under numpyro.
+  - No fingerprint field changes with this. A soft-guard checkpoint of a
+    one-catalog field run written before this change is not refused on resume,
+    but it would continue on the new likelihood. Restart such runs instead of
+    resuming them.
+  - A one-catalog binding without the full sky (for example one made without
+    the soft guard and then switched on with dataclasses.replace) is refused
+    under the soft guard. Rebind with bind_analysis(...,
+    selection_neff_soft_guard=True).
+  - The hard-guard program (the dynesty default) is unchanged. Its diagnostics
+    log_mu and event_log_evidence for a one-catalog field analysis stay
+    unnormalised, offset by +log Z_1, which cancels from the likelihood
+    (documented on BoundAnalysis.diagnostics). The frozen reference normalises
+    them under either guard.
+- Field mixtures of two or more catalogs: a NaN in any branch (an extension, a
+  selection model, a curve, a missing-host budget) now makes the likelihood
+  -inf under every kernel layout. Before, this held only when some catalog
+  carried a pin, galaxy list or kernel window. Finite values are unchanged.
+- MissingHostExtension:
+  - A negative modulated density is clipped at 0 before Z_k, as the numerator
+    already treated it (the reference's max(1 + b delta_g, 0)).
+  - missing_total must return a 0-d scalar (ValueError otherwise), and a
+    non-finite or negative total gives -inf.
+  - MissingHostContext gains completeness_curve: the clipped curve of the
+    selection completeness or of the pooled count ratio, and None for the
+    per-row count ratio.
+  - For the pooled count ratio, row_fraction is now the pooled cache's row
+    coverage instead of None.
+- catalog.mixture.normalized_state and eval_normalized_field_prior_vmap now
+  carry the row masses' pin, galaxy-list and window poison into log Z.
+- The field_normalizer="moments" refusal now reads "is implemented only for
+  completeness='selection'" and gives the reason for each completeness. Which
+  inputs are refused is unchanged.
+- tools/probe_catalog_mixture.py gains --soft-guard CAP, which runs both arms
+  under the soft Neff guard. CI runs it without the flag, as before.
+
+### Marked hosts: non-finite marks, selection completeness, auto window, base-weight mu_miss (new errors; opt-in estimator; default unchanged)
+
+- **A non-finite host mark of a real galaxy now raises `ValueError`.** The
+  same applies to a non-finite reference redshift or reference mark
+  (`check_centered_marks`, so in `build_marked_incomplete_catalog_prior_state`
+  and `marked_dark_siren_log_likelihood`). The error names the first row, slot
+  and mark. Before, one NaN mark, or NaN padding, made `mu_miss` NaN over most
+  of the grid. The row normaliser then read as `log_Z = 0` in every row, and
+  the marked prior came back finite and about 13 nats off. Padded slots are
+  now ignored whatever they hold: they are read as zero marks before the
+  product with eta, so NaN padding gives the zero-padded prior and gradient
+  bit for bit. Legacy refused non-finite marks in pixelate and zeroed the
+  padding. A NaN normaliser now poisons its row (`-inf` likelihood) instead of
+  reading as 0. Two equal mark tables that contain NaN now count as the same
+  table in the shared-view check.
+- **The marked-host prior refuses `CatalogParameters.selection`.** It raises
+  `ValueError` instead of silently running the count ratio under
+  `completeness="selection"`, which was up to 3 nats per sample off the
+  selection prior.
+- **The marked likelihood drops a `kernel_window="auto"` window on the
+  catalogs the per-sample evaluator is handed**, not only on the ones the
+  states are built from. An explicit window is still refused. Before, the
+  marked prior was summed over the window with no `window_ok` verdict, which
+  gave a finite wrong value past the sizing `sigma_kde`. The marked kernel now
+  sums every galaxy, as documented. A marked state built directly must be
+  evaluated against the catalog without its window.
+- **Opt-in `mu_miss_estimator="weighted"`** on `missing_host_efficiency_grid`,
+  `build_marked_incomplete_catalog_prior_state` and
+  `marked_dark_siren_log_likelihood`. The default `"count"` is the legacy
+  count mean of `h` per redshift bin. The observed branch carries `N_obs
+  <h>_w`, the mean weighted by the catalog base weights. So when the weights
+  correlate with the mark (for example luminosity weights with a stellar-mass
+  mark), a redshift-independent mark still moves the catalog:missing odds by
+  `<h>_w / <h>`: x0.6 to x1.7 over eta in [-2, 2] in the review. `"weighted"`
+  averages `sum w h / sum w` per bin over the aligned rows, so the two
+  branches cancel. It refuses a survey-wide reference table, which carries no
+  base weights.
+- **`CenteredHostMarks` survives standard JAX tree operations.** `tree_map` to
+  non-array leaves, `eval_shape`, `device_put` and `vmap` prefix trees now
+  work: `tree_unflatten` no longer re-runs the validating constructor.
+- **`ds.model(counterparts=...)` validates each counterpart.** `z` and `dz`
+  must be finite, positive, real scalars. Unless the counterpart is
+  `sky_marginalized`, `pixel` must be an integral RING id in `[0, 12 *
+  counterpart_nside**2)`. Before, a zero or NaN `dz`, a NaN `z` or an
+  out-of-frame pixel bound and gave `-inf` at every theta, with nothing naming
+  the counterpart. A negative `dz`, which was silently read as `|dz|`, is now
+  refused, as legacy did.
+
+**Numerics.** Unchanged for finite marks, `selection=None`, the default
+`"count"` estimator, catalogs without a window, and valid counterparts.
+`tools/probe_catalog_marks.py` (21 values) and
+`tools/probe_catalog_likelihood.py` (105 values) are the same bit for bit
+before and after. So is every leaf of the marked prior state on a fixture with
+non-uniform weights, a survey depth, an empty row, garbage padding and a
+reference table. The one public value that changes is `log_h`, the third
+output of `build_marked_catalog_kernel_state`: it is now 0 at padded slots
+that held non-zero padding, and nothing reads those slots.
+
+### Catalog (new errors, an in-graph poison, and fixes for -inf holes and NaN gradients; no likelihood change for valid inputs)
+
+- **Kernel pin probe tolerance.** The pin's in-graph probe compares each
+  probed slot to max(`KERNEL_PIN_TOL` = 1e-9, `KERNEL_PIN_TOL_EPS` (64) * eps
+  * |value|) instead of an absolute 1e-9. With a survey depth, rows whose
+  galaxies all lie thousands of widths above it have log_kw_eff near 2.5e7.
+  There float64 resolves 3.7e-9, so the probe failed on rounding alone and the
+  pinned likelihood was -inf at about half the H0 values (12 of 25 in the
+  review scenario; the unpinned program was finite). Those values are now
+  finite and equal the unpinned program to 1e-12. Wherever |log_kw_eff| < ~7e4
+  the tolerance is still 1e-9, so every finite value is unchanged bit for bit.
+  This is a declared divergence from legacy, which has the same absolute 1e-9
+  and the same holes.
+- **Survey depth checks.** `load_catalog` refuses a `z_depth` attribute that
+  is not a finite redshift above 0. `bind_analysis` refuses a store `z_depth`
+  outside (0, grid end] for every completeness: count ratio row and pooled,
+  selection, complete, and each catalog of a field mixture, whose error names
+  the catalog. Before, only the pooled count ratio checked the range. A NaN or
+  non-positive depth used to drop the catalog from the observed branch, and a
+  depth beyond the grid gave rows more observed hosts than galaxies, both with
+  no error. A catalog without a depth has `z_depth=None` (no attribute in the
+  file). Direct kernel callers are not checked at bind; for them the depth
+  normaliser reads a depth beyond the grid end as the grid end (mass below it
+  1, not 1.058). New host helper:
+  `darksirens.catalog.types.check_survey_depth`.
+- **NaN missing-host budget.** A NaN in any row's `N_obs + N_miss` (for
+  example from a companion's curves through
+  `build_incomplete_catalog_prior_state_from_curves`, or from a missing-host
+  extension's density) now makes every row's `log_Z` NaN, and so the
+  likelihood -inf. Before, the row read as log Z = 0 and got a finite,
+  inflated host density. In a field mixture the branch poison is added to
+  every term (see "Field mixture"). Finite budgets are unchanged bit for bit.
+  Inherited from legacy and guarded here.
+- **Direct catalog prior.** `log_catalog_prior` and `log_catalog_prior_vmap`
+  raise `ValueError` when `params.z_depth` is not None, instead of silently
+  returning the untruncated kernel. Use `build_catalog_kernel_state` with
+  `eval_log_catalog_prior_state` for a depth-limited catalog. Without a depth
+  they are unchanged. Inherited from legacy and guarded here.
+- **Non-finite padded widths.** A NaN or inf `dzgals` padding slot is read as
+  1.0 when the kernel forms its widths (padded and galaxy-list layouts, and
+  the marked kernel). Values are unchanged. The `sigma_kde` and `H0`
+  gradients, which were NaN on such catalogs, are now finite and equal to
+  those of finite padding. `validate_catalog` still accepts any padded width;
+  padded redshifts must still be finite.
+- **Kernel window sizing memory.** `kernel_window` and
+  `kernel_window_applies`, which run under the `kernel_window="auto"` default,
+  read the catalog in row blocks. A device catalog is sliced on the device
+  first, so the binding no longer keeps host copies of `zgals` and `dzgals`.
+  Before, peak host memory was 2.1x one padded float64 array, and a GPU
+  binding kept two such arrays for its lifetime. The window is unchanged bit
+  for bit.
+- **ang2pix_ring.** Right ascension is folded into [0, 2*pi) in radians before
+  the HEALPix azimuth reduction, as healpy does. Pixel ids change only for ra
+  within about 4.4e-16 below a multiple of 2*pi, where core now matches healpy
+  (one ring off at even nside, and one pixel off in the polar caps, before).
+- **Text.** The catalog docstrings now name the current defaults: pooled count
+  ratio, galaxy-list layout, `kernel_window="auto"`, gathered missing density.
+  The `load_catalog` docstring lists the checks it makes and those left to
+  bind. The negative-redshift warning now says that a galaxy far below zero is
+  refused at bind, rather than kept as a host.
+- **Parity.** All catalog parity probes (`probe_catalog_kernel`,
+  `_likelihood`, `_completeness`, `_selection`, `_mixture`, `_marks`,
+  `_population_blocks`, `probe_selection_completeness`,
+  `probe_healpix_geometry`, `probe_public_catalog_loader`) give candidate
+  outputs byte-identical to `main` at 1022429.
+- **Deferred.** The missing-host density is still interpolated linearly
+  between grid nodes, while the spectral prior is interpolated in log. This is
+  a legacy-parity default. The fix needs an owner decision on the formulation:
+  an opt-in factorised (1-C) x log-volume interpolant, or an empty-catalog
+  spectral baseline.
+
+### Populations: float32 fixes and new opt-in normalisations (default unchanged)
+
+**Float32 pairing normaliser in the taper toe (only `compute_dtype="float32"`
+changes).** Two float32 paths returned wrong densities for m1 within about
+1.2% of the secondary-mass taper window above m_min:
+- With the opt-in `pairing_m1_grid`, the grid and edge normalisers were built
+  from float64 nodes. A float32-floored density was divided by the integral of
+  a float64-floored kernel and came out exp(130 - 79.85) = exp(50.15) too
+  large. One such selection injection took the powerlaw+peak likelihood from
+  26.7005 to -inf. The nodes now use the per-sample dtype, the products scale
+  * n_sc are formed in float64, and the density is returned in the per-sample
+  dtype (it used to come back float64).
+- With `pairing_norm="per_sample"`, under jit XLA rewrites (p / scale) / n_sc
+  into p / (scale * n_sc). That product flushes to zero in float32, and the
+  density came out +inf, a dropped weight, for every m1 below m_min + 1.9e-3
+  at m_min = 5, dm_min = 3. The float32 branch now multiplies by the
+  reciprocal.
+
+Float64 is unchanged bit for bit: pairing values and gradients under
+per_sample, the m1 grid and per_point; probe_population and
+probe_spectral_likelihood.
+
+**Golomb 1G+tail gradients (values unchanged).** For dm_tail <~ 0.6 Msun
+(prior floor 0.1), the logistic tail taper overflowed exp at the low end of
+the mass grid. Values were exact, but d log p_pop / d(M_tr, Delta, dm_tail)
+was NaN for every sample. The gradients are now finite and equal central
+differences. Values are bit for bit the same.
+
+**`golomb_quadrature="split"` (opt-in, default unchanged).** Set with
+`configure_normalization_grids(golomb_quadrature="split")` or env
+`DARKSIRENS_GW_GOLOMB_QUADRATURE=split`. The default (`"grid"`, the
+reference's rule) integrates the Golomb progenitor mass by trapezoid on the
+fixed 0.4-Msun mass grid. It has two errors:
+- log p_pop jumps by 1.5-2.4 nats (30 samples near the bump) every time the
+  sampled disruption edge M_tr + 2 Delta crosses a node, and is nearly flat in
+  between (d/dM_tr 0.18 against a true 4.47).
+- A low-mass kernel narrower than the spacing is seen at one node, so phi_1G
+  at 1 Msun is 3.4x too large at sigma = 0.05 (2.2x at 0.08).
+
+`"split"` integrates [m_lo, 20] and [20, M_tr] by trapezoid uniform in ln M_I
+(384 + 128 nodes) and [M_tr, M_tr + 2 Delta] by 64-node Gauss-Legendre.
+Measured with it: smooth in M_tr and Delta (largest step 0.035 nats on a
+0.005-Msun scan), d/dM_tr equal to central differences, and phi_1G at the grid
+nodes within 2e-4 of a dense reference for sigma in {0.05, 0.08, 0.2}. The
+cost per call is the same. Not covered: phi is still evaluated on the mass
+grid and interpolated linearly, so between nodes at low mass a steep IMF keeps
+an interpolation error (about 10% near 1.2 Msun for a = 2.35).
+
+**`population_norm="exact"` (opt-in, default unchanged).** Set with
+`configure_normalization_grids(population_norm="exact")` or env
+`DARKSIRENS_GW_POPULATION_NORM=exact`. By default two families integrate to a
+hyperparameter-dependent constant. That constant cancels in a likelihood with
+one population, but it reweights catalog branches that carry different
+populations (`per_catalog_population`). Use this option there.
+- **Grammar mixtures.** A component without its own low-mass edge (the
+  Gaussian peak) is normalised over the whole mass grid, but its pairing
+  removes all its mass below the mixture's m_min. powerlaw+peak integrates to
+  0.880 at G.mu = 20, G.sigma = 10, PL.m_min = 10, and brokenpowerlaw+2peaks
+  to 0.9977 at its fiducial. `"exact"` normalises such a component over
+  [m_min, m_hi], giving 1.0000 to the reference quadrature's accuracy, and the
+  mixture weights become population fractions.
+- **GWTC-3 and GWTC-5 fiducial masses.** The kept fraction was formed as 1 -
+  deficit. For GWTC-3 at alpha = 10.8, m_min = 3.24, delta_m = 9.11 (inside
+  Table VI) the normaliser is 0.38% low. `"exact"` integrates the kept part
+  directly: within 3e-9 of scipy.quad there. For GWTC-5 the worst of 300 prior
+  draws goes from 3.0e-4 to 6.8e-6.
+
+**Component-spin tilt mixture (opt-in, default unchanged).**
+`ComponentSpinModel(..., tilt_mixture="binary")` or
+`default_component_spin(tilt_mixture="binary")` evaluates the GWTC-3 Default
+tilt model, one aligned/isotropic mixture over the binary: zeta N(c1) N(c2) +
+(1 - zeta)/4. The default `"per_spin"` multiplies two one-tilt mixtures. It is
+what the `gwtc3_plpeak_component_spin` preset uses. It has the same one-tilt
+marginal but a different joint density: at zeta = 0.75, sigma_t = 0.9, two
+anti-aligned spins get 0.50 of the Default model's density, and the tilts are
+uncorrelated against 0.072. So that preset's zeta_spin and sigma_t are not the
+published model's.
+
+The docs also stopped calling the [1, 10]^2 Beta-shape box the LVK magnitude
+prior. The LVK prior is uniform in the mean and variance, and it allows mean
+magnitudes below 1/11.
+
+**Golomb tail taper (opt-in, default unchanged).**
+`GolombRemnantMass1GPlusTail(..., tail_taper="planck")` is a keyword-only
+option. It makes the tail exactly zero below M_BH,max - dm_tail. The default
+logistic never reaches zero there. Against a steep (m/M_BH,max)^-c, the
+"high-mass" tail can then dominate low mass: at c = 8, dm_tail = 20 (inside
+the prior box) it is 47% of all mass, almost all of it below 10 Msun. The
+registered `golomb_1g+tail` keeps the logistic.
+
+The Golomb docstrings now also state that the models have no minimum
+black-hole mass: the population's low-mass edge is the mass grid's M_LO = 1
+Msun.
+
+**Fingerprints.** `golomb_quadrature` and `population_norm` enter
+`normalization_grids` only when set to their opt-in values, so every existing
+fingerprint still matches. `tilt_mixture` and `tail_taper` are constructor
+options of a model the user registers under its own name.
+
+**pairing_scale default of 2026-10-01 (documentation).** The default of
+`pairing_scale` became `"analytic"` on 2026-10-01 (37aeda1). It equals the
+historical `"node_max"` arithmetic to rounding (|dlogL| <= 2.2e-11 on the real
+259-event likelihood), not bit for bit. To reproduce a run made before
+2026-10-01 bit for bit, or to resume its checkpoint, also set
+`pairing_scale="node_max"` (env `DARKSIRENS_GW_PAIRING_SCALE=node_max`), in
+addition to the four 2026-10-02 historical values. CONTRACT.md's list of
+historical values names it now, and so do the catalog/settings.py and
+population/utils.py docstrings.
+
+### GP models, sky x z models and the population registry (default numerics unchanged)
+
+Every default output is bit-identical to the previous tree. The candidate
+outputs of probe_population, probe_angular_advanced, probe_angular_wiring,
+probe_spectral_likelihood and probe_run_fingerprint_gate are byte-identical,
+and so is the default log_p_pop of all 19 GP models. Default run fingerprints
+are unchanged, because each new setting enters core_numerics_semantic only
+when it is not its default. (The core-built targets' new
+`log_prior_volume_fraction` is described under "Public API" below.)
+
+New opt-in options. Each is latched at import from the environment and read
+when a likelihood is traced.
+- `DARKSIRENS_GP_NORM_QUADRATURE=resolved` (default `lattice`, the frozen
+  rule). It covers the GP normalisers that do not cancel against the selection
+  term: every z-conditional N(z) and every m1-conditional N(m1).
+  - The normalisers are integrated on nodes that follow the sampled tapers and
+    the q-support, at 4 nodes per RBF and 8 per Matern-3/2 length-scale floor.
+    The kernel is contracted one axis at a time.
+  - log N is interpolated in z with a cubic stencil; the additive model uses
+    linear interpolation on twice the nodes.
+  - The q-free models' baseline pairing is normalised with PowerLawPairing's
+    own rule.
+  - The lattice rule is inherited from the reference. At the prior corner
+    (log_amp ceiling, ls_chi and ls_z at their floors), int p_gp(m1, chi | z)
+    of gp3d_m1_chi_z runs from 0.98 at z = 0.1 to 1.61 at z = 1.2 on the
+    lattice, and the baseline p(q | m1) integrates to 0.02-0.46 just above
+    m_min. The resolved rule gives 1.000-1.001, and 1 within 1e-3 for the
+    pairing.
+  - Cost on CPU with 512 queries, value plus gradient: from about the same to
+    5x (gp4d_additive 8.5 s -> 44 s); gp4d resolved 53 s at 5.8 GB peak.
+- `DARKSIRENS_SKY_ZNORM_PER_LS` (default 3, the frozen value) sets the density
+  of the per-redshift sky normaliser table of sphere_gp_z and overdensity_gp,
+  in intervals per sky_log_ls_z floor. At 12, the interpolation error in the
+  log normaliser at the prior corner falls from up to 0.10 to below 0.007. The
+  option resolves the interpolation part only: on an independent sphere, the
+  sky mean of g between nodes is still off by up to 0.023 at 12 per floor
+  (0.125 at 3). Up to 0.016 of that comes from the sphere quadrature at the
+  nodes, which this option does not change. So it does not make the sky field
+  mean-one to 1e-2.
+- `DARKSIRENS_SKY_Z_NODE_HI` (default 3.0, the frozen value) sets the top of
+  those models' z inducing nodes. Setting it to zMax keeps the sky anisotropic
+  above z ~ 3, where the field otherwise decays to isotropy. The node count is
+  kept, so the spacing widens.
+
+Behaviour changes outside the defaults:
+- shared_beta / shared_spin / shared_gamma = False on a bespoke registered
+  model (the GWTC-5 and GWTC-3 fiducials, Golomb, every GP model) now raises
+  ValueError. The flags used to be ignored while population_latex said
+  "Per-component". For a one-component grammar model the flags are still
+  accepted, and the label no longer claims a per-component structure.
+- '<one-component>@md' with shared_gamma=False now has a fixed preset, the
+  same vector as shared_gamma=True, as get_model already allowed.
+- JointGPPopulation and build_gp_model refuse an unknown mean_mode, axis name
+  or '@' suffix.
+- With the opt-in pairing m1 grid (`DARKSIRENS_GW_PAIRING_M1_GRID`) on:
+  - A sample outside the grid takes the per-sample normaliser instead of
+    jnp.interp's end-node value. A grid narrower than the model therefore
+    costs no accuracy. Before, every 200 < m1 <= 300 sample of
+    gwtc5_fiducial_bpl2peaks on a 200 Msun grid was clamped to the m1 = 200
+    normaliser: 0.09 / 0.21 / 0.38 nats high at m1 = 220 / 250 / 299. That
+    happened to a grid nobody sized, and to a density held from get_model or
+    pop_model_parser and traced after a narrower model was resolved. With the
+    grid sized for its model, values and gradients are bit-identical to
+    before.
+  - Every likelihood primitive now sizes the grid for its own model when it is
+    traced, so a direct spectral_siren_log_likelihood call on
+    gwtc5_fiducial_bpl2peaks is covered.
+  - Sizing starts from the configured grid, so it no longer depends on which
+    models were bound earlier in the process. A powerlaw+peak likelihood
+    traced after a GWTC-5 binding moves back to its fresh-process values, by
+    up to 2.2e-5 per sample.
+  - A binding's fingerprint records the grid sized for its own model, from the
+    settings the binding was made with.
+  - configure_normalization_grids applies to the configured grid, not to a
+    grown one; `configured_normalization_grid_settings()` returns it.
+  - A binding's check of its trace-time settings (see "Runtime binding")
+    compares the configured grid, so a binding traced after a wider model grew
+    the grid is not refused.
+  - assert_pairing_grid_covers_support still raises for an undersized grid, as
+    the check that the grid was sized.
+- Messages: the out-of-prior fiducial warning and the pairing-grid error name
+  the public controls instead of command-line flags.
+
+### Runtime binding (default likelihood values unchanged)
+
+The binding-level parity probes give byte-identical output on main and the
+branch.
+
+- Cosmology: a fixed H0 must be > 0, and so must the lower bound of an H0
+  prior. H0 <= 0 used to be accepted, which silently cut the prior to H0 > 0.
+  Values must be real numbers: NumPy scalars (float32, int64) and 0-d arrays
+  are now accepted; bools and strings (for example H0=('20', '140')) raise
+  TypeError. CONTRACT.md and README.md no longer call H0 "unrestricted".
+- Population('brokenpowerlaw+2peaks') is the GWTC-5 model only with
+  fixed='gwtc5'. Sampled, at another preset, or partly fixed, it is the
+  curated grammar composition BPL+2G, a different 17-parameter model. That
+  still holds, but constructing it now raises a UserWarning. To sample or
+  partly fix the GWTC-5 model, use Population('gwtc5_fiducial_bpl2peaks',
+  ...).
+- Bound likelihood and decode_parameters: an integer or float32 theta is
+  converted to float64 first. Before, it truncated or rounded the plan's fixed
+  values, giving a wrong finite log L or -inf under the kernel pin. A complex
+  or boolean theta raises TypeError.
+- BoundAnalysis checks the operands derived from its analysis whenever it is
+  built: on dataclasses.replace and on unpickling as well as on bind. It
+  refuses a count-ratio cache of the wrong estimator (either pooled ratio, or
+  the row estimator) or depth, a missing or extra completeness='selection' row
+  fraction, and float32 columns with compute_dtype=None (the message is the
+  likelihood package's; see "Likelihood").
+- BoundAnalysis stores the trace-time settings at bind: the normalisation
+  grids as configured (before the opt-in pairing m1 grid is sized for a model)
+  and the missing_density of configure_catalog_evaluation. If they change
+  before a program is first traced, that trace raises RuntimeError;
+  already-compiled programs keep working. core_numerics_semantic(bound)
+  reports the binding's stored settings.
+- bind_analysis(selection_neff_soft_guard=...) must be a bool. Mode strings
+  raise TypeError; use selection_neff_guard in ds.infer and ds.log_likelihood.
+- A redshift record built directly with a pooled count_ratio and no window
+  uses the default window 0.02.
+- The pooled cache records its depth; see "Completeness and the selection
+  budget".
+- Bright sirens: global pixel ids are int64 when nside > 13377. Before, ids
+  wrapped in int32 and every event was -inf.
+- ds.infer guard report: new key result['guard_report']['selection_coverage']
+  (shell, dL_edge, dL_max, points, max_edge_share, max_edge_nats, at). It
+  gives the share of the selection integral carried by the outermost 10% of
+  the detected injections' distance range, at the prior draws and at the edges
+  of the cosmology prior. A UserWarning is raised when N_obs times that share
+  exceeds 0.1 nat, which indicates a campaign that stops inside the detectable
+  volume and biases H0 high. The guard report now makes about twice as many
+  likelihood-diagnostics evaluations. For a likelihood used without ds.infer,
+  call darksirens.inference.guard_report.selection_coverage(bound, thetas).
+- ds.infer refuses selection_neff_soft_guard passed as a sampler option, and
+  every other keyword no core backend reads (see "Public API").
+- Documentation: README.md now gives the float32 compute_dtype scope with
+  field-weighted analyses without a complete catalog, as CONTRACT.md does.
+  CONTRACT.md's import contract now lists the process-wide state a scientific
+  submodule sets: jax_enable_x64; 'highest' matmul precision
+  (cosmology.distances); the XLA_PYTHON_CLIENT_PREALLOCATE/ALLOCATOR defaults
+  (gw.samples).
+
+### Public API: ds.infer and ds.model option checks, prior-volume bookkeeping, code identity
+
+No likelihood value, sample or default fingerprint digest changes. The only
+changed numbers are ds.infer's log_prior_volume_fraction and logZ_corrected
+for analyses that partially fix a joint prior pair, and the same two keys on
+the results of core-built targets.
+
+- **Unknown infer keywords are refused.** `ds.infer(..., **options)` used to
+  pass every keyword it does not name to the sampler backends. They read
+  options with `getattr` and a default, so a misspelt or foreign name was
+  dropped without a word. Examples: `selection_neff_soft_guard=True`
+  (bind_analysis's name) ran the hard wall; `max_likelihood_varience` left the
+  cap at 1 nat; `n_live` left nlive at 1000; `resume_from` started a fresh
+  run. For an InferenceTarget such keys were also hashed into the fingerprint.
+  infer now raises `TypeError` before anything is bound, naming infer's
+  spelling (`selection_neff_guard='soft'`, `resume_from_resolved`,
+  `checkpoint_interval_seconds`) or the closest match. The runtime binding
+  package had made the same keywords a `UserWarning`; the stricter refusal is
+  kept. The command-line names `resume` and `checkpoint_interval`, which
+  ds.infer never reads, are refused with a pointer to infer's names.
+- **Unverified ordinary resumes warn.** `ds.infer` fingerprints
+  InferenceTarget runs only. An ordinary analysis that resumes a dynesty or
+  TinyNS checkpoint with no `run_fingerprint.json` beside it now warns that
+  nothing checked the checkpoint's settings. The warning shows how to gate the
+  run: `parameter_plan_semantic`, `core_numerics_semantic(bound)` and the data
+  identity, passed to `gate_and_stamp_checkpoint_fingerprint`. The resume
+  itself goes ahead. README.md, CONTRACT.md and this file's sections on the
+  2026-10-02 speed defaults, host_mass and the pooled count-ratio default
+  promised that a resume under changed defaults is refused; they now say that
+  this holds for InferenceTarget runs and for fingerprints a caller gates
+  itself, while an ordinary `ds.infer` resume only warns.
+- **Code identity.** `core_environment_advisory()['code']` now carries
+  `darksirens_version` and, when they can be read, the `git_sha` and
+  `git_dirty` of the imported darksirens (from its checkout, or from
+  `direct_url.json` for a VCS install) and `tinyns_commit`. The code-identity
+  drift warning therefore fires on a resume under another core commit.
+  `save_result` writes the same JSON as the `code_identity` HDF5 attribute.
+  The advisory block is not hashed, so digests are unchanged. `__version__`
+  still reads 0.1.0.dev0.
+- **Plan records.** `ParameterPlan.catalog_model` records a conditional
+  complete catalog's opt-in `empty_policy='volume'`; `'zero'` records nothing.
+  `ParameterPlan.angular_model` records `angular`. `parameter_plan_semantic`
+  adds the name only for `sphere_gp_z` and `overdensity_gp`
+  (`ANGULAR_MODELS_SHARING_COORDINATES`), whose coordinates are identical.
+  Only those plans get new digests. A `make_host_density_target` target now
+  records the base analysis's plan semantic, its population and angular models
+  in its own fingerprint provenance (see "Likelihood").
+- **Prior-volume correction.** `log_prior_volume_fraction` used to hold the
+  angular model's fraction only. Fixing one member of a joint prior pair
+  samples the other member over its own bounds, with likelihood-side
+  rejection. `ParameterPlan.fixed_constraint_log_fraction` now records the log
+  fraction kept, and `ds.infer` adds it. Examples: `lambda_0 = 0.6` gives ln
+  0.4 = -0.916; `m1_low = 5` gives ln(2/7) = -1.253; `m2_low = 5` gives
+  ln(5/7) = -0.336. The fraction is not added (0.0, and the warning says so)
+  when a member of the pair has a per-catalog copy (`per_catalog_population`):
+  the likelihood is then zero wherever any catalog's population vector leaves
+  the support (see "Likelihood"), and the fraction that keeps depends on which
+  members are copied; it is not computed. `InferenceTarget` gains an optional
+  `log_prior_volume_fraction` (a finite number <= 0; booleans and strings
+  raise `TypeError`); `make_catalog_mixture_target` and
+  `make_host_density_target` set it from their analysis. Their `ds.infer`
+  results now carry `log_prior_volume_fraction` and `logZ_corrected` (0.0 and
+  an unchanged logZ for isotropic and dipole skies, -0.505 nat for
+  `multipole`, -3.381 for `multipole_l3`, plus a partially fixed pair's
+  fraction). A target that declares nothing gets the result unchanged. The raw
+  `logZ` is untouched everywhere. (The GP and registry package had added the
+  same field and the angular part; the two are one feature here.)
+- **Fixing m2_low.** Fixing the lower member of a `conditional_upper` pair
+  gives the upper member a uniform prior over the interval left, not the
+  declared conditional (proportional to 1/(m1_low - 3)). The warning now says
+  that fixing it also changes the prior on the upper member and that the
+  posterior differs, not only logZ, and that fixing the upper member gives the
+  declared conditional.
+- **ds.model option checks.** `count_ratio_window` accepts any real number
+  (`np.float32`, `np.int64`). It refuses a window below the pooled histogram's
+  bin width (1e-4), at which about half the redshift nodes saw no galaxy.
+  `n0_units` is refused for a field mixture whose catalogs are all complete,
+  as it already was for one complete catalog. The row_fraction error and the
+  ds.model docstring now say that `row_fraction` also applies to the pooled
+  count ratio (the default).
+- **Kernel pin docs.** Under `catalog_sky_weighting='field'` the kernel pin
+  applies to every catalog, complete ones included, and only a conditional
+  complete catalog is unpinned. The code is unchanged; CONTRACT.md and the
+  kernel pin section above now say so.
+- **Startup-check remedies.** For an InferenceTarget, the nested-sampler
+  startup check now says to build the target's likelihood with
+  `selection_neff_soft_guard=True` or a larger `max_likelihood_variance`,
+  since infer refuses both keywords for a target.
+
+### Samplers and prior transforms
+
+Default outputs do not change. probe_prior_transform, probe_dynesty_adapter,
+probe_numpyro_init and probe_sampler_dispatch are byte-identical to legacy.
+probe_joint_prior_resolver, probe_numpyro_static and probe_numpyro_adapter
+each differ only in one item listed below: a warning text, an error text, and
+the lognormal NUTS site.
+
+- **InferenceTarget joint constraints.** `InferenceTarget` and
+  `combine_parameter_plans` now refuse a joint constraint whose cube map is
+  not its declared density. Each member must be uniform (Beta(1, 1) on [0, 1]
+  also counts). `ordered_le` and `conditional_upper` need equal bounds on both
+  members, `simplex` needs [0, 1], and `ball3` needs [-1, 1]. These are the
+  bounds the ordinary-path resolver already requires. Before, such plans were
+  accepted and dynesty or TinyNS sampled another prior with no warning.
+- **Maps that share a coordinate.** `make_prior_transform`, and so every
+  nested-sampler run, refuses joint maps that share a coordinate unless they
+  are `conditional_upper` chains or trees declared parent first. A chain
+  declared child first, x0|x1 before x1|x2, used to break x0 <= x1 on half the
+  draws; declare the conditioning pair first. NumPyro's chained-constraint
+  error now says this.
+- **Truncated normal and lognormal windows.** `make_prior_transform` refuses a
+  `normal` or `lognormal` prior whose window the inverse CDF cannot resolve:
+  the bounds hold less than 1e-10 of the normal's mass, or more than 1e-6 of
+  the window's mass lies beyond 7.03 sigma of loc. Such priors used to give
+  one constant draw (loc ± 7.03 scale), often outside the bounds. This can be
+  reached through `survey_priors={name: ("normal", loc, scale)}`, which
+  truncates to the default bounds. The `InferenceTarget` seam runs the same
+  check and names the parameter.
+- **NumPyro rejection.** NumPyro now applies the `ordered_le`, `simplex` and
+  `ball3` constraints that its startup message announces as likelihood-side
+  rejection: a `joint_prior` factor of 0 or -inf in the NUTS model, and an
+  initial-point search that skips starts outside them. Ordinary analyses
+  already reject there through their valid masks, so their NUTS chains are
+  bitwise unchanged. An `InferenceTarget`'s NUTS posterior now respects its
+  declared constraints.
+- **NumPyro lognormal.** A NumPyro `lognormal` site now has support [lower,
+  upper]. It used to be (0, inf), so NUTS sampled outside the prior box. This
+  changes NumPyro runs that use a lognormal prior kind; no core registry
+  declares one.
+- **Dynesty finished checkpoints.** Resuming a checkpoint saved at the end of
+  a finished run still samples nothing (dynesty's behaviour). It now prints
+  that it does so and keeps the run's stop reason: a capped run reads back
+  `"maxcall"`, not `"unknown"`.
+- **conditional_upper warnings.** The rejection-fallback warning for
+  `conditional_upper`, and the partial-fixing warning when its bounded member
+  (for example m2_low) is fixed, now say that the prior density changes, not
+  only logZ.
+
+### Likelihood
+
+Default analyses are unchanged: the candidate arms of the spectral, catalog,
+catalog-mixture and per-catalog-population probes are byte-identical to
+before.
+
+- **Per-catalog population blocks** (`ds.model(...,
+  per_catalog_population=...)`, opt-in). When any branch's population vector
+  breaks one of the population model's joint prior constraints, the likelihood
+  is now `-inf`, as it is with one shared population. For GWTC-5 those
+  constraints are `lambda_0 + lambda_1 <= 1` and `m_2,low <= m_1,low`.
+  - Before, the mixture's logsumexp dropped that branch and returned the other
+    branches' finite value. Over the whole invalid region of a partially
+    copied constraint group, that value was the `fcat_2 = 0` likelihood.
+  - Catalog 1's own rejection under partial fixing was lost the same way.
+  - Values at valid points are unchanged.
+  - Population models that declare no joint constraint keep their program.
+  - The warning "keeps the population model's likelihood-side rejection (the
+    invalid region has zero likelihood)" is now true for these copies.
+- **`make_host_density_target`**:
+  - The target's likelihood is now one `jax.jit`, built once, over the
+    coordinate, the GW samples and the distance table. Values are unchanged.
+    With `sel_batch_size`, a call went from about 2.5 s to about 1 ms on the
+    test toy.
+  - `redshift_model.log_density` and `log_auxiliary_likelihood` are therefore
+    always traced; before, only `sel_batch_size` or `pe_event_block` traced
+    them. The opaque states are constants of the program.
+  - The target now sets a run-fingerprint provenance block: the base
+    analysis's plan semantic (fixed values included), its population model and
+    sharing flags, its angular model, `n_events`, `nsamp` and `n_draw`, and
+    non-default `max_likelihood_variance` and `selection_neff_soft_guard`.
+  - It takes new `identity=` and `provenance=` keywords. The caller's
+    provenance is recorded under `"companion"`.
+  - The fingerprint of every host-density target changes, so a checkpoint
+    written before this change resumes only with `resume_force=True`.
+- **`compute_dtype="float32"`**:
+  - `dataclasses.replace(bound, compute_dtype="float32")` now rounds and
+    checks the per-sample columns as `bind_analysis` does, and refuses values
+    below the float32 normal range.
+  - The likelihood functions called directly with `compute_dtype` check their
+    concrete columns the same way.
+  - `replace(bound32, compute_dtype=None)` is refused ("compute_dtype=None
+    runs the default float64 program, but gw_pe columns [...] are float32");
+    bind again for the default program.
+- **`bright_siren_log_likelihood`** now refuses a `gw_pe` whose length is not
+  `n_events * nsamp`, as the other hierarchies do. Before, a too-small `nsamp`
+  regrouped samples across events without an error.
+
+### Packaging: the gwcat extra, the Python range, save_result, opt-in low-z interpolation
+
+- **gwcat extra pin.** `pip install ".[gwcat]"` now installs gwcat
+  3ba1dbf4116bb18f76c9103f79a914564d778182 (gwcat master) instead of 3184bdb.
+  The old commit had no `ChiEffPrior.support`, so every load that folds the
+  chi_eff prior in raised `ImportError: the installed gwcat predates the -inf
+  out-of-support chi_eff convention`. That means a PE store with
+  `chi_eff_in_p_pe=False`, or a selection store with
+  `chi_eff_swap_applied=False`. Those stores now load. The prior folded in is
+  gwcat's current default, the closed-form (`"exact"`) implementation. An
+  environment with an older local gwcat that uses the grid table gives
+  in-support values about 3e-3 apart in ln p. Stores that already carry the
+  prior are unaffected. The frozen legacy reference pinned the same unusable
+  commit.
+- **Python range.** `requires-python` is now `>=3.11,<3.13`. The pinned numpy
+  1.26.4 and scipy 1.12.0 have no CPython 3.13 wheels, so 3.13+ is refused at
+  resolution instead of failing in a source build. 3.11 remains the validated
+  interpreter.
+- **`ds.save_result`.** A 0-d NumPy or JAX array entry is now written as an
+  HDF5 attribute, as other scalars are; before, it was silently skipped. A JAX
+  array is written to `result_json` as its full list of values; before, it was
+  its `str()`, which is a `"..."` summary for a long array. Any other non-JSON
+  object still falls back to `str()`. Results made only of Python types, which
+  covers everything `ds.infer` returns, are written exactly as before.
+- **Opt-in `DARKSIRENS_LOW_Z_INTERP=corrected`.** The default, `legacy`, is
+  unchanged and bit-identical. The variable is read at import; an unknown
+  value raises `ValueError`. It corrects two low-redshift chords inherited
+  from the frozen reference:
+  - `log_interp_zgrid` interpolates `log_grid - 2 ln z` and adds `2 ln z`
+    back, so every cell follows the z^2 law, not only z < 0.0018. This covers
+    the spectral volume prior, the catalog galaxy measure, the empty-catalog
+    value and the bright-siren volume factor. Against quadrature, legacy log p
+    is 5.8e-2 low at z = 0.002, 0.12 low near 0.0026 and 8.3e-3 low at 0.01;
+    corrected is within 1.2e-4 at the fiducial and 3.4e-4 at the widest CPL
+    corner.
+  - `z_of_dL_precomputed` inverts the first distance cell (z < 0.0036)
+    exactly, so `z_of_dL(dL_of_z(z))` returns z; legacy was up to 5.6e-3 low.
+  - The float32 likelihood kernels follow the switch. The run fingerprint
+    records `low_z_interpolation: "corrected"` only when set, so default
+    fingerprints are unchanged and a checkpoint is not resumed across modes.
+  - On the spectral-likelihood fixture the opt-in moves ln L by at most 7e-5.
+- **New `H0` keyword.** `darksirens.cosmology.z_of_dL_precomputed(dL, dL_grid,
+  H0=None)` takes an optional `H0`, the grid's Hubble constant. Only the
+  opt-in reads it; under the opt-in, a call without it raises `ValueError`.
+  Every core caller passes it.
+
+### Documentation corrected with these fixes
+
+- The README's `ds.log_likelihood` example passes one value per label of its
+  catalog analysis (four), not one.
+- The README counts five extension boundaries, the catalog-mixture
+  missing-host seam included.
+- The `Om0` support is given with its float64 endpoints (0.15749999999999997,
+  0.45749999999999996): the literal 0.4575 is outside it.
+- `kernel_layout="galaxy_list"` equals the padded layout to rounding, bit for
+  bit only under the unrolled CPU schedule (README, the speed-defaults section
+  above and `catalog/settings.py`).
+- `core_numerics_semantic(bound)` equals `core_numerics_semantic()` only for a
+  binding without a catalog view (CONTRACT.md and the run-fingerprint section
+  above).
+- The galaxy weights' effect under the count ratio is stated in README.md, the
+  ds.model docstring and the selection-weights paragraph above: the count
+  ratio counts raw galaxies while the weights set each row's redshift shape,
+  and the selection mode's remedy does not exist there.
+- The speed-defaults section above no longer says that the legacy probes bind
+  with the kernel window: no CI probe fixture activates it.
+- VALIDATION.md no longer lists `real-backends.yml` without `pipefail` as a
+  known gap.
+- CONTRACT.md's GP normaliser invariant states the accuracy of the default
+  lattice rule at the prior corner.
+

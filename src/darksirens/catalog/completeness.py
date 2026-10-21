@@ -184,7 +184,9 @@ def _observed_density_row(row, catalog: GalaxyCatalog):
 
     Raw galaxy counts are used.  Catalog host weights and per-galaxy redshift
     uncertainties do not enter this estimator; the fixed 0.05 kernel must match
-    the expected-count smoothing operator exactly.
+    the expected-count smoothing operator exactly.  The weights do enter the
+    observed term, where they set the row's redshift shape, so weights that
+    vary with redshift inside a row are not matched by this completeness.
 
     The redshifts are read in the grid's float64 whatever the catalog stores:
     the ``1e-300`` floor on a kernel's mass is zero in float32, so a float32

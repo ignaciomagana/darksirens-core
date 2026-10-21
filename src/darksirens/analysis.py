@@ -2015,7 +2015,11 @@ def model(
     (``ParameterPlan.catalog_model``) and a run fingerprint
     changes with them; ``"row"`` is not recorded, so an explicit
     ``count_ratio="row"`` reproduces the plan and fingerprint of a run made
-    before the default changed.
+    before the default changed. Every count ratio counts raw galaxies: the
+    galaxy weights do not enter the completeness, but they set each row's
+    redshift shape in the observed term, so weights that vary with redshift
+    inside a row bias ``H0``, and no weight-fraction completeness can be
+    supplied here (unlike ``completeness="selection"``).
 
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the

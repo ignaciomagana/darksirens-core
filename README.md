@@ -74,7 +74,8 @@ profile, bound exactly as `ds.infer` binds it:
 
 ```python
 log_likelihood = ds.log_likelihood(analysis, events=events, injections=injections)
-log_likelihood(np.array([70.0]))  # one value per analysis.parameters.labels entry
+analysis.parameters.labels  # ('H0', 'log10n0', 'delta', 'sigma_kde')
+log_likelihood(np.array([70.0, -2.5, 0.0, 0.01]))  # one value per label
 ```
 
 It takes the same likelihood options as `ds.infer`
@@ -208,17 +209,36 @@ What is left is the kernel's own `w^2 C''/2`, so the window should be small:
 on the toy the curve is within 0.006 of the truth at 0.01 and 0.016 at 0.02
 (the legacy estimator is off by 0.14 at z = 0.2), and on the examples mock
 its H0 is within 0.03 +- 0.05 km/s/Mpc of the magnitude-selection
-completeness's at 0.02. The whole catalog is one
-completeness cell, so a survey whose depth varies over the sky should be
-given as one catalog per depth (`catalog_sky_weighting="field"`, each with
-its `row_fraction`). Binding refuses a window that holds fewer than 100
-effective galaxies at the catalog's median redshift and warns below 1000,
-and warns when more than a tenth of the rows are empty without a
-`row_fraction` (they count as surveyed). Within about three windows of
-`z = 0` the curve is clipped to 1 (galaxies scattered to the lowest redshifts
-carry weights that grow as `z^-2`), so the catalog is taken to be complete
-there. `count_ratio="row"` reproduces results made before the default
-changed, bit for bit (see `MIGRATION.md`).
+completeness's at 0.02. The catalog is one completeness cell: every row
+shares the radial curve, scaled by its coverage. It does not model a depth
+or magnitude limit that varies over the sky. Splitting such a catalog into
+one catalog per stratum under `catalog_sky_weighting="field"` is a different
+model: in each stratum's rows the other catalogs count every host as
+missing, so each stratum's galaxy contrast is diluted by its mixture weight
+(`ds.model` warns when two catalogs' row fractions cover disjoint rows).
+Binding refuses a window that holds fewer than 100 effective galaxies at the
+catalog's median redshift and warns below 1000, and warns when more than a
+tenth of the rows are empty without a `row_fraction` (they count as
+surveyed). A row with `row_fraction` 0 must hold no galaxy (refused). Within
+about three windows of `z = 0` the curve is clipped to 1 (galaxies scattered
+to the lowest redshifts carry weights that grow as `z^-2`), so the catalog is
+taken to be complete there and its missing hosts there are removed. With
+photometric redshifts this reaches well beyond the catalog's real
+completeness, and binding warns where it does; `count_ratio="pooled_kernel"`
+(opt-in) counts each galaxy through its redshift kernel instead, so the
+observed and the missing hosts add up to the expected density for a catalog
+that carries no host information. `count_ratio="row"` reproduces results
+made before the default changed, bit for bit (see `MIGRATION.md`).
+
+The count ratio counts raw galaxies: galaxy weights (`wgals`) do not enter
+the completeness, but they do enter the observed term, where they set each
+row's redshift shape (the row's kernels are weighted by them). Weights that
+vary with redshift inside a row (for example a union catalog that
+down-weights its photometric galaxies, whose share of a row changes with
+redshift) tilt the observed hosts against the missing ones and bias `H0`. The remedy given
+above for the selection mode, a weight-fraction completeness with a
+weight-unit `n0`, does not exist for the count ratio; use unit weights, or
+weights that do not vary with redshift inside a row.
 
 Several catalogs combine in a field-weighted mixture: each sample's host
 density is `sum_k w_k n_k(z | p_k) / Z_k`, with each catalog's host mass
@@ -244,8 +264,10 @@ agn_selection]`, or `"complete"` for a catalog that holds every host.
 
 Galaxy weights (`wgals`) are normalized inside each sky row. Under the field
 weighting the host mass of a row is by default its galaxy count, so the
-weights only decide which galaxy of a row is the host: a row with one heavy
-galaxy and a row with one light galaxy carry the same mass. For a complete
+weights decide only which galaxy of a row is the host, and so the row's
+redshift shape: a row with one heavy galaxy and a row with one light galaxy
+carry the same mass (with an incomplete catalog, see the caveat on weights
+above). For a complete
 catalog, `host_mass="weight"` makes the row's host mass the sum of its galaxy
 weights instead, in the row's density and in the catalog's survey-global
 total:
@@ -280,9 +302,10 @@ Runnable public-API templates are under `examples/`.
 
 ## Specialized analyses
 
-Core exposes four explicit one-way extension boundaries instead of a plugin
+Core exposes five explicit one-way extension boundaries instead of a plugin
 framework: a sampler-facing `InferenceTarget`, a host-density redshift seam,
-a completion-curve composition seam and footprint-aware field estimators.
+a completion-curve composition seam, footprint-aware field estimators and
+the catalog-mixture missing-host seam.
 
 `InferenceTarget` lets a specialized package provide a log likelihood and a
 `ParameterPlan` while reusing the accepted prior/sampler stack:
@@ -340,6 +363,16 @@ those inputs stay in survey packages. A field target that fixes `Om0`, `w0`,
 on every call as a jit argument (`pinned_kernel=`), as `ds.model` does with
 `kernel_pin="auto"`.
 
+A companion that modulates the missing-host density of a field-weighted
+catalog mixture (`catalog_sky_weighting="field"`), for example with a Q
+table, passes a `MissingHostExtension` to
+`darksirens.likelihood.mixture.make_catalog_mixture_target(analysis,
+events=..., injections=..., extension=...)`. It returns an `InferenceTarget`
+whose coordinates are the analysis's followed by the extension's; core calls
+the extension on each catalog's rows and builds the row masses and the
+normalisers `Z_k` from what it returns (`CONTRACT.md`, "Catalog mixture
+seam").
+
 ## Guards worth knowing
 
 Core refuses inputs that the frozen reference also refused, at the place the
@@ -353,8 +386,11 @@ user typed them rather than as a silent `-inf`:
   `fixed={r"$\gamma$": 0.0, ...}`. Check `fiducial_values` against how a mock
   was generated before comparing results.
 - `ds.Cosmology` rejects `Om0`, `w0` or `wa` values or bounds outside the
-  tabulated distance-grid support (`Om0` in [0.1575, 0.4575], `w0` in
-  [-2.25, 0.25], `wa` in [-2.5, 2.5]); `H0` is unrestricted.
+  tabulated distance-grid support (`w0` in [-2.25, 0.25], `wa` in
+  [-2.5, 2.5], and `Om0` in [0.15749999999999997, 0.45749999999999996], the
+  float64 values of 0.3075 -/+ 0.15: the literal 0.1575 is accepted and
+  0.4575 is not); `H0` rescales the table analytically and has no grid
+  bound, but a fixed value and the lower bound of its prior must be > 0.
 - `ds.model(..., completeness="complete")` gives a galaxy-free catalog row zero
   host mass by default (`empty_policy="zero"`, the frozen behavior); the
   comoving-volume fallback is the explicit opt-in `empty_policy="volume"`.
@@ -364,6 +400,10 @@ user typed them rather than as a silent `-inf`:
   sparse-selection guard; `auto` uses the soft penalized wall for NumPyro and
   the hard `-inf` wall otherwise. `max_likelihood_variance`, `sel_batch_size`,
   `pe_event_block` and `compute_dtype` are likelihood options on the same call.
+  A keyword that neither `ds.infer` nor any sampler backend reads (a
+  misspelling, or another surface's name such as `bind_analysis`'s
+  `selection_neff_soft_guard`) raises `TypeError` with the right spelling or
+  the closest match, before anything is bound.
 - Where the guard cuts the prior is reported. Before sampling an ordinary
   analysis, `ds.infer` evaluates the likelihood's diagnostics at 32 prior
   draws and records in `result["guard_report"]` which guard fired
@@ -382,14 +422,18 @@ user typed them rather than as a silent `-inf`:
   nested samplers (dynesty, TinyNS): differentiating it raises, and
   `sampler="numpyro"` refuses it, because float32 population densities
   underflow in the tails, where their gradients are NaN. It covers spectral and
-  incomplete-catalog analyses with an isotropic angular model and a chi_eff
+  incomplete-catalog analyses, and field-weighted analyses without a
+  complete catalog, with an isotropic angular model and a chi_eff
   population. Bright
   and complete-catalog analyses, angular models, component spins and
   Gaussian-process populations are refused. The GP code keeps its covariance
   algebra in float64, so float32 gains nothing there.
 - Ordinary `ds.infer` results carry `log_prior_volume_fraction` and
   `logZ_corrected` next to the raw `logZ`, so evidences from angular models
-  that reject part of their prior box are comparable.
+  that reject part of their prior box, or from plans that fix one member of
+  a joint prior pair, are comparable. The targets core builds from an
+  analysis (`make_catalog_mixture_target`, `make_host_density_target`)
+  carry them too.
 - Every `ds.infer` result says how the sampler stopped: `stop_reason`
   (`"convergence"` when the `dlogz` criterion held, `"maxcall"`/`"maxiter"`
   for a budget cap), the final remaining-evidence estimate `dlogz_final`, and
@@ -399,8 +443,10 @@ user typed them rather than as a silent `-inf`:
   `InferenceTarget` plan must spell out `loc` and `scale` for every
   non-uniform prior (core's own `ParamSpec` may leave them `None`, meaning the
   standard `(0, 1)` defaults).
-- The opt-in `DARKSIRENS_GW_PAIRING_M1_GRID` normaliser grid is sized to the
-  bound model's mass support at bind time and refused if it cannot cover it.
+- The opt-in `DARKSIRENS_GW_PAIRING_M1_GRID` normaliser grid is sized to each
+  model's mass support, from the configured grid, whenever a likelihood of
+  that model is traced; a sample above the grid takes the per-sample
+  normaliser.
 - **Speed defaults (since 2026-10-02).** Four evaluation settings default to
   the faster evaluation. Each keeps its historical value, which reproduces a
   run made before the change bit for bit (optimized program and likelihood)
@@ -429,8 +475,11 @@ user typed them rather than as a silent `-inf`:
     opt-in pairing m1 grid is set (an explicit `"per_point"` refuses the m1
     grid).
   - `kernel_layout="galaxy_list"` evaluates the per-galaxy kernel normaliser
-    on the real galaxies only, not on the padded catalog; the values are the
-    same bit for bit. It refuses nothing, so it has no `"auto"`.
+    on the real galaxies only, not on the padded catalog; the values are
+    equal to rounding, and bit for bit under the unrolled schedule `"auto"`
+    picks on CPU (off CPU it runs a loop, which with a survey depth differs
+    from the padded layout by a few ulp). It refuses nothing, so it has no
+    `"auto"`.
   - `missing_density="gather"` evaluates the missing-host density at each
     sample's two bracketing redshift nodes instead of materialising
     `(N_rows, 1000)` grids per proposal, with the same arithmetic. `"auto"`
@@ -455,9 +504,13 @@ user typed them rather than as a silent `-inf`:
   by at most 1.4e-7 (relative 2.3e-13) on the real 259-event spectral
   likelihood and 4.0e-8 on the mock dark-siren cases, all of it from the
   per-point pairing normaliser. The defaults are recorded in the run
-  fingerprint and the historical values are not, so resuming a checkpoint
-  written before 2026-10-02 under the new defaults is refused as a settings
-  change; the refusal names the settings that resume it (see `MIGRATION.md`).
+  fingerprint and the historical values are not, so a fingerprinted resume
+  of a checkpoint written before 2026-10-02 under the new defaults is
+  refused as a settings change, and the refusal names the settings that
+  resume it (see `MIGRATION.md`). `ds.infer` fingerprints `InferenceTarget`
+  runs; an ordinary analysis's resume is gated only when the caller writes
+  and checks its own fingerprint (`gate_and_stamp_checkpoint_fingerprint`),
+  and otherwise warns that nothing checked the checkpoint's settings.
 
 ## Modelling assumptions
 

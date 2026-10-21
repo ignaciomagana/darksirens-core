@@ -288,9 +288,10 @@ What each gate now checks:
   mass-ratio range, for the fiducial and a narrow taper; the registry golden
   file holds only parametric models and does not cover this change.
 
-Known gaps kept on purpose: `real-backends.yml` still pipes pytest into `tee`
-without `pipefail`, so a failing test there does not by itself fail that job; only the names of the package-root API are frozen, not their
-signatures; the example checks are smoke checks, not numerical anchors.
+Known gaps kept on purpose: only the names of the package-root API are
+frozen, not their signatures; the example checks are smoke checks, not
+numerical anchors. (`real-backends.yml` pipes pytest into `tee` under
+`set -o pipefail`, so a failing test there fails the job.)
 
 Local measurement on the final code tree of the stack (`519100d`, the head of
 #22), with the same optional backends as above: 759 passed, 1 skipped (the

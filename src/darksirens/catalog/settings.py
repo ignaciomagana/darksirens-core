@@ -28,8 +28,11 @@ tolerance) keeps refusing a case it cannot serve, as before.
     are (chunk x 24) rather than ``N_rows x N_max x 24``, and its node count
     is set by the real galaxies rather than by the padded slots.  The rest of
     the dark-siren likelihood (the per-sample kernel sum over ``N_max`` slots
-    included) is unchanged, and so are its values (each galaxy runs the same
-    arithmetic).  ``"padded"`` evaluates ``Z_i`` on the padded
+    included) is unchanged, and so are its values to rounding (each galaxy
+    runs the same arithmetic): bit for bit under the unrolled chunks the
+    ``"auto"`` schedule picks on CPU, and within a few ulp of the padded state
+    with a survey depth under the loop it picks elsewhere
+    (``darksirens.catalog.redshift._GALAXY_MAP``).  ``"padded"`` evaluates ``Z_i`` on the padded
     ``(N_rows, N_max)`` catalog, padding slots included (the historical
     program).  The galaxy list refuses no case (it is built from the very
     view it serves), so this setting needs no ``"auto"``:
