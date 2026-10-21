@@ -139,3 +139,54 @@ def test_log_p_pop_separates_into_mass_and_spin_terms():
     # And a chieff-basis pairing (no spin block) is refused, not approximated.
     with pytest.raises(TypeError, match="component spin basis"):
         comp.log_p_pop(m1, q, z, chieff, theta_comp)
+
+
+def _default_model_tilt(c1, c2, zeta, sigma_t):
+    """The GWTC-3 Default tilt density, written out independently (NumPy)."""
+    from math import erf, pi, sqrt
+
+    z = sigma_t * sqrt(pi / 2.0) * erf(sqrt(2.0) / sigma_t)
+    n = lambda c: np.exp(-0.5 * ((c - 1.0) / sigma_t) ** 2) / z  # noqa: E731
+    return zeta * n(c1) * n(c2) + (1.0 - zeta) / 4.0
+
+
+def test_binary_tilt_mixture_is_the_gwtc3_default_model():
+    """tilt_mixture="binary" is one aligned/isotropic mixture over the binary.
+
+    The default per-spin form multiplies two one-tilt mixtures: same
+    marginals, different joint (at zeta = 0.75, sigma_t = 0.9 it gives two
+    anti-aligned spins half the Default model's density).
+    """
+    theta = jnp.asarray(THETAS[0])
+    zeta, sigma_t = 0.75, 0.9
+    pts = np.array([[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [0.3, -0.6], [-0.2, 0.9]])
+    spin = jnp.asarray(np.column_stack([np.full(5, 0.3), np.full(5, 0.6), pts]))
+    mags = np.asarray(default_component_spin()._log_p_magnitude(spin[:, 0], 1.6, 4.5)
+                      + default_component_spin()._log_p_magnitude(spin[:, 1], 1.6, 4.5))
+    want = np.log(_default_model_tilt(pts[:, 0], pts[:, 1], zeta, sigma_t))
+
+    binary = default_component_spin(tilt_mixture="binary")
+    np.testing.assert_allclose(np.asarray(binary.log_prob(spin, theta)) - mags, want, rtol=1e-12)
+    per_spin = np.asarray(default_component_spin().log_prob(spin, theta)) - mags
+    # The finding's numbers: the per-spin form at (-1, -1) is 0.499 of the
+    # Default model, at (1, -1) 1.283.
+    np.testing.assert_allclose(np.exp(per_spin[1:3] - want[1:3]), [1.283, 0.499], atol=2e-3)
+
+
+def test_binary_tilt_mixture_normalises_and_correlates_the_tilts():
+    model = default_component_spin(tilt_mixture="binary")
+    zeta, sigma_t = 0.75, 0.9
+    c = np.linspace(-1.0, 1.0, 2001)
+    c1, c2 = np.meshgrid(c, c, indexing="ij")
+    p = np.exp(np.asarray(model._log_p_tilt_binary(jnp.asarray(c1), jnp.asarray(c2), zeta, sigma_t)))
+    assert np.trapz(np.trapz(p, c, axis=1), c) == pytest.approx(1.0, abs=1e-6)
+    # One-tilt marginal is the per-spin mixture.
+    marg = np.trapz(p, c, axis=1)
+    np.testing.assert_allclose(marg, np.exp(np.asarray(model._log_p_tilt(jnp.asarray(c), zeta, sigma_t))),
+                               rtol=1e-6)
+    mean = np.trapz(np.trapz(p * c1, c, axis=1), c)
+    cov = np.trapz(np.trapz(p * (c1 - mean) * (c2 - mean), c, axis=1), c)
+    var = np.trapz(np.trapz(p * (c1 - mean) ** 2, c, axis=1), c)
+    assert cov / var == pytest.approx(0.0717, abs=2e-3)
+    with pytest.raises(ValueError, match="tilt_mixture"):
+        default_component_spin(tilt_mixture="joint")

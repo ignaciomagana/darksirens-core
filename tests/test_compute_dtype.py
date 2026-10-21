@@ -415,6 +415,84 @@ def test_float32_composes_with_the_per_point_pairing_normaliser(kind):
         _check_per_sample_dtypes(kind)
 
 
+def _toe_pairing(dtype, jit=True):
+    """PowerLawPairing (beta = 0.5, m_min = 5, dm_min = 3) at m1 = m_min + s dm_min, m2 halfway into the toe.
+
+    Traced afresh on every call: the pairing settings are read at trace time,
+    and ``jax.jit`` of one function object would reuse its first trace.
+    """
+    from darksirens.population.base import ParamSpec
+    from darksirens.population.parametric import PowerLawPairing
+
+    pairing = PowerLawPairing(ParamSpec("beta", -2.0, 7.0))
+    s = np.array([1e-5, 1e-4, 6e-4, 1e-3, 5e-3, 2e-2, 1e-1, 0.5])
+    m1 = (5.0 + 3.0 * s).astype(dtype)
+    q = ((5.0 + 0.5 * (m1 - 5.0)) / m1).astype(dtype)
+    fn = lambda a, b, t: pairing(a, b, dtype(5.0), dtype(3.0), t)  # noqa: E731
+    out = (jax.jit(fn) if jit else fn)(jnp.asarray(m1), jnp.asarray(q), jnp.asarray([0.5], dtype=dtype))
+    return np.asarray(out)
+
+
+def test_float32_per_sample_pairing_rule_is_finite_under_jit_in_the_taper_toe():
+    # Under jit XLA rewrote the per-sample rule's (p / scale) / n_sc into
+    # p / (scale * n_sc); in float32 that product flushes to zero in the toe
+    # and the density was +inf (dropped as a non-finite weight) for every row
+    # with s <= 6e-4, while the eager value was right.
+    with _pairing_norm("per_point"):
+        want = _toe_pairing(np.float32)
+    with _pairing_norm("per_sample"):
+        got = _toe_pairing(np.float32)
+        eager = _toe_pairing(np.float32, jit=False)
+    assert got.dtype == np.float32 and np.all(np.isfinite(got)) and np.all(got > 0), got
+    # Jit and eager round float32 differently (m1 - m_min carries ~1.6% of
+    # its value at s = 1e-5), and the two rules normalise the same float32
+    # kernel.
+    assert np.max(np.abs(np.log(got) - np.log(eager))) < 2e-2
+    assert np.max(np.abs(np.log(got) - np.log(want))) < 2e-2
+
+
+def test_float32_m1_grid_normalises_the_float32_kernel():
+    # The opt-in m1 grid built its normaliser from float64 nodes, so a
+    # float32-floored kernel was divided by the integral of a float64-floored
+    # one: every row within ~1.2% of the window above m_min came out
+    # exp(130 - 79.85) = exp(50.15) too dense.
+    from _historical_settings import pairing_settings
+
+    with _pairing_norm("per_point"):
+        want = _toe_pairing(np.float32)
+    for norm in ("per_sample", "auto"):
+        with pairing_settings(pairing_norm=norm, pairing_m1_grid=1024):
+            got = _toe_pairing(np.float32)
+            got64 = _toe_pairing(np.float64)
+        assert got.dtype == np.float32 and np.all(np.isfinite(got)) and np.all(got > 0), got
+        assert np.max(np.abs(np.log(got) - np.log(want))) < 2e-2, (norm, np.log(got) - np.log(want))
+        # Where neither dtype's taper floor binds, float32 is float64 rounded.
+        np.testing.assert_allclose(got[-2:], got64[-2:], rtol=1e-4)
+
+
+def test_float32_population_density_in_the_taper_toe_under_every_pairing_rule():
+    # The finding's injection: m1src = m_min + 3e-4, m2src = m_min + 1.5e-4 at
+    # the powerlaw+peak fiducial (m_min = 5, dm_min = 3).  Float64 gives one
+    # log p_pop under every rule; in float32 the m1 grid gave +40.45 (and the
+    # bound likelihood -inf), and per_sample under jit +inf.
+    from _historical_settings import pairing_settings
+
+    log_p = get_model(MODEL).log_p_pop
+    theta = jnp.asarray(get_fixed_population_params(MODEL), dtype=float)
+    m1, q, z, chi = 5.0 + 3e-4, (5.0 + 1.5e-4) / (5.0 + 3e-4), 0.23, 0.05
+    for kw in (dict(pairing_norm="auto", pairing_m1_grid=None),
+               dict(pairing_norm="per_sample", pairing_m1_grid=None),
+               dict(pairing_norm="per_sample", pairing_m1_grid=1024)):
+        with pairing_settings(**kw):
+            vals = {}
+            for dt in (jnp.float64, jnp.float32):
+                f = jax.jit(lambda a, b, c, d, t: log_p(a, b, c, d, t))
+                vals[dt] = float(f(*(jnp.asarray([x], dtype=dt) for x in (m1, q, z, chi)),
+                                   theta.astype(dt))[0])
+        assert np.isfinite(vals[jnp.float32]), (kw, vals)
+        assert abs(vals[jnp.float32] - vals[jnp.float64]) < TOL, (kw, vals)
+
+
 def _walk(jaxpr, visit):
     for eqn in jaxpr.eqns:
         visit(eqn)

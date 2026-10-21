@@ -16,14 +16,15 @@ Frame convention
 ----------------
 Every mass argument in this module is a SOURCE-frame mass in solar masses -- the
 normalisation grids are source-frame, and the callers pass source-frame masses
-(e.g. ``model.log_p_massspin(m1src, q, chieff, ...)`` in
-:mod:`darksirens.likelihood.flow_events`).  The detector-frame conversion and its
+(``log_p_pop(m1src, q, z, chieff, ...)``, after ``m1src = m1det / (1 + z)``, in
+:func:`darksirens.likelihood.weights.log_target_density_m1det_q_dL` and the
+per-sample weights beside it).  The detector-frame conversion and its
 ``(1 + z)`` mass Jacobian are the likelihood's responsibility, never a
 component's.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jax.numpy as jnp
 from jax.scipy.special import erf, erfc
@@ -46,7 +47,15 @@ from .components import (
     component,
     mass_token,
 )
-from .utils import get_mass_grid, get_q_grid, sfilter_high, sfilter_low
+from .utils import (
+    GOLOMB_SPLIT_NODES,
+    get_golomb_top_quadrature,
+    get_mass_grid,
+    get_q_grid,
+    normalization_grid_settings,
+    sfilter_high,
+    sfilter_low,
+)
 
 
 @mass_token("powerlaw", plural="powerlaws", short="PL", params=(
@@ -231,14 +240,22 @@ class Gaussian(MassComponent):
         """Exact ``int_{m_lo}^{m_hi} exp(-(m-mu)^2/2sigma^2) dm``.
 
         Same normalisation domain as the base class's grid trapezoid (the
-        component has no truncation of its own), but exact: the trapezoid carries
-        an O((h/sigma)^2) error -- 1.3% at the ``sigma`` prior floor of 1 Msun
-        against h = 0.4 -- which enters the mixture as a spurious rescaling of
-        this component's weight relative to the (now exactly normalised) power
-        laws.
+        component has no truncation of its own), but exact.  The trapezoid is
+        spectrally accurate for a peak whose tails vanish inside the grid
+        (rounding level at ``sigma = 1`` Msun against h = 0.4); its error
+        comes from the truncation at the grid ends, at most 4.0e-4 over the
+        ``GAUSS_MU`` x ``GAUSS_SIGMA`` box (``mu = 5``, ``sigma = 2.4``), and it
+        entered the mixture as a rescaling of this component's weight relative
+        to the exactly normalised power laws.
         """
         grid = get_mass_grid()
         return truncated_gaussian_norm(theta[0], theta[1], grid[0], grid[-1])
+
+    def _norm_above(self, theta, m_lo):
+        """Exact normaliser over ``[m_lo, m_hi]`` (``population_norm="exact"``)."""
+        grid = get_mass_grid()
+        return truncated_gaussian_norm(theta[0], theta[1],
+                                       jnp.clip(m_lo, grid[0], grid[-1]), grid[-1])
 
     def _eval_unnorm(self, m, t):
         """Evaluate the Gaussian peak at primary mass ``m``."""
@@ -488,8 +505,9 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
     @property
     def support(self):
         """This model declares its OWN 300 Msun ceiling, above the M_HI = 200
-        normalisation grid, and normalises on a grid stretched to it
-        (:meth:`_support_grid`).  Masking to the shared grid would delete real,
+        normalisation grid, and normalises up to it: :meth:`_norm` is closed
+        form over ``[m1_low, m_high]`` plus a quadrature over the taper window
+        only, so no fixed grid is involved.  Masking to the shared grid would delete real,
         correctly-normalised support between 200 and 300 Msun -- the documented
         exception the common mask must not swallow (review PHY-08).  The
         component's own ``m < m_high`` cut makes this bound inert; it is
@@ -507,10 +525,6 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
         sigma_safe = jnp.maximum(sigma, 1.0e-12)
         support = (m >= m1_low) & (m < self.m_high)
         return jnp.where(support, jnp.exp(-0.5 * ((m - mu) / sigma_safe) ** 2), 0.0)
-
-    def _mass_grid(self):
-        base_grid = get_mass_grid()
-        return jnp.linspace(base_grid[0], self.m_high, base_grid.size)
 
     def _taper_window_grid(self, m1_low, delta_m1):
         """Quadrature nodes across the low-mass taper window.
@@ -564,6 +578,30 @@ class GWTC5FiducialBPL2PeaksMass(MassComponent):
 
         n_bpl, n_g1, n_g2 = self._component_norms(theta)
         m_w = self._taper_window_grid(m1_low, delta_m1)
+        if normalization_grid_settings().population_norm == "exact":
+            # Opt-in: the kept part integrated directly, the window by the
+            # same quadrature plus the closed-form rest above it.  ``1 - D``
+            # subtracts the window rule's O(h^2) error from a number near 1,
+            # which a component almost entirely inside the window turns into
+            # a large relative error of what it keeps (see
+            # NormalizationGridSettings; 1.2e-3 on this normaliser at the
+            # worst of 300 prior draws).
+            keep = sfilter_low(m_w, m1_low, delta_m1)
+            top = m_w[-1]
+
+            def kept(raw, n, rest):
+                inside = jnp.trapezoid(raw * keep, m_w)
+                return jnp.where(n > 0.0, jnp.clip((inside + rest) / _pos(n), 0.0, 1.0), 0.0)
+
+            total = (
+                lambda0 * kept(self._bpl_raw(m_w, alpha1, alpha2, m_break, m1_low), n_bpl,
+                               broken_powerlaw_norm(alpha1, alpha2, m_break, top, self.m_high))
+                + lambda1 * kept(self._trunc_gauss_raw(m_w, mu1, sigma1, m1_low), n_g1,
+                                 truncated_gaussian_norm(mu1, sigma1, top, self.m_high))
+                + lambda2 * kept(self._trunc_gauss_raw(m_w, mu2, sigma2, m1_low), n_g2,
+                                 truncated_gaussian_norm(mu2, sigma2, top, self.m_high))
+            )
+            return jnp.where(valid_weights, total, 0.0)
         cut = 1.0 - sfilter_low(m_w, m1_low, delta_m1)
 
         def kept(raw, n):
@@ -886,6 +924,23 @@ class GWTC3PowerLawPeakMass(MassComponent):
         """
         alpha, m_min, m_max, lam, mu, sigma, delta_m = theta
         m_w = self._taper_window_grid(m_min, delta_m)
+        if normalization_grid_settings().population_norm == "exact":
+            # Opt-in: the kept part integrated directly (see the GWTC-5
+            # model's _norm): measured at alpha = 10.8, m_min = 3.24,
+            # delta_m = 9.11 (inside Table VI) the default ``1 - D`` keeps
+            # 1.18e-3 of the power law against a true 1.46e-3, and this
+            # normaliser is 0.37% low.
+            keep = sfilter_low(m_w, m_min, delta_m)
+            top = m_w[-1]
+            s = jnp.maximum(sigma, _NORM_SIGMA_FLOOR)
+            pl_rest = (_powerlaw_segment_norm(top, m_max, 1.0, alpha)
+                       / _pos(_powerlaw_segment_norm(m_min, m_max, 1.0, alpha)))
+            kept_pl = jnp.clip(jnp.trapezoid(self._powerlaw_pdf(m_w, alpha, m_min, m_max) * keep, m_w)
+                               + pl_rest, 0.0, 1.0)
+            # P(m > top) of the untruncated Gaussian, through erfc.
+            kept_g = jnp.clip(jnp.trapezoid(self._gaussian_pdf(m_w, mu, s) * keep, m_w)
+                              + 0.5 * erfc((top - mu) / (s * _SQRT2)), 0.0, 1.0)
+            return (1.0 - lam) * kept_pl + lam * kept_g
         cut = 1.0 - sfilter_low(m_w, m_min, delta_m)
 
         def kept(pdf, below=0.0):
@@ -911,8 +966,12 @@ class GWTC3PowerLawPeakPopulationModel:
 
     ``spin_component`` may be overridden with any :class:`SpinModel`; a model
     with ``consumes_spin_block`` (the 4-D :class:`ComponentSpinModel`) makes
-    this the Table VI mass model x the Table XII Default spin model, which
-    the chi_eff parameterisation could not represent (see __init__ note).
+    this the Table VI mass model x a component-spin model, which the chi_eff
+    parameterisation could not represent (see __init__ note).  The Table XII
+    Default spin model is ``ComponentSpinModel(..., tilt_mixture="binary")``;
+    the default ``"per_spin"`` form (what the ``gwtc3_plpeak_component_spin``
+    preset uses) has the same one-tilt marginal but a different joint tilt
+    density.
     """
 
     def __init__(self, spin_component=None):
@@ -940,8 +999,8 @@ class GWTC3PowerLawPeakPopulationModel:
         # law is likewise the repo's (1+z)^(gamma-1); only the fiducial gamma
         # is taken from the paper (its kappa), which the registry entry notes.
         # (With DS-08's ComponentSpinModel passed in instead, the Table XII
-        # Default spin model IS representable; the chi_eff default below is
-        # unchanged.)
+        # Default spin model IS representable, as tilt_mixture="binary"; the
+        # chi_eff default below is unchanged.)
         self.spin_component = spin_component if spin_component is not None else TruncatedGaussianSpin(
             ParamSpec(r"$\mu_\chi$", CHI_MU.lo, CHI_MU.hi, name="mu_chi"),
             ParamSpec(r"$\sigma_\chi$", CHI_SIGMA.lo, CHI_SIGMA.hi, name="sigma_chi"),
@@ -1040,6 +1099,15 @@ class GolombRemnantMass1G(MassComponent):
     and p(m | M_I) is lognormal around the piecewise linear/quadratic
     remnant map.
 
+    There is no minimum black-hole mass: the integral starts at the mass
+    grid's lower bound ``m_lo`` (``M_LO = 1`` Msun) and
+    :class:`GolombSymmetricMassPopulationModel` is zero below its first node,
+    so the population's low-mass edge is that normalisation-grid constant.
+    Below ``M_tr`` the density follows the IMF ``(m/20)**-a``, so at the
+    registered ``golomb_1g`` fiducial most binaries sit near that edge
+    (P(m2 < 3 Msun) = 0.96, P(m1 < 5 Msun) = 0.82), and the selection
+    integral depends on how far down the injection set reaches.
+
     Parameter order
     ---------------
     a
@@ -1106,14 +1174,69 @@ class GolombRemnantMass1G(MassComponent):
         x = jnp.maximum(m_i / 20.0, _EPS)
         return jnp.where(m_i < 20.0, x ** (-a), x ** (-b))
 
+    def _progenitor_split_nodes(self, m_tr, delta_m):
+        """Progenitor masses and weights of ``golomb_quadrature="split"``.
+
+        The integral over ``M_I`` in ``[m_lo, m_hi]`` (the domain the default
+        trapezoid on the mass grid covers) in three panels whose edges are the
+        fixed IMF break at 20 Msun and the SAMPLED ``M_tr`` and
+        ``m_disrupt = M_tr + 2 Delta``, above which no remnant forms:
+
+        * ``[m_lo, 20]`` and ``[20, M_tr]``, where the remnant mass is
+          ``M_I`` and the kernel in ``ln M_I`` is a Gaussian of width
+          ``sigma``: trapezoid nodes uniform in ``ln M_I``;
+        * ``[M_tr, m_disrupt]``, the quadratic map up to its peak at the
+          disruption edge: Gauss-Legendre nodes in ``M_I``.
+
+        The nodes move with the edges, so ``phi_1G`` is smooth in ``M_tr``
+        and ``Delta`` (the fixed grid's nodes are crossed by the edge, where
+        the integrand drops from its maximum to zero), and the ln-spacing
+        resolves the narrowest kernel of the prior (the fixed grid sees a
+        kernel narrower than its 0.4 Msun spacing at one node only).  An edge
+        outside ``[m_lo, m_hi]`` is clipped into it, so an empty panel has
+        zero weight.
+        """
+        s = normalization_grid_settings()
+        lo, hi = s.m_lo, s.m_hi
+        n_lo, n_mid, _ = GOLOMB_SPLIT_NODES
+        e_tr = jnp.clip(m_tr, lo, hi)
+        e_brk = jnp.minimum(jnp.clip(20.0, lo, hi), e_tr)
+        e_dis = jnp.clip(m_tr + 2.0 * delta_m, e_tr, hi)
+
+        def log_trapezoid(a, b, n):
+            u = jnp.log(a) + jnp.linspace(0.0, 1.0, n) * (jnp.log(b) - jnp.log(a))
+            h = (jnp.log(b) - jnp.log(a)) / (n - 1)
+            ends = jnp.zeros(n).at[0].set(0.5).at[-1].set(0.5)
+            m_i = jnp.exp(u)
+            return m_i, h * (1.0 - ends) * m_i      # dM = M du
+
+        t_top, w_top = get_golomb_top_quadrature()
+        m_a, w_a = log_trapezoid(lo, e_brk, n_lo)
+        m_b, w_b = log_trapezoid(e_brk, e_tr, n_mid)
+        m_c = e_tr + t_top * (e_dis - e_tr)
+        w_c = w_top * (e_dis - e_tr)
+        return (jnp.concatenate([m_a, m_b, m_c]),
+                jnp.concatenate([w_a, w_b, w_c]))
+
     def _eval_1g_unnorm(self, m, t):
-        """Unnormalised 1G BH mass density phi_1G(m)."""
+        """Unnormalised 1G BH mass density phi_1G(m).
+
+        ``phi_1G(m) = int IMF(M_I) LN(m | ln mbar(M_I), sigma) dM_I`` over
+        ``M_I`` in ``[m_lo, m_hi]``, by default a trapezoid on the mass grid;
+        ``golomb_quadrature="split"`` (opt-in) uses
+        :meth:`_progenitor_split_nodes` instead (see
+        ``NormalizationGridSettings`` for what the default rule gets wrong).
+        """
         a, b, m_tr, delta_m, sigma = t
 
         m_shape = jnp.shape(m)
         m_eval = jnp.reshape(jnp.asarray(m), (-1, 1))
 
-        m_i_grid = get_mass_grid()
+        split = normalization_grid_settings().golomb_quadrature == "split"
+        if split:
+            m_i_grid, w_i = self._progenitor_split_nodes(m_tr, delta_m)
+        else:
+            m_i_grid = get_mass_grid()
         m_i = jnp.reshape(m_i_grid, (1, -1))
 
         mbar = self._mean_remnant_mass(m_i, m_tr, delta_m)
@@ -1136,7 +1259,10 @@ class GolombRemnantMass1G(MassComponent):
         kernel = jnp.where((m_eval > 0.0) & (mbar > 0.0) & (sigma > 0.0), kernel, 0.0)
 
         integrand = imf * kernel
-        phi = jnp.trapezoid(integrand, m_i_grid, axis=-1)
+        if split:
+            phi = jnp.sum(w_i * integrand, axis=-1)
+        else:
+            phi = jnp.trapezoid(integrand, m_i_grid, axis=-1)
 
         return jnp.reshape(phi, m_shape)
 
@@ -1156,11 +1282,34 @@ class GolombRemnantMass1GPlusTail(GolombRemnantMass1G):
 
     The tail approximates 2G/high-mass contamination. I parameterise the
     amplitude by log10_f_pl for sampling stability.
+
+    ``tail_taper`` picks the turn-on.  ``"logistic"`` (default, the frozen
+    reference's) never reaches zero: below the window it decays only like
+    ``exp(12 m / dm_tail)``, while ``(m / M_BH,max)**-c`` grows toward low
+    mass, so for a wide window and a steep tail the product turns up again
+    below about ``c dm_tail / 12`` and the "high-mass" tail sets the
+    low-mass shape.  Inside the shipped prior box (``c`` up to 8,
+    ``dm_tail`` up to 20) it holds 47% of all mass below 10 Msun at
+    ``c = 8``, ``dm_tail = 20`` and the fiducial ``log10_f_PL = -1.4``
+    (3.7 times ``phi_1G`` at 1 Msun; 96% of all mass at
+    ``log10_f_PL = 0``), against 0 at ``c = 4``, ``dm_tail = 5``; more than
+    1% of all black holes below 20 Msun in about 2% of the
+    ``(c, dm_tail)`` box at the fiducial amplitude.  ``"planck"``
+    (opt-in) is :func:`~darksirens.population.utils.sfilter_low` across
+    ``[M_BH,max - dm_tail, M_BH,max]``: identically zero below the window,
+    one above it.
     """
 
     c_spec: ParamSpec
     log10_fpl_spec: ParamSpec
     dm_tail_spec: ParamSpec
+    tail_taper: str = field(default="logistic", kw_only=True)
+
+    def __post_init__(self):
+        if self.tail_taper not in ("logistic", "planck"):
+            raise ValueError(
+                f"tail_taper must be 'logistic' or 'planck', got {self.tail_taper!r}"
+            )
 
     @property
     def param_specs(self):
@@ -1174,12 +1323,26 @@ class GolombRemnantMass1GPlusTail(GolombRemnantMass1G):
     def _tail_taper(self, m, m_bh_max, dm_tail):
         """Smooth turn-on ending at M_BH,max.
 
-        This is a logistic approximation to the paper's exponential taper.
-        It is 0 well below M_BH,max - dm_tail and 1 above M_BH,max.
+        ``"logistic"`` (default) is a logistic approximation to the paper's
+        exponential taper: 0.5 at the window's centre, 0.9975 at M_BH,max
+        and about ``exp(6 - 12 (M_BH,max - m) / dm_tail)``, small but never
+        zero, below the window (see the class docstring for what that does to the
+        product with the power law).  ``"planck"`` (opt-in) is exactly 0
+        below ``M_BH,max - dm_tail`` and exactly 1 above ``M_BH,max``.
         """
         width = jnp.maximum(dm_tail, _EPS)
+        if self.tail_taper == "planck":
+            return sfilter_low(m, m_bh_max - width, width)
         x = (m - (m_bh_max - width)) / width
-        return 1.0 / (1.0 + jnp.exp(-12.0 * (x - 0.5)))
+        # Far below the window exp overflows and the logistic is exactly 0,
+        # but its VJP is then 0 * inf = NaN, and the normaliser integrates
+        # the whole mass grid, so one such node made every sample's gradient
+        # NaN (dm_tail <~ 0.6 at the fiducial).  The overflowing rows take
+        # 0 directly, with a finite exponent in the unselected branch; every
+        # other row is the same expression, so values are unchanged.
+        z = -12.0 * (x - 0.5)
+        over = jnp.isinf(jnp.exp(z))
+        return jnp.where(over, 0.0, 1.0 / (1.0 + jnp.exp(jnp.where(over, 0.0, z))))
 
     def _eval_unnorm(self, m, t):
         t_1g = t[:5]
