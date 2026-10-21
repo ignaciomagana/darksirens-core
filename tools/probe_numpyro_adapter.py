@@ -102,7 +102,16 @@ def _install_fake_numpyro():
     dist.TransformedDistribution = lambda *a, **kw: _Distribution(
         "TransformedDistribution", *a, **kw
     )
-    dist.transforms = SimpleNamespace(ExpTransform=lambda: "ExpTransform")
+    # The candidate gives ExpTransform the truncation interval as its domain;
+    # the frozen executor passes none.
+    dist.transforms = SimpleNamespace(
+        ExpTransform=lambda domain=None: (
+            "ExpTransform" if domain is None else f"ExpTransform(domain={domain})"
+        )
+    )
+    dist.constraints = SimpleNamespace(
+        interval=lambda low, high: f"interval({_jsonable(low)!r}, {_jsonable(high)!r})"
+    )
 
     numpyro = ModuleType("numpyro")
 
@@ -314,6 +323,7 @@ def _candidate_executor():
             upper=upper,
             conditional_pairs=tuple(cond_pairs),
             conditioned=frozenset(conditioned),
+            rejected_constraints=(),
             target_accept=float(target_accept),
             max_tree_depth=int(max_tree_depth),
             num_warmup=int(num_warmup),

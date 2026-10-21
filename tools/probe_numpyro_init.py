@@ -115,6 +115,7 @@ def _candidate_initializer():
             upper=upper,
             midpoint=midpoint,
             conditional_pairs=tuple(cond_pairs),
+            rejected_constraints=(),
             init_values=dict(init_values),
             nuts_init_tries=int(nuts_init_tries),
             nuts_init_seed_offset=int(nuts_init_seed_offset),

@@ -133,3 +133,27 @@ def test_conditional_adjustment_can_expose_nonfinite_start(capsys):
     out = capsys.readouterr().out
     assert "finite_logL=False" in out
     assert "bad_grad_params=[] (0/2)" in out
+
+
+def test_random_restart_skips_starts_outside_rejected_joint_constraints():
+    """NUTS rejects the simplex, so a start with x + y > 1 has an infinite
+    potential; a target's likelihood that is finite there must not pick it."""
+    labels = ["x", "y"]
+    opts = SimpleNamespace(seed=4)
+    plan = prepare_numpyro_static_plan(
+        labels, [0.0, 0.0], [1.0, 1.0], opts, joint_constraints=[("simplex", (0, 1))]
+    )
+
+    # Non-finite at the midpoint only, and largest where x + y is.
+    def likelihood(theta):
+        at_mid = jnp.all(jnp.abs(theta - 0.5) < 0.01)
+        return jnp.where(at_mid, -jnp.inf, theta[0] + theta[1])
+
+    result = prepare_numpyro_initialization(likelihood, labels, opts, plan)
+    theta0 = np.asarray(result.theta0)
+    assert theta0.sum() <= 1.0
+    # The best of the 32 draws that respect the constraint.
+    rng = np.random.default_rng(4 + plan.nuts_init_seed_offset)
+    draws = rng.uniform([0.0, 0.0], [1.0, 1.0], size=(32, 2))
+    valid = draws[draws.sum(axis=1) <= 1.0]
+    np.testing.assert_array_equal(theta0, valid[np.argmax(valid.sum(axis=1))])

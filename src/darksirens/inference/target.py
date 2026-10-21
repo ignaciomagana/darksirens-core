@@ -15,7 +15,12 @@ from darksirens.analysis import ParameterPlan
 # uniform, an unknown two-index constraint applies the simplex fold), so the
 # seam rejects it here.  prior.py imports only numpy, so this does not widen
 # the dependency-light import surface.
-from .prior import JOINT_CONSTRAINT_ARITY, PRIOR_KINDS
+from .prior import (
+    JOINT_CONSTRAINT_ARITY,
+    PRIOR_KINDS,
+    check_joint_constraint_composition,
+    truncated_normal_window_problem,
+)
 
 
 def _validate_prior_kind(label: str, entry) -> None:
@@ -57,6 +62,55 @@ def _validate_prior_kind(label: str, entry) -> None:
         )
 
 
+def _samples_uniform(entry, lower, upper) -> bool:
+    """Whether ``make_prior_transform`` draws this coordinate uniformly."""
+    kind, _loc, scale = entry
+    if kind == "uniform":
+        return True
+    # The transform draws Beta(1, 1) on bounds inside [0, 1] as uniform.
+    return (
+        kind == "beta"
+        and (scale is None or float(scale) == 1.0)
+        and 0.0 <= float(lower)
+        and float(upper) <= 1.0
+    )
+
+
+def _validate_cube_map_domain(plan: ParameterPlan, kind: str, indices) -> None:
+    """Refuse a joint constraint whose cube map is not its declared density.
+
+    The maps sort, fold or condition unit-cube coordinates, or send them into
+    the unit ball, and each member is then rescaled by its own bounds and
+    inverse CDF. That is the declared density only for uniform members with
+    the bounds checked here, the bounds the ordinary path's resolver
+    (``resolve_joint_prior_constraints``) requires before it emits a map.
+    """
+    names = tuple(plan.labels[i] for i in indices)
+    for i in indices:
+        if not _samples_uniform(plan.prior_kinds[i], plan.lower[i], plan.upper[i]):
+            raise ValueError(
+                f"joint-constraint {kind}{names} needs a uniform prior on each "
+                f"member, got {tuple(plan.prior_kinds[i])!r} for "
+                f"{plan.labels[i]!r}: the cube map acts on unit-cube "
+                "coordinates, so a non-uniform inverse CDF breaks the "
+                "constraint. Enforce it in the likelihood instead."
+            )
+    bounds = tuple((float(plan.lower[i]), float(plan.upper[i])) for i in indices)
+    if kind in ("ordered_le", "conditional_upper"):
+        ok, need = bounds[0] == bounds[1], "equal bounds on both members"
+    elif kind == "simplex":
+        ok, need = all(b == (0.0, 1.0) for b in bounds), "bounds [0, 1]"
+    else:
+        ok, need = all(b == (-1.0, 1.0) for b in bounds), "bounds [-1, 1]"
+    if not ok:
+        raise ValueError(
+            f"joint-constraint {kind}{names} needs {need}, got {bounds}: the "
+            "cube map acts on unit-cube coordinates, so with these bounds it "
+            "samples another region or density than the constraint declares. "
+            "Enforce the constraint in the likelihood instead."
+        )
+
+
 def _validate_parameter_plan(plan: ParameterPlan) -> None:
     if not isinstance(plan, ParameterPlan):
         raise TypeError("parameters must be a darksirens.ParameterPlan")
@@ -79,8 +133,16 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
         if not lo < hi:
             raise ValueError(f"parameter {label!r} requires lower < upper")
 
-    for label, entry in zip(plan.labels, plan.prior_kinds):
+    for label, entry, lower, upper in zip(
+        plan.labels, plan.prior_kinds, plan.lower, plan.upper
+    ):
         _validate_prior_kind(label, entry)
+        if entry[0] in ("normal", "lognormal"):
+            problem = truncated_normal_window_problem(
+                entry[0], lower, upper, entry[1], entry[2]
+            )
+            if problem is not None:
+                raise ValueError(f"prior for parameter {label!r}: {problem}")
 
     for kind, indices in plan.joint_constraints:
         if not isinstance(kind, str) or not kind:
@@ -108,6 +170,8 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
             raise ValueError(
                 f"joint-constraint {kind!r} indices must be distinct, got {indices}"
             )
+        _validate_cube_map_domain(plan, kind, indices)
+    check_joint_constraint_composition(plan.joint_constraints, plan.labels)
 
 
 def combine_parameter_plans(*plans: ParameterPlan) -> ParameterPlan:

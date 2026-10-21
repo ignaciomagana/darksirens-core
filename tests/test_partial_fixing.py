@@ -385,6 +385,30 @@ def test_fixed_values_on_the_joint_prior_boundary_are_accepted():
         model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed={_M2L: 9.5}))
 
 
+@pytest.mark.parametrize(
+    "fixed,changes_density",
+    [
+        # m2_low ~ U(3, m1_low) given a fixed m1_low: rejection is exact.
+        ({_M1L: 6.0}, False),
+        # Table 5 conditioned on m2_low falls as 1/(m1_low - 3); rejection
+        # keeps m1_low flat on [m2_low, 10].
+        ({_M2L: 4.0}, True),
+    ],
+)
+def test_partial_fixing_warning_says_when_the_free_member_s_prior_changes(
+    fixed, changes_density
+):
+    """The warning called the effect a logZ offset only, for either member."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        model(cosmology=COSMOLOGY, population=Population(_GWTC5, fixed=fixed))
+    (message,) = [
+        str(item.message) for item in seen if "conditional_upper" in str(item.message)
+    ]
+    assert "fixed member" in message
+    assert ("also changes the prior on" in message) is changes_density
+
+
 # ---------------------------------------------------------------------------
 # Decoding and evaluation at the same point
 

@@ -54,7 +54,8 @@ def test_sampler_facing_parameter_plan_needs_no_ordinary_metadata():
 
 
 def test_target_inference_delegates_without_runtime_binding(monkeypatch):
-    plan = _plan(joint_constraints=(("ordered_le", (0, 1)),))
+    # ordered_le needs equal bounds on both members to be a cube map.
+    plan = _plan(lower=(-1.0, -1.0), joint_constraints=(("ordered_le", (0, 1)),))
     likelihood = lambda theta: -np.sum(np.asarray(theta) ** 2)
     target = InferenceTarget(likelihood, plan)
     prior_transform = object()
@@ -323,15 +324,21 @@ def test_joint_constraint_vocabulary_and_arity_fail_closed():
             lambda theta: 0.0, _plan(joint_constraints=(("simplex", (1, 1)),))
         )
 
-    # The four implemented maps stay accepted.
+    # The four implemented maps stay accepted (on disjoint coordinates: maps
+    # that share one do not compose, see the composition test below).
     InferenceTarget(
         lambda theta: 0.0,
         _plan(
-            labels=("a", "b", "c"),
-            lower=(-1.0, -1.0, -1.0),
-            upper=(1.0, 1.0, 1.0),
-            prior_kinds=(UNIFORM,) * 3,
-            joint_constraints=(("ball3", (0, 1, 2)), ("ordered_le", (0, 1))),
+            labels=("a", "b", "c", "d", "e", "f", "g", "h", "i"),
+            lower=(-1.0, -1.0, -1.0, 2.0, 2.0, 0.0, 0.0, 3.0, 3.0),
+            upper=(1.0, 1.0, 1.0, 5.0, 5.0, 1.0, 1.0, 10.0, 10.0),
+            prior_kinds=(UNIFORM,) * 9,
+            joint_constraints=(
+                ("ball3", (0, 1, 2)),
+                ("ordered_le", (3, 4)),
+                ("simplex", (5, 6)),
+                ("conditional_upper", (7, 8)),
+            ),
         ),
     )
 
@@ -372,3 +379,124 @@ def test_dipole_angular_plan_is_inside_the_accepted_vocabulary():
     )
     assert analysis.parameters.joint_constraints[0][0] == "ball3"
     _validate_parameter_plan(analysis.parameters)
+
+
+@pytest.mark.parametrize(
+    "plan_kwargs,match",
+    [
+        # 75% of the prior draws had x + y > 1.
+        (
+            dict(lower=(0.0, 0.0), upper=(2.0, 2.0), joint_constraints=(("simplex", (0, 1)),)),
+            r"needs bounds \[0, 1\]",
+        ),
+        # P(y < 1) was 0.010, where the uniform prior on x <= y gives 0.053.
+        (
+            dict(lower=(0.0, 0.0), upper=(1.0, 10.0), joint_constraints=(("ordered_le", (0, 1)),)),
+            "needs equal bounds",
+        ),
+        # x > y on 99.997% of the draws.
+        (
+            dict(
+                lower=(0.0, 0.0),
+                upper=(10.0, 10.0),
+                prior_kinds=(("normal", 8.0, 1.0), ("normal", 2.0, 1.0)),
+                joint_constraints=(("ordered_le", (0, 1)),),
+            ),
+            "needs a uniform prior",
+        ),
+        # 87% of the draws had |v| > 1.
+        (
+            dict(
+                labels=("a", "b", "c"),
+                lower=(-2.0,) * 3,
+                upper=(2.0,) * 3,
+                prior_kinds=(UNIFORM,) * 3,
+                joint_constraints=(("ball3", (0, 1, 2)),),
+            ),
+            r"needs bounds \[-1, 1\]",
+        ),
+        # 33% of the draws violated a <= b.
+        (
+            dict(
+                labels=("a", "b", "c"),
+                lower=(0.0,) * 3,
+                upper=(1.0,) * 3,
+                prior_kinds=(UNIFORM,) * 3,
+                joint_constraints=(("ordered_le", (0, 1)), ("ordered_le", (1, 2))),
+            ),
+            "share the coordinate 'b'",
+        ),
+        # 50% of the draws violated a <= b.
+        (
+            dict(
+                labels=("a", "b", "c"),
+                lower=(0.0,) * 3,
+                upper=(1.0,) * 3,
+                prior_kinds=(UNIFORM,) * 3,
+                joint_constraints=(
+                    ("conditional_upper", (0, 1)),
+                    ("conditional_upper", (1, 2)),
+                ),
+            ),
+            r"Declare \(1, 2\) first",
+        ),
+    ],
+    ids=[
+        "simplex_wide",
+        "ordered_unequal",
+        "ordered_normal",
+        "ball_wide",
+        "ordered_chain",
+        "conditional_chain_order",
+    ],
+)
+def test_joint_constraints_whose_cube_map_is_not_their_density_are_refused(
+    plan_kwargs, match
+):
+    """The seam accepted these, and the nested prior then broke the declared
+    constraint or had the wrong density, with no warning."""
+    with pytest.raises(ValueError, match=match):
+        InferenceTarget(lambda theta: 0.0, _plan(**plan_kwargs))
+
+
+def test_admissible_joint_constraints_draw_inside_their_region():
+    from darksirens.inference.public import _prior_transform
+
+    target = InferenceTarget(
+        lambda theta: 0.0,
+        _plan(
+            labels=("w0", "w1", "dx", "dy", "dz", "a", "b", "c"),
+            lower=(0.0, 0.0, -1.0, -1.0, -1.0, 2.0, 2.0, 2.0),
+            upper=(1.0, 1.0, 1.0, 1.0, 1.0, 5.0, 5.0, 5.0),
+            # Beta(1, 1) on [0, 1] is drawn uniformly, so the fold is exact.
+            prior_kinds=(("beta", None, 1.0), UNIFORM) + (UNIFORM,) * 6,
+            joint_constraints=(
+                ("simplex", (0, 1)),
+                ("ball3", (2, 3, 4)),
+                ("conditional_upper", (6, 7)),
+                ("conditional_upper", (5, 6)),
+            ),
+        ),
+    )
+    draws = np.asarray(
+        _prior_transform(target.parameters)(
+            np.random.default_rng(3).uniform(size=(20_000, 8))
+        )
+    )
+    assert np.all(draws[:, 0] + draws[:, 1] <= 1.0)
+    assert np.all(np.sum(draws[:, 2:5] ** 2, axis=1) <= 1.0 + 1e-12)
+    assert np.all(draws[:, 5] <= draws[:, 6]) and np.all(draws[:, 6] <= draws[:, 7])
+
+
+def test_normal_prior_window_the_transform_cannot_resolve_is_refused():
+    """N(0.4, 0.02) on [0.1, 0.2]: every draw was 0.2593, outside the bounds."""
+    with pytest.raises(ValueError, match=r"parameter 'x'.*7\.03 scale"):
+        InferenceTarget(
+            lambda theta: 0.0,
+            _plan(
+                labels=("x",),
+                lower=(0.1,),
+                upper=(0.2,),
+                prior_kinds=(("normal", 0.4, 0.02),),
+            ),
+        )
