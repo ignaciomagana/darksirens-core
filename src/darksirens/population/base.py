@@ -846,10 +846,12 @@ class PairingModel(ABC):
         # The last node is the shoulder itself, where the taper is identically
         # one with every derivative zero, so the kernel there is the bare
         # (m_shoulder/m_edge)**beta.  It is set in closed form rather than
-        # evaluated: at m2 == m_shoulder up to rounding, sfilter_low can see
+        # evaluated: at m2 == m_shoulder up to rounding, sfilter_low could see
         # m2 - m_min - dm round to exactly 0.0 while m2 < m_min + dm, and then
-        # returns its floor (measured: under jit the last-cell log N was
-        # 3.9e-3 off at beta = 0.22, m_min = 4.90, dm_min = 8.77).
+        # returned its floor (measured: under jit the last-cell log N was
+        # 3.9e-3 off at beta = 0.22, m_min = 4.90, dm_min = 8.77). sfilter_low
+        # now decides its shoulder from that rounded delta too; the closed
+        # form stays, and keeps the table independent of the filter's rounding.
         m_top = m_edge + safe_dm
         k_top = jnp.exp(beta * jnp.log(m_top / safe_edge)).astype(adt)
         kp_top = (beta * safe_dm / m_top).astype(adt) * k_top

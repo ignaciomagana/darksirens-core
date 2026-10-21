@@ -1002,7 +1002,12 @@ def sfilter_low(m, m_min, dm):
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m <= m_min, 0.0, S)
-    S = jnp.where(m >= m_min + dm, 1.0, S)
+    # The shoulder is also decided from the rounded delta the exponent uses:
+    # fl(m - m_min) can equal dm while m < fl(m_min + dm) (m_min = 2.05,
+    # dm = 8.05, m = 10.1), and the second term's denominator is then 0, so
+    # the exponent clipped to +cap and S was 3.5e-57 at that one float
+    # instead of its limit 1. Every other input gives the same value as before.
+    S = jnp.where((m >= m_min + dm) | (delta >= dm), 1.0, S)
     return S
 
 @jit
@@ -1017,5 +1022,6 @@ def sfilter_high(m, m_max, dm):
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m >= m_max, 0.0, S)
-    S = jnp.where(m <= m_max - dm, 1.0, S)
+    # Mirror of sfilter_low's shoulder: also decided from the rounded delta.
+    S = jnp.where((m <= m_max - dm) | (delta >= dm), 1.0, S)
     return S
