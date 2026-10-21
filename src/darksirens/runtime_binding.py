@@ -1066,14 +1066,20 @@ def _row_weight_sums(catalog) -> np.ndarray:
     return sums
 
 
+#: The ``count_ratio`` settings bound to a :class:`PooledCountRatioCache`.
+_POOLED_COUNT_RATIOS = ("pooled", "pooled_kernel")
+
+
 def _pooled_count_ratio_cache(redshift, component):
-    """The pooled count-ratio cache of one catalog store (``count_ratio="pooled"``)."""
+    """The pooled count-ratio cache of one catalog store (``count_ratio="pooled"``
+    or ``"pooled_kernel"``, which counts each galaxy through its redshift kernel)."""
     store = component.catalog
     return build_pooled_count_ratio_cache(
         store.catalog,
         window=redshift.count_ratio_window,
         z_depth=store.z_depth,
         row_fraction=component.row_fraction,
+        redshift_errors=redshift.count_ratio == "pooled_kernel",
     )
 
 
@@ -1156,7 +1162,7 @@ def _bind_mixture(analysis, events, injections):
         # which sums no kernel.
         compact = _with_kernel_window(analysis, compact, k)
         compact_cache = full_cache = None
-        if count_ratio and redshift.count_ratio == "pooled":
+        if count_ratio and redshift.count_ratio in _POOLED_COUNT_RATIOS:
             # Pooled (the default): one pooled curve from every row of the store, and each
             # view's row coverage.
             pooled = _pooled_count_ratio_cache(redshift, component)
@@ -1410,7 +1416,7 @@ def bind_analysis(
             and analysis.redshift.count_ratio == "row"
             else None
         )
-        if getattr(analysis.redshift, "count_ratio", "row") == "pooled":
+        if getattr(analysis.redshift, "count_ratio", "row") in _POOLED_COUNT_RATIOS:
             # Pooled (the default): one pooled curve from every row of the store, and the
             # compact rows' coverage.
             pooled = _pooled_count_ratio_cache(analysis.redshift, analysis.redshift)

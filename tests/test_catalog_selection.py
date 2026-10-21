@@ -224,3 +224,52 @@ def test_selection_completion_preserves_expected_count_amplitude_and_depth():
     # dV_c/dz scales exactly H0^-3 at fixed background cosmology.
     ratio = float(low.N_miss[0] / high.N_miss[0])
     assert ratio == pytest.approx(8.0, rel=2e-12)
+
+
+@pytest.mark.parametrize(
+    "family, field, value",
+    [
+        ("gaussian", "m_lim", True),
+        ("gaussian", "M0hat", "-20.2"),
+        ("gaussian", "sigma_M", "1"),
+        ("schechter", "m_lim", True),
+        ("schechter", "alpha", "-1.21"),
+    ],
+)
+def test_the_magnitude_payload_refuses_booleans_and_strings(family, field, value):
+    """``float(True)`` is 1.0: ``m_lim=True`` decoded to a first-magnitude
+    limit (every host missing) with no error. Booleans and strings are refused,
+    as the tabulated family refuses them."""
+    payload = selection_to_mapping(GAUSS if family == "gaussian" else SCHECH)
+    with pytest.raises(TypeError, match=f"{field} must be an integer or a float"):
+        selection_from_mapping({**payload, field: value})
+
+
+@pytest.mark.parametrize("coeffs", ["01", [0.39, True], [0.39, "0.11"]])
+def test_the_k_correction_payload_refuses_strings_and_booleans(coeffs):
+    payload = {**selection_to_mapping(GAUSS), "k_corr_coeffs": coeffs}
+    with pytest.raises(TypeError, match="k_corr_coeffs"):
+        selection_from_mapping(payload)
+
+
+def test_a_model_built_with_a_boolean_is_refused():
+    with pytest.raises(TypeError, match="m_lim must be an integer or a float"):
+        validate_catalog_selection(GaussianMagnitudeSelection(True, -20.2, 1.0))
+
+
+def test_numpy_k_correction_coefficients_are_accepted():
+    """A fitted K(z) template as a NumPy array: the truth test of the array
+    raised 'truth value of an array ... is ambiguous'; it is the tuple's model."""
+    array = GaussianMagnitudeSelection(22.0, -20.2, 1.0, np.asarray(KC))
+    plain = GaussianMagnitudeSelection(22.0, -20.2, 1.0, KC)
+    validate_catalog_selection(array)
+    assert selection_to_mapping(array) == selection_to_mapping(plain)
+    assert selection_from_mapping(selection_to_mapping(array)) == plain
+    z = np.asarray([0.0, 0.1, 0.3])
+    np.testing.assert_array_equal(
+        np.asarray(k_of_z(z, np.asarray(KC))), np.asarray(k_of_z(z, KC))
+    )
+    assert k_of_z(z, np.asarray([])) is None
+    from darksirens.analysis import resolve_selection_model
+
+    assert resolve_selection_model(array, None) == plain
