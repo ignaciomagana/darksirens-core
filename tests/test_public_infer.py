@@ -400,6 +400,9 @@ def test_core_built_targets_declare_the_angular_prior_volume_offset(monkeypatch)
     """The field-mixture target over a multipole sky: ds.infer used to return
     its raw logZ (-0.50 nat off for multipole, -3.38 for multipole_l3) with no
     corrected value and nothing naming the offset."""
+    # The catalog stores and the mixture target need the catalog package,
+    # which loads its HDF5 reader on import.
+    pytest.importorskip("h5py")
     from _catalog_model_fixtures import (
         COSMOLOGY,
         FIXED_POPULATION,

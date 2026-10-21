@@ -373,6 +373,9 @@ def test_opt_in_z_node_ceiling_keeps_the_sky_anisotropic_up_to_zmax(monkeypatch)
 
 
 def test_opt_in_sky_knobs_enter_the_fingerprint_only_when_set(monkeypatch):
+    # core_numerics_semantic reads the catalog settings, and the catalog
+    # package loads its HDF5 reader on import.
+    pytest.importorskip("h5py")
     from darksirens.inference.run_fingerprint import core_numerics_semantic
     from darksirens.population import angular_advanced
 
