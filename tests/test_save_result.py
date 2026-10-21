@@ -108,3 +108,29 @@ def test_save_result_takes_labels_from_the_result(tmp_path):
     with h5py.File(path, "r") as f:
         assert [label.decode() for label in f["labels"][()]] == ["a", "b"]
         assert "labels" not in json.loads(f.attrs["result_json"])
+
+
+def test_save_result_keeps_0d_and_jax_entries(tmp_path):
+    # A 0-d array is a scalar entry, and a JAX array is stored as its values:
+    # both used to be dropped from the attributes, and result_json held the
+    # JAX values as str(), a "..." summary for a long array.
+    jnp = pytest.importorskip("jax.numpy")
+    path = tmp_path / "result.h5"
+    result = {
+        "samples": np.ones((5, 1)),
+        "logZ": -1.0,
+        "lpvf": np.asarray(0.5),
+        "j": jnp.asarray(0.25),
+        "jarr": jnp.arange(2000.0),
+        "nonfinite": jnp.asarray([1.0, jnp.inf]),
+    }
+    ds.save_result(path, result)
+    with h5py.File(path, "r") as f:
+        assert f.attrs["lpvf"] == 0.5
+        assert f.attrs["j"] == 0.25
+        assert "jarr" not in f.attrs
+        stored = json.loads(f.attrs["result_json"])
+    assert stored["lpvf"] == 0.5
+    assert stored["j"] == 0.25
+    assert stored["jarr"] == np.arange(2000.0).tolist()
+    assert stored["nonfinite"] == [1.0, None]

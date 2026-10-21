@@ -446,10 +446,11 @@ def core_numerics_semantic(likelihood=None) -> dict:
     ``DARKSIRENS_GP_NORM_QUADRATURE``, ``DARKSIRENS_SKY_ZNORM_HI``,
     ``DARKSIRENS_SKY_ZNORM_PER_LS``, ``DARKSIRENS_SKY_Z_NODE_HI``,
     ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
-    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
-    ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
-    runtime by ``configure_normalization_grids`` and the catalog evaluation
-    layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
+    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*``,
+    ``DARKSIRENS_CATALOG_*`` and ``DARKSIRENS_LOW_Z_INTERP``, which enters
+    only as its opt-in ``"corrected"``); the normalisation grids can also be
+    changed at runtime by ``configure_normalization_grids`` and the catalog
+    evaluation layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
     (and the pairing settings ``pairing_scale``/``pairing_norm``) enters only
     when it is not its historical value, so a fingerprint made before the
     defaults changed matches when those values are set explicitly; the
@@ -536,6 +537,12 @@ def core_numerics_semantic(likelihood=None) -> dict:
         "angular_redshift_normaliser": angular_normaliser,
         "normalization_grids": grids.to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
+        # Only the opt-in value enters, so every default fingerprint is unchanged.
+        **(
+            {"low_z_interpolation": _grid.LOW_Z_INTERP}
+            if _grid.LOW_Z_INTERP != "legacy"
+            else {}
+        ),
         **extra,
     })
 

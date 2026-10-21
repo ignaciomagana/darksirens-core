@@ -56,6 +56,7 @@ def _angular_log_weight_fn(
     dL_grid,
     dL_lo,
     dL_hi,
+    H0=None,
 ):
     """Return frozen ``log g(nhat,z(dL))`` weighting, or ``None`` for isotropy.
 
@@ -77,7 +78,7 @@ def _angular_log_weight_fn(
 
     def _weight(nx, ny, nz, dL):
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL_precomputed(dL_c, dL_grid)
+        z = z_of_dL_precomputed(dL_c, dL_grid, H0=H0)
         return model.log_g(nx, ny, nz, z, theta)
 
     return _weight
@@ -141,7 +142,7 @@ def spectral_siren_log_likelihood(
     dL_lo = dL_grid[0]
     dL_hi = dL_grid[-1]
     angular_weight = _angular_log_weight_fn(
-        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi, H0=H0
     )
 
     compute_dtype = _resolve_compute_dtype(
@@ -357,7 +358,7 @@ def _ordinary_hierarchical_likelihood(
     dL_grid = dL_of_z(distance_zgrid, H0, Om0, w0, wa)
     dL_lo, dL_hi = dL_grid[0], dL_grid[-1]
     angular_weight = _angular_log_weight_fn(
-        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi, H0=H0
     )
     # The population's per-likelihood-point state, built once here instead of
     # in every PE block and injection batch (the low-precision weights build

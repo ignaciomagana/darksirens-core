@@ -197,7 +197,7 @@ def log_target_density_m1det_q_dL(
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
@@ -269,7 +269,7 @@ def log_target_density_base_and_z(
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
@@ -321,7 +321,7 @@ def log_sample_weight_branches(
 
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)

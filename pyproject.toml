@@ -7,7 +7,10 @@ name = "darksirens"
 version = "0.1.0.dev0"
 description = "Hierarchical population and cosmological inference with gravitational-wave sirens"
 readme = "README.md"
-requires-python = ">=3.11"
+# The pinned numpy 1.26.4 and scipy 1.12.0 ship no wheels for CPython 3.13+,
+# where pip would fall back to source builds that fail; 3.11 is the validated
+# interpreter and every pin has 3.12 wheels.
+requires-python = ">=3.11,<3.13"
 authors = [{name = "Ignacio Magana"}]
 dependencies = [
   "jax==0.4.34",
@@ -40,7 +43,11 @@ numpyro = [
   "numpyro==0.17.0",
 ]
 gwcat = [
-  "gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3184bdb583f314d91ecae486436842ebe8e9f998",
+  # The chi_eff prior hook (darksirens.gw.samples.chi_eff_prior_logprob)
+  # refuses a gwcat whose ChiEffPrior has no `support` (the -inf out-of-support
+  # convention), so the pin must have it; the release job installs this extra
+  # and calls the hook.
+  "gwcat @ git+https://github.com/ignaciomagana/gwcat.git@3ba1dbf4116bb18f76c9103f79a914564d778182",
 ]
 
 [project.urls]
