@@ -493,7 +493,10 @@ _FRACTIONS = np.random.default_rng(7)
 POOLED_FRACTION_A = _FRACTIONS.uniform(0.3, 1.0, 48)
 POOLED_FRACTION_A[[0, 3, 7, 11, 20, 33, 40]] = 0.0
 POOLED_FRACTION_B = _FRACTIONS.uniform(0.2, 1.0, 192)
-POOLED_FRACTION_B[[1, 5, 9, 50, 51, 100, 150]] = 0.0
+# A zero coverage only in the empty rows 5 and 40: the pooled count ratio
+# refuses a fraction of 0 on rows that hold galaxies; the others get a low one.
+POOLED_FRACTION_B[[5, 40]] = 0.0
+POOLED_FRACTION_B[[1, 9, 50, 51, 100, 150]] = 0.05
 POOLED_KERNEL = {"delta": 0.0, "sigma_kde": 0.01, "delta_c2": 0.0, "sigma_kde_c2": 0.01}
 
 

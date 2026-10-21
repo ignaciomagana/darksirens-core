@@ -2161,6 +2161,9 @@ before.
     non-default `max_likelihood_variance` and `selection_neff_soft_guard`.
   - It takes new `identity=` and `provenance=` keywords. The caller's
     provenance is recorded under `"companion"`.
+  - Its jit traces the GW samples, where the reducer cannot count the live
+    injections, so the target refuses an `n_draw` below them when it is
+    built (the GW package's check, see "GW loaders" above).
   - The fingerprint of every host-density target changes, so a checkpoint
     written before this change resumes only with `resume_force=True`.
 - **`compute_dtype="float32"`**:
