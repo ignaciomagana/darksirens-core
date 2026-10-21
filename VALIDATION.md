@@ -428,23 +428,29 @@ were merged on `fix/review-2026-10-20` and measured there locally (CPU,
 GitHub Actions:
 
 - **Full suite**, one pytest process per test file (the slowest file split
-  in two): 1958 tests, 1957 passed, 1 skipped (the golden-regeneration
-  guard), 0 failed. The `slow` marker's 81 tests pass (`pytest -m slow`, the
-  slow-tests job).
+  in two, every process under 9 minutes): 1970 tests, 1968 passed, 1 skipped
+  (the golden-regeneration guard), 1 expected failure, 0 failed. The expected
+  failure is the photometric null under the default pooled count ratio, a
+  known defect that the test measures (MIGRATION.md, "Completeness and the
+  selection budget"). The `slow` marker's 81 tests pass (`pytest -m slow`,
+  the slow-tests job; its two largest files run in chunks).
 - **CI parity probes.** Every workflow step that runs a `tools/` script, an
   inline parity comparison or a lint was run against the frozen reference
-  (28 jobs). 25 pass. `phase6q-numpyro-static`, `phase6s-numpyro-adapter`
-  and `phase7c1-joint-prior-resolver` fail their exact comparison, each on
-  the one item the samplers package changed on purpose: NumPyro's
-  chained-constraint error text, the lognormal NUTS site's bounded
+  (28 jobs): 28 pass. The samplers package changed three items on purpose:
+  NumPyro's chained-constraint error text, the lognormal NUTS site's bounded
   transform, and the `conditional_upper` rejection-fallback warning. The
-  package did not declare these divergences in the probes, so those three
-  CI gates fail until it does.
+  phase6q, phase6s and phase7c1 probes declare them (MIGRATION.md, "Samplers
+  and prior transforms"): each arm checks its declared form and reports the
+  reference's, so those gates compare everything else exactly. Run on
+  `main`'s source, the candidate arms of the three probes stop with the
+  declaration's error, so a gate still fails if the declared change goes
+  missing. The three jobs' focused test files pass (12, 4 and 11 tests).
 - **Against `main` (1022429).** The same probes on `main` pass 28 of 28, and
-  82 of their 88 output files are byte-identical to this tree's; the six that
-  differ are the field-mixture probe's two records (a new `soft_guard_cap`
-  key), the nested-sampler startup check's remedy text, and the three
-  sampler items above.
+  85 of their 88 output files are byte-identical to this tree's; the three
+  that differ are the field-mixture probe's two records (a new
+  `soft_guard_cap` key) and the nested-sampler startup check's remedy text.
+  The taper shoulder fix (MIGRATION.md, "Populations") changes no probe
+  output.
 
 ## Permanent firewall
 

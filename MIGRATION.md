@@ -1360,18 +1360,24 @@ answer outside the frozen reference's code, or a declared divergence:
   finite (a declared divergence: the reference has the same holes);
 - `ang2pix_ring` matches healpy for right ascensions within about 4.4e-16
   below a multiple of 2 pi;
-- an integer or float32 `theta` is converted to float64 before decoding.
+- an integer or float32 `theta` is converted to float64 before decoding;
+- the mass tapers `sfilter_low` and `sfilter_high` return 1, not 3.5e-57, at
+  a mass one float inside the shoulder where the rounded distance to the edge
+  equals the taper width (see "Populations").
 
 The parity probes the CI workflows run, run on this tree and on `main` at
-1022429, write byte-identical output files (82 of 88) except: the
-field-mixture probe's records, which gain the key `soft_guard_cap` (null);
-the nested-sampler startup check's remedy text (see "Public API"); and the
-three sampler probes listed under "Samplers and prior transforms" (one item
-each; see `VALIDATION.md`). Some results gain keys or change keys
-that are not likelihood values: `log_prior_volume_fraction` and
+1022429, write byte-identical output files (85 of 88) except: the
+field-mixture probe's two records, which gain the key `soft_guard_cap` (null);
+and the nested-sampler startup check's remedy text (see "Public API"). The
+three sampler probes listed under "Samplers and prior transforms" each differ
+from the frozen reference in one item on purpose; each probe declares its
+item, checks it and reports the reference's form, so those CI gates stay exact
+on everything else (see `VALIDATION.md`). Some results gain keys or change
+keys that are not likelihood values: `log_prior_volume_fraction` and
 `logZ_corrected` for partially fixed joint prior pairs and for core-built
 targets, `guard_report["selection_coverage"]`, and the fingerprints of
-host-density targets and of plans that record a new non-default option.
+host-density targets, of one-catalog field analyses under the soft Neff guard,
+and of plans that record a new non-default option.
 
 Where two packages fixed the same thing, the branch keeps one behaviour,
 stated in the subsection it belongs to: the pooled cache's depth (both checks
@@ -1475,8 +1481,12 @@ silently wrong answer, and three opt-in options.
   array of K-correction coefficients is now accepted; it raised "truth value
   of an array ... is ambiguous".
 - **Tests.** tests/test_count_ratio_null.py pins the uninformative-catalog
-  null: spectroscopic redshifts flat under the default, photometric ones not
-  flat under the default and flat under "pooled_kernel".
+  null: spectroscopic redshifts flat under the default and photometric ones
+  flat under "pooled_kernel". The photometric null under the default is an
+  expected failure (`xfail`, not strict) that records its spread as
+  `default_null_spread_nats` (7.19 nats at the test's seeds, against the 1.5
+  nats of a flat null), so the test measures the known defect and passes
+  without failing the suite the day the default is fixed.
 
 ### GW loaders and the PE/selection pair gate (stricter input checks; default likelihood values unchanged except where noted)
 
@@ -1579,10 +1589,16 @@ silently wrong answer, and three opt-in options.
     per-catalog Z_k work a two-catalog mixture does: about 12 nside^2 rows
     times the redshift grid (196,608 rows at nside 128). Expect more run time
     and device memory for every one-catalog field run under numpyro.
-  - No fingerprint field changes with this. A soft-guard checkpoint of a
-    one-catalog field run written before this change is not refused on resume,
-    but it would continue on the new likelihood. Restart such runs instead of
-    resuming them.
+  - The run fingerprint records it: under the soft guard, a binding of a
+    one-catalog field analysis adds `"one_catalog_field_density":
+    "normalised"` to `likelihood_options` (`core_numerics_semantic(bound)`,
+    and the provenance of `make_catalog_mixture_target`). A soft-guard
+    checkpoint of a one-catalog field run written before this change is
+    therefore refused on resume (`ResumeFingerprintError`, naming the entry);
+    `resume_force=True` would continue it on the new likelihood, so restart
+    such runs instead. Hard-guard runs, two-catalog mixtures and the options
+    mapping a companion passes (which cannot tell the analysis) are
+    unchanged.
   - A one-catalog binding without the full sky (for example one made without
     the soft guard and then switched on with dataclasses.replace) is refused
     under the soft guard. Rebind with bind_analysis(...,
@@ -1743,7 +1759,35 @@ that held non-zero padding, and nothing reads those slots.
   an opt-in factorised (1-C) x log-volume interpolant, or an empty-catalog
   spectral baseline.
 
-### Populations: float32 fixes and new opt-in normalisations (default unchanged)
+### Populations: the taper shoulder, float32 fixes, new opt-in normalisations (default unchanged except at the shoulder)
+
+**Taper shoulder at a rounded edge sum (a silent wrong answer; values change
+only there).** `sfilter_low` decided its shoulder from `m >= fl(m_min + dm)`
+but its exponent from the rounded distance `fl(m - m_min)`. Where the two
+disagree, `fl(m - m_min) == dm` while `m < fl(m_min + dm)`, the exponent's
+second denominator was 0, the exponent clipped to its cap and the taper
+returned its floor, 3.5e-57, where its limit is 1: `sfilter_low(10.1, 2.05,
+8.05)`. `sfilter_high` had the mirror case, `sfilter_high(7.95, 20.0,
+12.05)`. A sample or injection stored at such a mass lost about 130 nats per
+taper: for `powerlaw` with m_min = 2.05 and dm_min = 8.05, log p at m1 = m2 =
+10.1 was 260 nats below its neighbours. Each shoulder is now also decided
+from the rounded distance the exponent uses (`delta >= dm`). Measured on
+`main` (the frozen reference has the same code) and on this tree:
+- two-decimal (m_min, dm) pairs on [2, 10] x [0.01, 10], at the parsed
+  decimal sum: 6008 of 801,000 returned the floor; now none;
+- one float below the float sum of random edges: 1.6% (3112 of 200,000) in
+  float64, and 12,480 of the 801,000 decimal pairs in float32; now none;
+- `sfilter_high` one float above the float difference of random edges: 1.2%
+  (24,798 of 2,000,000); now none;
+- every other input gives the same value bit for bit: 400,000 continuous
+  masses through each taper, the population registry goldens, and the CI
+  parity probes (probe_population and the spectral, catalog and bright-siren
+  probes write the same files as on `main`). The gradient at the shoulder is
+  0, the taper's own.
+
+This is a declared divergence from the frozen reference at those floats
+only; no CI fixture lands on one. tests/test_population_model_support.py
+holds the regression tests (they fail on `main`).
 
 **Float32 pairing normaliser in the taper toe (only `compute_dtype="float32"`
 changes).** Two float32 paths returned wrong densities for m1 within about
@@ -2088,7 +2132,14 @@ Default outputs do not change. probe_prior_transform, probe_dynesty_adapter,
 probe_numpyro_init and probe_sampler_dispatch are byte-identical to legacy.
 probe_joint_prior_resolver, probe_numpyro_static and probe_numpyro_adapter
 each differ only in one item listed below: a warning text, an error text, and
-the lognormal NUTS site.
+the lognormal NUTS site. Each probe declares its item as a divergence from
+the reference (`DECLARED_WARNING_SUFFIX`, `DECLARED_ERROR_TEXT`,
+`DECLARED_LOGNORMAL_TRANSFORM`), as the population probe declares the GWTC-5
+effective-spin values: each arm checks that its own output carries its
+declared form exactly (the candidate's lognormal domain must be the site's own
+truncation interval), and both arms report the reference's form, so the
+phase6q, phase6s and phase7c1 CI gates compare everything else exactly. An
+undeclared change, or the declared change missing, still fails them.
 
 - **InferenceTarget joint constraints.** `InferenceTarget` and
   `combine_parameter_plans` now refuse a joint constraint whose cube map is
@@ -2182,8 +2233,24 @@ before.
   `n_events * nsamp`, as the other hierarchies do. Before, a too-small `nsamp`
   regrouped samples across events without an error.
 
-### Packaging: the gwcat extra, the Python range, save_result, opt-in low-z interpolation
+### Packaging: the gwcat extra, the Python range, save_result, opt-in low-z interpolation, the TinyNS pin
 
+- **TinyNS pin (kept; documented and guarded).** The base install still
+  requires TinyNS 3f9e1b2 (version 0.1.0). It is the validated
+  reconstruction stack (`VALIDATION.md`), the frozen reference's pin, and the
+  TinyNS the full-suite regression job installs; moving it would change what
+  every base install and that job run, which is a release decision, not a
+  review fix. TinyNS 0.1.0 has no live-cov proposal, so the presets
+  `livecov`, `bounded_single`, `bounded_multi` and `fused_bounded_multi` are
+  refused on it before sampling, as before (`ValueError: ... needs tinyns >=
+  0.2.0`). The refusal now also names those presets and the remedy: the
+  TinyNS the real-backends job installs and runs `livecov` against
+  (5b6da641c4d72b309778afdb0aea133b5de8c9e5, version 0.2.3). A test checks
+  that commit against `real-backends.yml`, so the remedy cannot go stale. The
+  README says which presets run on the base install. Still open, for the
+  owner: moving the base pin to a 0.2.x release, or moving TinyNS into an
+  optional extra like the other backends (which would also lift the
+  direct-URL requirement that blocks a PyPI upload).
 - **gwcat extra pin.** `pip install ".[gwcat]"` now installs gwcat
   3ba1dbf4116bb18f76c9103f79a914564d778182 (gwcat master) instead of 3184bdb.
   The old commit had no `ChiEffPrior.support`, so every load that folds the
