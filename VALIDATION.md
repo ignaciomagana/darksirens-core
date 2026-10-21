@@ -420,6 +420,32 @@ P12.4 target module and a field-style target, depth 0.3 and none, blocks
 single and 131072/32, likelihood and diagnostics) is byte-identical to the
 previous release's, each lowered in a fresh process.
 
+### Review fixes (2026-10-20)
+
+The twelve review-fix packages (MIGRATION.md, "Review fixes (2026-10-20)")
+were merged on `fix/review-2026-10-20` and measured there locally (CPU,
+`JAX_PLATFORMS=cpu`, the validated stack, the CI job environment), not by
+GitHub Actions:
+
+- **Full suite**, one pytest process per test file (the slowest file split
+  in two): 1958 tests, 1957 passed, 1 skipped (the golden-regeneration
+  guard), 0 failed. The `slow` marker's 81 tests pass (`pytest -m slow`, the
+  slow-tests job).
+- **CI parity probes.** Every workflow step that runs a `tools/` script, an
+  inline parity comparison or a lint was run against the frozen reference
+  (28 jobs). 25 pass. `phase6q-numpyro-static`, `phase6s-numpyro-adapter`
+  and `phase7c1-joint-prior-resolver` fail their exact comparison, each on
+  the one item the samplers package changed on purpose: NumPyro's
+  chained-constraint error text, the lognormal NUTS site's bounded
+  transform, and the `conditional_upper` rejection-fallback warning. The
+  package did not declare these divergences in the probes, so those three
+  CI gates fail until it does.
+- **Against `main` (1022429).** The same probes on `main` pass 28 of 28, and
+  82 of their 88 output files are byte-identical to this tree's; the six that
+  differ are the field-mixture probe's two records (a new `soft_guard_cap`
+  key), the nested-sampler startup check's remedy text, and the three
+  sampler items above.
+
 ## Permanent firewall
 
 The broad Phase-8 regression statically parses `src/darksirens/**/*.py` and

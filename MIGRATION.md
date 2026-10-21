@@ -1362,9 +1362,12 @@ answer outside the frozen reference's code, or a declared divergence:
   below a multiple of 2 pi;
 - an integer or float32 `theta` is converted to float64 before decoding.
 
-The parity probes the packages touched give candidate outputs byte-identical
-to `main` at 1022429, except the three sampler probes listed under "Samplers
-and prior transforms" (one item each). Some results gain keys or change keys
+The parity probes the CI workflows run, run on this tree and on `main` at
+1022429, write byte-identical output files (82 of 88) except: the
+field-mixture probe's records, which gain the key `soft_guard_cap` (null);
+the nested-sampler startup check's remedy text (see "Public API"); and the
+three sampler probes listed under "Samplers and prior transforms" (one item
+each; see `VALIDATION.md`). Some results gain keys or change keys
 that are not likelihood values: `log_prior_volume_fraction` and
 `logZ_corrected` for partially fixed joint prior pairs and for core-built
 targets, `guard_report["selection_coverage"]`, and the fingerprints of
