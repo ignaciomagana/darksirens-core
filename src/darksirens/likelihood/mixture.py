@@ -17,9 +17,11 @@ common factor of the density (its height tracks ``-N log mu``), so the
 one-catalog density is then ``n_1 / Z_1``, as in the frozen reference, and
 ``log mu`` and the event evidences in the diagnostics are normalised. Each
 branch is the host probability of the sample's row, a mass per pixel;
-``mixture_density="steradian"`` (opt-in) divides branch k by its catalog's
-pixel area, which matters only when the catalogs' nsides differ
-(:mod:`darksirens.catalog.mixture`).
+``mixture_density="steradian"`` (opt-in) multiplies branch k by
+``A_min / A_k``, its catalog's pixel area relative to the smallest one (the
+finest nside), so every branch is a host probability per pixel of that area
+(:mod:`darksirens.catalog.mixture`). With equal nsides the factor is exactly
+1 and every value, ``log mu`` included, is the default's under either guard.
 
 Each catalog has its own completeness (``ds.model(..., completeness=[...])``):
 the count ratio and the selection curve give ``n_k = N_obs,p p_cat + dN_miss,p``
@@ -396,11 +398,16 @@ def field_mixture_log_likelihood(
     (``compact_row_weight``, ``full_row_weight``) instead of the galaxy
     counts; it is refused with any other completeness, and so is a component
     that carries row weight sums under ``host_mass="count"``.
-    ``mixture_density="steradian"`` (opt-in, ``K >= 2``) divides each branch
-    by its catalog's pixel area, ``n_k / (Z_k A_k)``, a host density per
-    steradian; the default ``"pixel"`` keeps ``n_k / Z_k``, the host
-    probability of the sample's row, which is the same up to a common factor
-    only when every catalog has the same nside.
+    ``mixture_density="steradian"`` (opt-in, ``K >= 2``) takes each branch
+    per steradian on a common scale, ``n_k A_min / (Z_k A_k)`` with ``A_k``
+    the catalog's pixel area and ``A_min`` the smallest of them: the host
+    probability of a pixel of the finest catalog's area. The default
+    ``"pixel"`` keeps ``n_k / Z_k``, the host probability of the sample's
+    row. With equal nsides ``A_min / A_k = 1`` exactly and the two give the
+    same values under the hard and the soft Neff guard alike; when the
+    nsides differ they differ (the weights act as ``w_k A_k / sum_j w_j A_j``
+    under ``"pixel"``). The common scale ``A_min`` cancels under the hard
+    guard; the soft guard's wall reads ``log mu`` on it.
     ``compute_dtype="float32"`` evaluates
     the per-sample weights, mixture included, in float32 (the per-proposal
     state and every reduction stay float64). ``extension`` is an optional
@@ -430,8 +437,13 @@ def field_mixture_log_likelihood(
         raise ValueError(f"unsupported host_mass {host_mass!r}")
     if mixture_density not in ("pixel", "steradian"):
         raise ValueError(f"unsupported mixture_density {mixture_density!r}")
-    # Opt-in: each branch per steradian, n_k / (Z_k A_k). With one catalog the
-    # area is common to every sample and cancels.
+    # Opt-in: each branch per steradian on the finest catalog's pixel scale,
+    # n_k A_min / (Z_k A_k). Not n_k / (Z_k A_k): a common factor cancels
+    # under the hard guard but not under the soft one, whose wall height
+    # tracks -N log mu; 1 / A_min would move log mu by -log A_min (+9.7 at
+    # nside 128) off the per-pixel scale the default and the frozen reference
+    # give it, and flatten the wall. With equal nsides the offset is exactly
+    # 0. With one catalog the area is common to every sample and cancels.
     per_steradian = mixture_density == "steradian" and n >= 2
     # Z_k is evaluated with two or more catalogs, where it does not cancel,
     # and with one catalog under the soft Neff guard: Z_1 cancels from the
@@ -532,8 +544,18 @@ def field_mixture_log_likelihood(
     # term non-finite and the likelihood -inf), whatever the settings.
     may_poison = n >= 2
 
-    def _log_area(component):
-        return jnp.log(jnp.asarray(component.compact.apix, dtype=zgrid.dtype))
+    # mixture_density="steradian": log(A_k / A_min) per catalog, exactly 0
+    # for a catalog at the finest nside.
+    area_offsets = None
+    if per_steradian:
+        log_areas = [
+            jnp.log(jnp.asarray(component.compact.apix, dtype=zgrid.dtype))
+            for component in components
+        ]
+        log_area_min = log_areas[0]
+        for log_area in log_areas[1:]:
+            log_area_min = jnp.minimum(log_area_min, log_area)
+        area_offsets = [log_area - log_area_min for log_area in log_areas]
 
     def evaluate(member):
         views = []
@@ -543,7 +565,7 @@ def field_mixture_log_likelihood(
                     jnp.log(jnp.maximum(piece.observed_total, 1.0e-300)) if normalised else 0.0
                 )
                 if per_steradian:
-                    log_total = log_total + _log_area(component)
+                    log_total = log_total + area_offsets[k]
                 views.append(
                     _complete_view(
                         piece.kernels, piece.pin_ok, component.compact, log_total,
@@ -571,7 +593,7 @@ def field_mixture_log_likelihood(
                 )
                 log_Z = jnp.log(jnp.maximum(total, 1.0e-300)) + piece.observed_poison + poison
                 if per_steradian:
-                    log_Z = log_Z + _log_area(component)
+                    log_Z = log_Z + area_offsets[k]
             else:
                 log_Z = poison
             views.append(_view(state, log_Z))

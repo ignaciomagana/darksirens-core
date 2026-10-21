@@ -87,10 +87,11 @@ COUNT_RATIO_SETTINGS = ("row", "pooled")
 #: more catalogs: what each catalog's branch ``n_k(z | p_k) / Z_k`` is per.
 #: ``"pixel"`` (the default, the frozen reference's convention) is the host
 #: probability of the sample's row, so branch k carries a factor of its pixel
-#: area; ``"steradian"`` (opt-in) divides each branch by its pixel area, a host
-#: density per steradian, so the weights are host fractions whatever each
-#: catalog's nside. The two agree up to a common factor, which cancels, when
-#: every catalog has the same nside.
+#: area; ``"steradian"`` (opt-in) multiplies branch k by ``A_min / A_k``, its
+#: pixel area relative to the smallest (a host density per steradian on the
+#: finest catalog's pixel scale), so the weights are host fractions whatever
+#: each catalog's nside. When every catalog has the same nside that factor is
+#: exactly 1 and the two give the same values under every Neff guard.
 MIXTURE_DENSITY_SETTINGS = ("pixel", "steradian")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
@@ -189,7 +190,8 @@ class FieldCatalogMixtureRedshift:
     ``count_ratio_window`` the kernel width of ``"pooled"`` (``None`` for
     ``"row"``). ``mixture_density`` is one of :data:`MIXTURE_DENSITY_SETTINGS`:
     ``"pixel"`` (each branch is the host probability of the sample's row) or
-    ``"steradian"`` (each branch divided by its catalog's pixel area).
+    ``"steradian"`` (each branch multiplied by ``A_min / A_k``, its catalog's
+    pixel area relative to the smallest).
     """
 
     components: tuple
@@ -798,7 +800,7 @@ def _resolve_mixture(
         if n < 2:
             raise ValueError(
                 "mixture_density applies to a field mixture of two or more catalogs: "
-                "with one catalog the pixel area is common to every sample and cancels"
+                "with one catalog its area factor A_min / A_1 is 1"
             )
     elif n >= 2:
         nsides = [int(store.nside) for store in catalogs]
@@ -809,8 +811,9 @@ def _resolve_mixture(
                 "the host probability of the sample's row, so branch k carries a "
                 "factor of its pixel area, the weights fcat_k are not host fractions "
                 "and their uniform-simplex prior is not uniform in the host fractions. "
-                "mixture_density='steradian' divides each branch by its pixel area (a "
-                "host density per steradian); mixture_density='pixel' keeps the frozen "
+                "mixture_density='steradian' divides each branch by its pixel area "
+                "relative to the finest catalog's (a host density per steradian on that "
+                "pixel scale); mixture_density='pixel' keeps the frozen "
                 "reference's convention. Pass mixture_density to ds.model to choose "
                 "and silence this warning.",
                 UserWarning,
@@ -1658,9 +1661,13 @@ def model(
     fractions, and the uniform-simplex prior is not uniform in the host
     fractions. ``ds.model`` then warns unless ``mixture_density`` is given.
     ``mixture_density="steradian"`` (opt-in) divides each branch by its
-    catalog's pixel area, ``n_k / (Z_k A_k)``, so the weights are host
-    fractions whatever each catalog's nside; it is refused with one catalog
-    (the area cancels). The plan records it
+    catalog's pixel area relative to the smallest, ``n_k A_min / (Z_k A_k)``
+    (a host density per steradian on the finest catalog's pixel scale), so
+    the weights are host fractions whatever each catalog's nside; with equal
+    nsides it gives the default's values under the hard and the soft Neff
+    guard alike (the common scale keeps ``log mu``, which the soft wall
+    reads, where the default has it). It is refused with one catalog (its
+    factor ``A_min / A_1`` is 1). The plan records it
     (``ParameterPlan.catalog_model``) and a run fingerprint changes with it;
     ``"pixel"`` is not recorded. ``compute_dtype="float32"`` is not available with a
     complete catalog, as for a conditional complete-catalog analysis, and a

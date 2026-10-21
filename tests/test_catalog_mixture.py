@@ -566,7 +566,14 @@ def test_steradian_branches_do_not_depend_on_the_pixelization():
     n_k / Z_k is the host probability of the sample's row, which carries the
     pixel area (A_1 = 4 A_2): by default the mixture [field, G] moves with
     the field's nside, and mixture_density="steradian" removes the area, so
-    the likelihood is the same at either nside and every weight."""
+    the likelihood is the same at either nside and every weight.
+
+    The soft Neff guard's wall reads log mu, which a common factor of the
+    density moves: "steradian" keeps every branch on the finest catalog's
+    pixel scale (A_min / A_k), so with equal nsides it is the default bit for
+    bit under the soft guard too, also where the wall is active (at
+    max_likelihood_variance=0.065 it is about 6e4 nats deep here). Dividing
+    by A_k alone moved log mu by -log A_2 and the likelihood by +3e3 nats."""
     field_1 = _uniform_store(_Z_F, 1, 4, "F-n1")
     field_2 = _uniform_store(_Z_F, 2, 1, "F-n2")
     other = _uniform_store(_Z_G, 2, 1, "G-n2")
@@ -592,6 +599,19 @@ def test_steradian_branches_do_not_depend_on_the_pixelization():
         f_eff = f / (f + 4.0 * (1.0 - f))
         _close(p1, float(bound["s2"](theta_of(pixel_1, dict(base, fcat_2=f_eff)))), 1e-10,
                f"effective weight fcat_2={f}")
+    soft = {name: _bind(a, selection_neff_soft_guard=True, max_likelihood_variance=0.065)
+            for name, a in (("s1", steradian_1), ("p2", pixel_2), ("s2", steradian_2))}
+    for f in (0.1, 0.5):
+        theta = theta_of(pixel_1, dict(base, fcat_2=f))
+        s1, s2, p2 = (float(soft[name](theta)) for name in ("s1", "s2", "p2"))
+        assert p2 < float(bound["p2"](theta)) - 1.0e3, (f, p2)  # the wall is active
+        # Equal nsides: steradian is the default, log mu included.
+        assert s2 == p2, (f, s2, p2)
+        assert float(soft["s2"].diagnostics(theta).log_mu) == float(
+            soft["p2"].diagnostics(theta).log_mu
+        )
+        # The same finest nside: the coarser field's pixelization does not enter.
+        _close(s1, s2, 1e-10, f"soft guard, steradian fcat_2={f}")
 
 
 def test_mixture_density_is_recorded_only_when_steradian():
