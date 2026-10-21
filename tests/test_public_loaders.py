@@ -107,6 +107,32 @@ def test_gw_facades_delegate_after_runtime_configuration(monkeypatch):
     assert calls == ["configure", "configure"]
 
 
+@pytest.mark.parametrize("entry", ["model", "infer", "log_likelihood", "Counterpart"])
+def test_root_entry_points_configure_the_runtime_before_delegating(monkeypatch, entry):
+    """Every other root entry point that reaches science code configures the
+    runtime first (allocator defaults, the opt-in XLA cache, x64). A cold
+    x64 check cannot tell: the modules they import enable x64 themselves."""
+    import darksirens
+    import darksirens.analysis as analysis
+    import darksirens.inference.public as public
+
+    calls = []
+    monkeypatch.setattr(darksirens, "configure_jax_runtime", lambda: calls.append("configure"))
+    if entry == "Counterpart":
+        # The lazy attribute caches itself in the module after the first access.
+        monkeypatch.delitem(vars(darksirens), "Counterpart", raising=False)
+        assert darksirens.Counterpart.__name__ == "Counterpart"
+        assert calls == ["configure"]
+        return
+    owner = analysis if entry == "model" else public
+    monkeypatch.setattr(owner, entry, lambda *args, **kwargs: calls.append(entry) or entry)
+    if entry == "model":
+        assert darksirens.model(population=None) == "model"
+    else:
+        assert getattr(darksirens, entry)(object(), events=None, injections=None) == entry
+    assert calls == ["configure", entry]
+
+
 def _store(path, attrs):
     return SimpleNamespace(path=path, attrs=attrs)
 

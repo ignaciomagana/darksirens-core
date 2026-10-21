@@ -20,9 +20,11 @@ at bind time.
 The default (``compute_dtype=None`` or ``"float64"``) never enters this
 module, so its traced program is unchanged bit for bit.
 
-Scope: catalog-free (spectral) and incomplete-catalog (dark) analyses with an
-isotropic angular model, chi_eff populations (no component-spin block) and
-non-Gaussian-process population models. Everything else is refused when the
+Scope: catalog-free (spectral), incomplete-catalog (dark) and field-weighted
+(``catalog_sky_weighting="field"``, no catalog with
+``completeness="complete"``) analyses with an isotropic angular model, chi_eff
+populations (no component-spin block) and non-Gaussian-process population
+models. Everything else (bright sirens, complete catalogs) is refused when the
 analysis is bound. Gaussian-process populations are refused on purpose: their
 covariance algebra is kept in float64 (``population/gp.py`` promotes its
 inputs, and ``cond(K)`` reaches 5e5-2e7), so float32 per-sample weights gain

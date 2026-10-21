@@ -564,14 +564,29 @@ def _pairing_sizing_base(s: NormalizationGridSettings) -> NormalizationGridSetti
     return s
 
 
-def pairing_grid_settings_for_support(m1_support_max: float) -> NormalizationGridSettings:
+def configured_normalization_grid_settings() -> NormalizationGridSettings:
+    """The configured settings, before any pairing m1 grid sizing grew them.
+
+    What a likelihood's numerics depend on: the grid a trace uses is sized
+    from these for its own model (:func:`pairing_grid_settings_for_support`).
+    """
+    return _pairing_sizing_base(normalization_grid_settings())
+
+
+def pairing_grid_settings_for_support(
+    m1_support_max: float, base: NormalizationGridSettings | None = None
+) -> NormalizationGridSettings:
     """The settings :func:`size_pairing_grid_to_support` installs for a support.
 
     Pure: computed from the CONFIGURED settings (not from a grid an earlier,
     wider model grew), so the result depends on ``m1_support_max`` and the
-    configuration only.
+    configuration only.  ``base`` sizes from other configured settings (a
+    binding's, as it was bound) instead of the current ones.
     """
-    base = _pairing_sizing_base(normalization_grid_settings())
+    if base is None:
+        base = configured_normalization_grid_settings()
+    else:
+        base = _pairing_sizing_base(base)
     if base.pairing_m1_grid is None:
         return base
     support = float(m1_support_max)

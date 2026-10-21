@@ -574,6 +574,70 @@ def test_the_binding_carries_one_pooled_curve_and_the_view_rows_coverage():
     assert first.compact_row_fraction is None and first.full_row_fraction is None
 
 
+@pytest.mark.parametrize("weighting", ["conditional", "field", "two"])
+def test_the_binding_builds_the_pooled_curve_at_the_catalog_depth(weighting):
+    """The cache of a catalog with a survey depth is normalised inside that
+    depth: built without it, the kernel mass beyond the depth leaks into the
+    normalisation and the completeness falls below the truth up to the depth
+    (a mutant passing ``z_depth=None`` at bind left every other test green)."""
+    reference = build_pooled_count_ratio_cache(A_DEEP.catalog, window=WINDOW, z_depth=0.3)
+    shallow = build_pooled_count_ratio_cache(A_DEEP.catalog, window=WINDOW, z_depth=None)
+    assert not np.array_equal(np.asarray(reference.operator), np.asarray(shallow.operator))
+    assert reference.depth.z_depth == 0.3 and shallow.depth.z_depth is None
+    stores = [A_DEEP, B] if weighting == "two" else A_DEEP
+    sky = "conditional" if weighting == "conditional" else "field"
+    bound = _bind(_pooled(stores, catalog_sky_weighting=sky))
+    if weighting == "conditional":
+        caches = [bound.observed_density_cache]
+    else:
+        first = bound.model_operands.components[0]
+        caches = [first.compact_cache] + ([first.full_cache] if weighting == "two" else [])
+    for cache in caches:
+        np.testing.assert_array_equal(np.asarray(cache.operator), np.asarray(reference.operator))
+        assert cache.depth.z_depth == 0.3
+    if weighting == "two":
+        second = bound.model_operands.components[1]
+        assert second.compact_cache.depth.z_depth is None
+        np.testing.assert_array_equal(
+            np.asarray(second.full_cache.operator),
+            np.asarray(build_pooled_count_ratio_cache(B.catalog, window=WINDOW).operator),
+        )
+
+
+def test_the_completion_curves_refuse_a_cache_of_another_depth():
+    """A caller that builds its own cache with the builder's default depth
+    (``None``) for a catalog with a depth gets a clear error, not a
+    completeness too low near the depth."""
+    view = A_DEEP.catalog
+    params = CatalogParameters(n0=1.0e-3, delta=0.0, sigma_kde=0.01, z_depth=0.3)
+    deep = build_pooled_count_ratio_cache(view, window=WINDOW, z_depth=0.3)
+    shallow = build_pooled_count_ratio_cache(view, window=WINDOW)
+    curves = completion_curves(COSMO, params, view, deep)
+    assert np.all(np.isfinite(np.asarray(curves.N_miss)))
+    gathered = gathered_completion_curves(COSMO, params, view, deep)
+    np.testing.assert_allclose(np.asarray(gathered.N_miss), np.asarray(curves.N_miss), rtol=1e-12)
+    # The public functions trace z_depth, so a depth against none (and none
+    # against a depth) is what they can compare; the bound likelihood's depth
+    # is a Python value, compared exactly (test_bound_analysis_integrity.py).
+    for fn in (completion_curves, gathered_completion_curves):
+        with pytest.raises(ValueError, match="built for z_depth=None, but the catalog parameters have z_depth=a .traced. depth"):
+            fn(COSMO, params, view, shallow)
+        with pytest.raises(ValueError, match="built for z_depth=0.3, but the catalog parameters have z_depth=None"):
+            fn(COSMO, params._replace(z_depth=None), view, deep)
+    from darksirens.catalog.completeness import _completion_curves_impl, _require_cache_depth
+
+    with pytest.raises(ValueError, match="built for z_depth=0.3, but the catalog parameters have z_depth=0.25"):
+        _require_cache_depth(deep, params._replace(z_depth=0.25))
+    with pytest.raises(ValueError, match="built for z_depth=0.3, but the catalog parameters have z_depth=0.25"):
+        jax.jit(lambda c: _completion_curves_impl(COSMO, params._replace(z_depth=0.25), view, c))(deep)
+    # A cache assembled by hand records no depth and is not checked.
+    unrecorded = PooledCountRatioCache(operator=deep.operator, row_fraction=deep.row_fraction)
+    np.testing.assert_array_equal(
+        np.asarray(completion_curves(COSMO, params, view, unrecorded).N_miss),
+        np.asarray(curves.N_miss),
+    )
+
+
 @pytest.mark.parametrize(
     "catalog, weighting",
     [("one", "conditional"), ("one", "field"), ("deep", "conditional"), ("deep", "field"),
@@ -877,17 +941,23 @@ def test_ds_model_refuses_galaxies_outside_the_row_fraction(kwargs, refused):
 def test_a_cache_evaluated_at_another_depth_is_nan():
     """A cache normalised to the top of the grid (``z_depth=None``) and
     evaluated with ``params.z_depth = 0.35`` gave a completeness up to half
-    the matched one near the depth, silently; it is now NaN, on the grid and
-    in the gathered form. The matched cache is finite."""
+    the matched one near the depth, silently. Where the cache's static
+    ``depth`` decides it (a depth against none) the curves refuse the cache
+    (test_the_completion_curves_refuse_a_cache_of_another_depth); a traced
+    depth of another value, or a cache that records only ``z_top``, is now
+    NaN, on the grid and in the gathered form. The matched cache is finite."""
     catalog = _sparse(800)
     params = TOY_PARAMS._replace(z_depth=0.35)
     matched = build_pooled_count_ratio_cache(catalog, window=0.05, z_depth=0.35)
     full = build_pooled_count_ratio_cache(catalog, window=0.05)
+    other = build_pooled_count_ratio_cache(catalog, window=0.05, z_depth=0.3)
     assert float(matched.z_top) == 0.35 and float(full.z_top) == float(Z[-1])
     assert np.all(np.isfinite(np.asarray(completion_curves(COSMO, params, catalog, matched).N_miss)))
-    assert np.all(np.isnan(np.asarray(completion_curves(COSMO, params, catalog, full).N_miss)))
-    gathered = gathered_completion_curves(COSMO, params, catalog, full)
-    assert np.all(np.isnan(np.asarray(gathered.N_miss)))
+    for fn in (completion_curves, gathered_completion_curves):
+        with pytest.raises(ValueError, match="built for z_depth=None"):
+            fn(COSMO, params, catalog, full)
+        for cache in (full._replace(depth=None), other):
+            assert np.all(np.isnan(np.asarray(fn(COSMO, params, catalog, cache).N_miss)))
     # Without a depth the full-grid cache is the matched one.
     no_depth = params._replace(z_depth=None)
     assert np.all(np.isfinite(np.asarray(completion_curves(COSMO, no_depth, catalog, full).N_miss)))

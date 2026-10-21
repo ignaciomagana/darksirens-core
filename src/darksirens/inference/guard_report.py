@@ -11,6 +11,23 @@ each, and records the range of the sampled parameters where it fired.
 The report reads the likelihood's own diagnostics record and repeats the
 guard's arithmetic in NumPy; it never changes the likelihood, the sampler's
 RNG streams or NumPy's global RNG state.
+
+It also checks that the injection campaign covers the detectable volume
+(:func:`selection_coverage`). The selection integral ``mu`` is estimated
+from the detected injections, which is unbiased only if the campaign's draw
+distribution covers the detectable population at every cosmology the
+sampler visits: at fixed ``dL`` a larger ``H0`` is a larger redshift and a
+heavier detector-frame mass, so the detectable population reaches further
+out as ``H0`` grows. A campaign that stops inside that region under-counts
+``mu`` by an amount that grows with ``H0``, biasing the posterior high, and
+``N_eff`` and the selection guard cannot see it (the missing injections take
+their weight with them). The report measures, at its prior draws and at the
+corners of the cosmology prior, the share of ``mu`` carried by the injections
+in the outermost ``COVERAGE_SHELL`` of the detected injections' distance
+range: a complete campaign's detections thin out there, a truncated one's
+pile up against its edge. ``N_obs`` times that share is about the
+log-likelihood bias, and the report warns when it exceeds
+``COVERAGE_WARN_NATS``.
 """
 
 from __future__ import annotations
@@ -41,6 +58,14 @@ _GUARD_MEANING = {
     ),
 }
 _OTHER = "non_finite_other"
+
+# The outer share of the detected injections' distance range [0, max dL]
+# whose selection weight the coverage check measures.
+COVERAGE_SHELL = 0.1
+# One warning when N_obs times the largest weight share of that shell (about
+# the log-likelihood bias of a campaign that stops there) exceeds this.
+COVERAGE_WARN_NATS = 0.1
+_COSMOLOGY_LABELS = ("H0", "Om0", "w0", "wa")
 
 
 def classify_guard(diagnostics, n_events, max_likelihood_variance):
@@ -87,6 +112,93 @@ def _summary(points, n_draws, labels):
     }
 
 
+def selection_coverage(bound, thetas, *, shell: float = COVERAGE_SHELL, log_mu=None):
+    """Share of the selection integral carried by the outermost detected injections.
+
+    ``bound`` is a :class:`~darksirens.runtime_binding.BoundAnalysis` and
+    ``thetas`` its coordinates. The shell is the injections with
+    ``dL > (1 - shell) * max dL`` of the valid detected injections. At each
+    ``theta`` the share is ``1 - mu_inner / mu``, with ``mu_inner`` the
+    selection integral without the shell (the same compiled diagnostics
+    program, the shell's injections marked invalid). Returns ``(dL_edge,
+    dL_max, shares)``, ``shares`` an array with NaN where ``mu`` is not
+    finite, or ``None`` when the store has no valid injection. ``log_mu``
+    optionally holds each ``theta``'s ``log mu`` already evaluated (``None``
+    where not), which then is not evaluated again.
+
+    A share well above zero says the campaign's detections pile up against
+    its distance edge: it probably stops inside the detectable volume, and
+    ``N_obs`` times the share is about the bias of the log-likelihood there.
+    """
+    import jax.numpy as jnp
+
+    selection = bound.gw_selection
+    dL = np.asarray(selection.dL, dtype=float)
+    valid = np.asarray(selection.valid, dtype=bool)
+    live = valid & (np.asarray(selection.prior_wt, dtype=float) > 0.0) & np.isfinite(dL)
+    if not live.any():
+        return None
+    dL_max = float(dL[live].max())
+    dL_edge = (1.0 - float(shell)) * dL_max
+    inner = selection._replace(valid=jnp.asarray(valid & ~(dL > dL_edge)))
+    shares = []
+    known = [None] * len(thetas) if log_mu is None else list(log_mu)
+    for theta, full in zip(thetas, known):
+        theta = jnp.asarray(theta)
+        if full is None:
+            full = float(np.asarray(bound.diagnostics(theta).log_mu, dtype=float))
+        part = float(np.asarray(bound._diagnostics_at(theta, inner).log_mu, dtype=float))
+        if not np.isfinite(full):
+            shares.append(np.nan)
+        else:
+            # -expm1(part - full) = 1 - mu_inner / mu (1 when no weight is inside).
+            share = float(-np.expm1(part - full)) if np.isfinite(part) else 1.0
+            shares.append(min(max(share, 0.0), 1.0))
+    return dL_edge, dL_max, np.asarray(shares, dtype=float)
+
+
+def _cosmology_corners(prior_transform, labels):
+    """The prior's edges in each sampled cosmological parameter, the rest at the median."""
+    import jax.numpy as jnp
+
+    corners = []
+    for i, label in enumerate(labels):
+        if label not in _COSMOLOGY_LABELS:
+            continue
+        for edge in (0.0, 1.0):
+            u = np.full(len(labels), 0.5)
+            u[i] = edge
+            corners.append(np.asarray(prior_transform(jnp.asarray(u)), dtype=float))
+    return corners
+
+
+def _coverage_report(bound, prior_transform, labels, points, log_mus):
+    if not hasattr(bound, "_diagnostics_at"):
+        return None  # not a core binding: its injections are not visible here
+    corners = _cosmology_corners(prior_transform, labels)
+    probed = list(points) + corners
+    found = selection_coverage(
+        bound, probed, log_mu=list(log_mus) + [None] * len(corners)
+    )
+    if found is None:
+        return None
+    dL_edge, dL_max, shares = found
+    finite = np.isfinite(shares)
+    if not finite.any():
+        return None
+    k = int(np.argmax(np.where(finite, shares, -np.inf)))
+    share = float(shares[k])
+    return {
+        "shell": COVERAGE_SHELL,
+        "dL_edge": dL_edge,
+        "dL_max": dL_max,
+        "points": int(finite.sum()),
+        "max_edge_share": share,
+        "max_edge_nats": float(bound.n_events) * share,
+        "at": {label: float(probed[k][i]) for i, label in enumerate(labels)},
+    }
+
+
 def _describe(name, entry):
     ranges = ", ".join(f"{label} in [{lo:.4g}, {hi:.4g}]" for label, (lo, hi) in entry["ranges"].items())
     return f"{name} on {entry['count']} draws ({ranges})"
@@ -117,10 +229,17 @@ def guard_report(
     - ``non_finite_other``: the same for draws whose likelihood is not
       finite with no guard firing (for example an event with no support),
       present only when there are some;
-    - ``probed_ranges``: ``{label: [min, max]}`` over every draw.
+    - ``probed_ranges``: ``{label: [min, max]}`` over every draw;
+    - ``selection_coverage``: the injection-coverage check (module
+      docstring, :func:`selection_coverage`) over the draws and the corners
+      of the cosmology prior: ``shell``, ``dL_edge`` and ``dL_max`` (Mpc),
+      the number of ``points`` with a finite ``mu``, the largest
+      ``max_edge_share`` of ``mu`` in the shell, ``max_edge_nats`` (``N_obs``
+      times it) and the coordinates ``at`` which it was found.
 
     Warns once (``UserWarning``) when more than ``warn_fraction`` of the
-    draws is guarded, naming the guard and where it fired.
+    draws is guarded, naming the guard and where it fired, and once when
+    ``max_edge_nats`` exceeds ``COVERAGE_WARN_NATS``.
     """
     import jax.numpy as jnp
 
@@ -132,6 +251,7 @@ def guard_report(
     t0 = time.perf_counter()
     points = []
     verdicts = []
+    log_mus = []
     for _ in range(n_draws):
         theta = np.asarray(prior_transform(jnp.asarray(rng.random(len(labels)))), dtype=float)
         record = bound.diagnostics(jnp.asarray(theta))
@@ -140,7 +260,8 @@ def guard_report(
             verdict = _OTHER
         points.append(theta)
         verdicts.append(verdict)
-    elapsed = time.perf_counter() - t0
+        log_mu = getattr(record, "log_mu", None)
+        log_mus.append(None if log_mu is None else float(np.asarray(log_mu, dtype=float)))
 
     fired = {}
     for name in GUARD_NAMES + (_OTHER,):
@@ -161,6 +282,10 @@ def guard_report(
     }
     if other is not None:
         report["non_finite_other"] = other
+    coverage = _coverage_report(bound, prior_transform, labels, points, log_mus)
+    if coverage is not None:
+        report["selection_coverage"] = coverage
+    elapsed = time.perf_counter() - t0
 
     counts = ", ".join(f"{name} {entry['count']}" for name, entry in fired.items())
     print(
@@ -186,13 +311,33 @@ def guard_report(
             UserWarning,
             stacklevel=4,
         )
+    if coverage is not None and coverage["max_edge_nats"] > COVERAGE_WARN_NATS:
+        at = ", ".join(f"{label}={value:.4g}" for label, value in coverage["at"].items())
+        warnings.warn(
+            f"The injections in the outermost {100.0 * COVERAGE_SHELL:.0f}% of the "
+            f"detected injections' distance range (dL > {coverage['dL_edge']:.4g} Mpc, "
+            f"up to {coverage['dL_max']:.4g} Mpc) carry {coverage['max_edge_share']:.3g} "
+            f"of the selection integral at {at}: N_obs times that is "
+            f"{coverage['max_edge_nats']:.3g} nats. The campaign's detections pile up "
+            "against its distance edge, so it probably stops inside the detectable "
+            "volume of part of the prior, where it under-counts the selection "
+            "integral by about that much or more (more at larger H0); N_eff and the "
+            "selection guard cannot see it. Extend the injection campaign in "
+            "distance and redshift beyond the detection horizon at the largest H0 "
+            "of the prior. result['guard_report']['selection_coverage'] records it.",
+            UserWarning,
+            stacklevel=4,
+        )
     return report
 
 
 __all__ = [
+    "COVERAGE_SHELL",
+    "COVERAGE_WARN_NATS",
     "GUARD_NAMES",
     "GUARD_REPORT_DRAWS",
     "GUARD_WARN_FRACTION",
     "classify_guard",
     "guard_report",
+    "selection_coverage",
 ]

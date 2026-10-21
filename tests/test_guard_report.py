@@ -15,6 +15,7 @@ from darksirens.inference.guard_report import (
     GUARD_REPORT_DRAWS,
     classify_guard,
     guard_report,
+    selection_coverage,
 )
 from darksirens.runtime_binding import bind_analysis
 from darksirens.selection.gw import selection_log_correction
@@ -300,3 +301,98 @@ def test_public_log_likelihood_is_the_bound_likelihood():
     )
     assert soft.selection_neff_soft_guard is True
     assert soft.max_likelihood_variance == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Injection coverage of the detectable volume
+# ---------------------------------------------------------------------------
+
+
+def _campaign(dl_cut=None, n_draw=80000, seed=11):
+    """Detected injections of a toy campaign drawn ``p(dL) ~ dL^2`` to 6 Gpc,
+    uniform in detector-frame mass, detected at a noisy SNR
+    ``8 (Mc_det / 25)^(5/6) (1.5 Gpc / dL) > 8`` (a horizon of 1-3 Gpc that
+    grows with the chirp mass); with ``dl_cut`` the campaign stops there,
+    inside the detectable volume (the exact sub-campaign: ``p_draw / F`` and
+    ``F * ndraw``)."""
+    rng = np.random.default_rng(seed)
+    dL = 6000.0 * rng.random(n_draw) ** (1.0 / 3.0)
+    m1 = rng.uniform(20.0, 60.0, n_draw)
+    q = rng.uniform(0.5, 1.0, n_draw)
+    chi = rng.normal(0.0, 0.1, n_draw)
+    p_draw = (
+        3.0 * dL**2 / 6000.0**3 / 40.0 / 0.5
+        * np.exp(-0.5 * (chi / 0.1) ** 2) / (np.sqrt(2.0 * np.pi) * 0.1)
+    )
+    chirp = m1 * q**0.6 / (1.0 + q) ** 0.2
+    snr = 8.0 * (chirp / 25.0) ** (5.0 / 6.0) * (1500.0 / dL) + rng.normal(0.0, 1.0, n_draw)
+    detected = snr > 8.0
+    fraction = 1.0
+    if dl_cut is not None:
+        detected &= dL < dl_cut
+        fraction = float(np.mean(dL < dl_cut))
+    keep = np.flatnonzero(detected)
+    return SelectionStore(
+        format_version="fixture",
+        path=f"campaign-{dl_cut}.h5",
+        fit_columns=FIT,
+        columns={
+            "m1det": m1[keep],
+            "m2det": q[keep] * m1[keep],
+            "dL": dL[keep],
+            "chieff": chi[keep],
+            "ra": rng.uniform(0.0, 2.0 * np.pi, keep.size),
+            "dec": np.arcsin(rng.uniform(-1.0, 1.0, keep.size)),
+        },
+        attrs={},
+        n_injections=int(keep.size),
+        ndraw=fraction * n_draw,
+        prior_wt=p_draw[keep] / fraction,
+    )
+
+
+def test_a_campaign_that_stops_inside_the_detectable_volume_is_reported():
+    """The selection integral is estimated from the detected injections, so a
+    campaign that stops inside the detectable volume under-counts it by an
+    amount that grows with H0. N_eff and the selection guard cannot see it:
+    the far injections take their weight, and their variance, with them. The
+    guard report measures the share of mu in the outer 10% of the detected
+    injections' distance range, at its draws and at the cosmology corners."""
+    from _catalog_model_fixtures import gw_stores
+
+    events = gw_stores()[0]
+    analysis = _analysis()
+    plan = analysis.parameters
+    prior = _uniform(float(plan.lower[0]), float(plan.upper[0]))
+    full = bind_analysis(analysis, events=events, injections=_campaign())
+    cut = bind_analysis(analysis, events=events, injections=_campaign(dl_cut=2000.0))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        report = guard_report(full, prior, plan.labels, n_draws=4)
+    assert report["guarded"] == 0
+    coverage = report["selection_coverage"]
+    assert coverage["points"] == 4 + 2  # the draws and the two H0 corners
+    assert coverage["dL_max"] > 3000.0
+    assert coverage["max_edge_nats"] < 0.05
+
+    with pytest.warns(UserWarning, match="outermost 10% of the detected injections") as caught:
+        report = guard_report(cut, prior, plan.labels, n_draws=4)
+    assert len(caught) == 1
+    assert report["guarded"] == 0  # the selection guard passes the truncated campaign
+    coverage = report["selection_coverage"]
+    assert coverage["dL_max"] < 2000.0
+    assert coverage["dL_edge"] == pytest.approx(0.9 * coverage["dL_max"])
+    assert coverage["max_edge_nats"] > 0.5
+    assert coverage["max_edge_nats"] == pytest.approx(events.n_events * coverage["max_edge_share"])
+
+    grid = [np.array([h]) for h in (40.0, 70.0, 100.0)]
+    _, _, shares = selection_coverage(cut, grid)
+    _, _, complete = selection_coverage(full, grid)
+    assert np.all(shares > 10.0 * complete), (shares, complete)
+    # N_eff cannot see it: the truncated campaign's is the larger.
+    theta = np.array([100.0])
+    assert float(cut.diagnostics(theta).n_eff) > float(full.diagnostics(theta).n_eff)
+    # The check leaves the bound likelihood unchanged.
+    again = bind_analysis(analysis, events=events, injections=_campaign(dl_cut=2000.0))
+    assert float(cut(theta)) == float(again(theta))

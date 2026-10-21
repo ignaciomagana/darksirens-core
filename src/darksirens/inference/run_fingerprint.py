@@ -393,17 +393,19 @@ def _bound_kernel_window(likelihood):
     return (min(tolerances),)
 
 
-def _bound_normalization_grids(likelihood):
+def _bound_normalization_grids(likelihood, grids):
     """The normalisation grids a binding's likelihood traces with, or ``None``.
 
     The opt-in pairing m1 grid is sized for the binding's own population model
     (``pop_model_parser`` sizes it whenever the likelihood is traced), so a
     binding records that grid, not whatever a later binding of a wider model
-    left in the process.  ``None`` without a binding or with the grid off.
+    left in the process.  ``grids`` are the settings it is sized from (the
+    binding's own, as it was bound).  ``None`` without a binding or with the
+    grid off.
     """
     from darksirens.population import utils
 
-    if utils.normalization_grid_settings().pairing_m1_grid is None:
+    if grids.pairing_m1_grid is None:
         return None
     pop = getattr(getattr(likelihood, "analysis", None), "population", None)
     if likelihood is None or isinstance(likelihood, Mapping) or pop is None:
@@ -412,7 +414,9 @@ def _bound_normalization_grids(likelihood):
 
     model = get_model(pop.model_name, shared_beta=pop.shared_beta,
                       shared_spin=pop.shared_spin, shared_gamma=pop.shared_gamma)
-    return utils.pairing_grid_settings_for_support(population_m1_support_max(model))
+    return utils.pairing_grid_settings_for_support(
+        population_m1_support_max(model), base=grids
+    )
 
 
 def core_numerics_semantic(likelihood=None) -> dict:
@@ -435,7 +439,9 @@ def core_numerics_semantic(likelihood=None) -> dict:
     ``kernel_window="auto"``) are recorded, so a checkpoint written before
     that is not resumed under them (see :mod:`darksirens.catalog.settings`).
     Values are read from the resolved module state, not from ``os.environ``,
-    so they are what the likelihood actually uses.  They change the
+    so they are what the likelihood actually uses; for a binding, the
+    normalisation-grid and catalog evaluation settings are the ones it was
+    bound (and is traced) with.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
     ``semantic`` block, e.g. ``semantic["core_numerics"] =
     core_numerics_semantic(bound)``.  Calling this imports JAX and the
@@ -481,7 +487,14 @@ def core_numerics_semantic(likelihood=None) -> dict:
         angular_normaliser["per_ls"] = angular_advanced._ZNORM_PER_LS
     if angular_advanced._Z_NODE_HI != 3.0:
         angular_normaliser["z_node_hi"] = angular_advanced._Z_NODE_HI
-    catalog_evaluation = catalog_evaluation_settings().to_dict()
+    # A binding carries the settings its likelihood is traced under (it
+    # refuses a trace under others); report those, not the live ones.
+    snapshot = getattr(likelihood, "_trace_settings", None)
+    if snapshot is None:
+        grids, evaluation = utils.normalization_grid_settings(), catalog_evaluation_settings()
+    else:
+        grids, evaluation = snapshot
+    catalog_evaluation = evaluation.to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
         # A binding carries the kernel window it was bound with, which is what
@@ -489,7 +502,7 @@ def core_numerics_semantic(likelihood=None) -> dict:
         catalog_evaluation.pop("kernel_window", None)
         if bound_window[0] is not None:
             catalog_evaluation["kernel_window"] = bound_window[0]
-    grids = _bound_normalization_grids(likelihood) or utils.normalization_grid_settings()
+    grids = _bound_normalization_grids(likelihood, grids) or grids
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {
