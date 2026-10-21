@@ -395,6 +395,72 @@ def test_marked_hosts_drop_a_window_attached_under_auto():
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
+def test_marked_likelihood_sums_every_galaxy_under_an_auto_window():
+    # The likelihood used to hand the per-sample evaluator the catalog that
+    # still carried the window, so the marked prior was summed over the window
+    # with no verdict: a finite wrong value once sigma_kde passed the sizing.
+    from darksirens.catalog.hosts import (
+        CenteredHostMarks,
+        LogLinearHostModel,
+        build_marked_incomplete_catalog_prior_state,
+    )
+    from darksirens.gw.runtime import make_gw_event
+    from darksirens.likelihood.marked import marked_dark_siren_log_likelihood
+
+    rng = np.random.default_rng(3)
+    ngals = np.array([400, 300, 350], dtype=np.int32)
+    zgals = np.full((3, 400), 100.0)
+    for row, n in enumerate(ngals):
+        zgals[row, :n] = np.sort(rng.uniform(0.05, 0.6, n))
+    catalog = GalaxyCatalog(
+        apix=1.0e-4, zgals=jnp.asarray(zgals), dzgals=jnp.asarray(np.full_like(zgals, 1.0e-3)),
+        wgals=jnp.asarray(np.ones_like(zgals)), ngals=jnp.asarray(ngals))
+    real = np.arange(400)[None, :, None] < ngals[:, None, None]
+    host_model = LogLinearHostModel(("logmstar",))
+    marks = CenteredHostMarks(("logmstar",), jnp.asarray(
+        np.where(real, rng.normal(0.0, 0.3, zgals.shape + (1,)), 0.0)))
+    auto = with_kernel_window(catalog, EPS, 0.0, strict=False)
+    assert auto.kernel_window.size < catalog.zgals.shape[1]
+    params = CatalogParameters(n0=1e-9, delta=0.0, sigma_kde=0.02)
+    cache = build_observed_density_cache(catalog)
+    m1 = np.linspace(34.0, 40.0, 8)
+    pe = make_gw_event(m1det=m1, m2det=0.8 * m1, dL=np.linspace(380.0, 620.0, 8),
+                       chieff=np.zeros(8), prior_wt=np.ones(8),
+                       pixels=np.array([0, 1, 2, 0, 1, 2, 0, 1], dtype=np.int32))
+    m1s = np.linspace(33.0, 41.0, 16)
+    sel = make_gw_event(m1det=m1s, m2det=0.8 * m1s, dL=np.linspace(350.0, 650.0, 16),
+                        chieff=np.zeros(16), prior_wt=np.ones(16),
+                        pixels=np.tile(np.array([0, 1, 2, 0], dtype=np.int32), 4))
+
+    def lnl(view):
+        return marked_dark_siren_log_likelihood(
+            COSMO, params, jnp.asarray(get_fixed_population_params(MODEL)), pe, view,
+            cache, host_model, marks, jnp.asarray([1.5]), sel, view, cache, marks,
+            2, 4, 16.0, pop_model=MODEL, max_likelihood_variance=1.0e6,
+            return_diagnostics=True)
+
+    got, want = lnl(auto), lnl(catalog)
+    assert np.isfinite(float(want.log_likelihood))
+    np.testing.assert_allclose(np.asarray(got.event_log_evidence),
+                               np.asarray(want.event_log_evidence), rtol=1e-12, atol=0.0)
+    np.testing.assert_allclose(float(got.log_likelihood), float(want.log_likelihood),
+                               rtol=1e-12, atol=0.0)
+
+    # The fixture can see the defect: the same state summed over the window
+    # (what the likelihood used to do) is off where sigma_kde passes the sizing.
+    state = build_marked_incomplete_catalog_prior_state(
+        COSMO, params, auto, cache, host_model, marks, jnp.asarray([1.5]))
+    zq = jnp.asarray(rng.uniform(0.06, 0.55, 64))
+    rq = jnp.asarray(rng.integers(0, 3, 64), dtype=jnp.int32)
+    full = np.asarray(eval_incomplete_catalog_prior_state_vmap(zq, rq, state, catalog))
+    windowed = np.asarray(eval_incomplete_catalog_prior_state_vmap(zq, rq, state, auto))
+    assert np.max(np.abs(windowed - full)) > 0.1
+
+    # An explicit window is still refused on the likelihood path.
+    with pytest.raises(ValueError, match="kernel window"):
+        lnl(with_kernel_window(catalog, EPS, 0.0))
+
+
 # ---------------------------------------------------------------------------
 # Bound likelihoods against the default program
 

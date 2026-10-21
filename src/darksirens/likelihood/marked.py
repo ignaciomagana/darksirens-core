@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from darksirens.catalog.hosts import (
+    _without_auto_kernel_window,
     build_marked_incomplete_catalog_prior_state,
     require_shared_host_view,
 )
@@ -39,6 +40,7 @@ def marked_dark_siren_log_likelihood(
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     return_diagnostics: bool = False,
+    mu_miss_estimator: str = "count",
 ):
     """Evaluate the conditional incomplete-catalog hierarchy with host marks.
 
@@ -47,8 +49,18 @@ def marked_dark_siren_log_likelihood(
     or both marks must carry the same survey-wide reference table: without one
     of those, ``mu_miss(z|eta)`` differs between the numerator and beta and eta
     is biased.  ``require_shared_host_view`` enforces this eagerly.
+
+    ``mu_miss_estimator`` is the missing-host efficiency estimator of both
+    seams: ``"count"`` (the default, legacy) or the opt-in ``"weighted"``
+    (:func:`darksirens.catalog.hosts.missing_host_efficiency_grid`).
     """
 
+    # The marked host kernel sums every galaxy.  The per-sample evaluator reads
+    # the window from the catalog it is handed, so drop an "auto" window (and
+    # refuse an explicit one) on the catalogs it is handed too, not only on
+    # the ones the states are built from.
+    catalog_pe = _without_auto_kernel_window(catalog_pe)
+    catalog_sel = _without_auto_kernel_window(catalog_sel)
     require_shared_host_view(catalog_pe, host_marks_pe, catalog_sel, host_marks_sel)
 
     state_pe = build_marked_incomplete_catalog_prior_state(
@@ -59,6 +71,7 @@ def marked_dark_siren_log_likelihood(
         host_model,
         host_marks_pe,
         host_params,
+        mu_miss_estimator=mu_miss_estimator,
     )
     state_sel = build_marked_incomplete_catalog_prior_state(
         cosmology,
@@ -68,6 +81,7 @@ def marked_dark_siren_log_likelihood(
         host_model,
         host_marks_sel,
         host_params,
+        mu_miss_estimator=mu_miss_estimator,
     )
 
     def prior_pe(z, pix, catalog):

@@ -46,7 +46,9 @@ class CatalogParameters(NamedTuple):
     :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`), with
     any sampled nuisance in place. Only the likelihoods' completeness step
     reads it; the kernel, the depth convention and the missing-host budget
-    never do.
+    never do. The marked-host prior
+    (:func:`darksirens.catalog.hosts.build_marked_incomplete_catalog_prior_state`)
+    refuses it.
     """
 
     n0: Any = 1.0

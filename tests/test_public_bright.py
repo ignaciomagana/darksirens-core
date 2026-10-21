@@ -134,6 +134,46 @@ def test_bright_model_rejects_ambiguous_composition():
         )
 
 
+def test_bright_model_refuses_counterparts_that_make_every_likelihood_minus_inf():
+    # Each of these used to bind and return -inf at every theta, so dynesty
+    # failed with no finite live point and nothing named the counterpart.
+    events, _ = _stores()
+    cp = _counterpart(events)
+
+    def build(*items, nside=1):
+        return ds.model(
+            cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+            population=_fixed_pop(),
+            counterparts=items,
+            counterpart_nside=nside,
+        )
+
+    for field, value, match in (
+        ("dz", 0.0, "dz must be a finite positive"),
+        ("dz", -0.02, "dz must be a finite positive"),
+        ("dz", float("nan"), "dz must be a finite positive"),
+        ("z", float("nan"), "z must be a finite positive"),
+        ("z", 0.0, "z must be a finite positive"),
+        ("z", "0.1", "z must be a real scalar"),
+        ("dz", np.array([0.02, 0.03]), "dz must be a real scalar"),
+        ("pixel", -1, "pixel must be an integer RING pixel id in \\[0, 12\\)"),
+        ("pixel", 12, "pixel must be an integer RING pixel id"),
+        ("pixel", 3.7, "pixel must be an integer RING pixel id"),
+        ("pixel", True, "pixel must be an integer RING pixel id"),
+    ):
+        with pytest.raises(ValueError, match=f"counterpart 1: {match}"):
+            build(cp, cp._replace(**{field: value}))
+    # The pixel frame is the counterpart nside's.
+    build(cp._replace(pixel=47), nside=2)
+    with pytest.raises(ValueError, match="\\[0, 48\\) at counterpart_nside=2"):
+        build(cp._replace(pixel=48), nside=2)
+    # Integral pixel ids of any numeric type are accepted, and a
+    # sky-marginalized counterpart's pixel is never read.
+    for pixel in (np.int64(cp.pixel), float(cp.pixel), np.asarray(cp.pixel)):
+        build(cp._replace(pixel=pixel))
+    build(cp._replace(pixel=-1, sky_marginalized=True))
+
+
 def test_bright_binding_matches_accepted_low_level_likelihood_exactly():
     events, injections = _stores()
     cp = _counterpart(events, sky_marginalized=True)
