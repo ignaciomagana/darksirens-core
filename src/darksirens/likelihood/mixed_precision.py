@@ -187,6 +187,24 @@ def cast_event(event: GWEvent, dtype) -> GWEvent:
     return event._replace(**{name: c(name) for name in event._fields})
 
 
+def refuse_event_underflow(event: GWEvent, dtype) -> None:
+    """:func:`cast_event`'s refusal for an event the low-precision weight rounds itself.
+
+    A likelihood called with ``compute_dtype`` on float64 columns (directly,
+    not through ``bind_analysis``) rounds them inside the weight, where a
+    value below ``dtype``'s normal range flushes to zero and silently drops
+    its sample. The concrete columns are checked here; traced ones (under
+    ``jax.jit``: a binding's own, checked when it was bound) cannot be, and
+    are skipped.
+    """
+    dtype = np.dtype(dtype)
+    for name in event._fields:
+        x = getattr(event, name)
+        if x is None or isinstance(x, jax.core.Tracer):
+            continue
+        _refuse_underflow(name, x, dtype)
+
+
 def _cast_cosmology(cosmology: CosmologyParameters, dtype) -> CosmologyParameters:
     return CosmologyParameters(*(jnp.asarray(v).astype(dtype) for v in cosmology))
 
@@ -489,6 +507,7 @@ __all__ = [
     "incomplete_catalog_log_prior",
     "is_gaussian_process_population",
     "make_log_weight",
+    "refuse_event_underflow",
     "require_angular_support",
     "require_population_support",
     "resolve_compute_dtype",

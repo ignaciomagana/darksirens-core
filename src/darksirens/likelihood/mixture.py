@@ -340,6 +340,36 @@ def _missing_total(k, cosmology, params, component, completeness, normalizer,
     )
 
 
+def _population_constraint_poison(branch_pops, pop_model, shared_beta, shared_spin, shared_gamma):
+    """``nan`` when a branch's population breaks a joint prior constraint, else 0.
+
+    A population model rejects such a vector on the likelihood side: its
+    density is zero at every sample (the GWTC-5 model's ``lambda_0 + lambda_1
+    <= 1`` and ``m_2,low <= m_1,low``). With one shared population every term
+    is then ``-inf``, and so is the likelihood; with per-catalog blocks only
+    that branch is, and the mixture's logsumexp would drop it and return the
+    other branches' finite value. Added to every term, the poison keeps the
+    rejection for a constraint group only part of which catalog ``k`` copies
+    and for a partially fixed group of catalog 1's: the likelihood is ``-inf``
+    wherever any branch breaks a constraint. ``None`` (static) when the model
+    declares no joint constraint.
+    """
+    from darksirens.analysis import _constraint_holds
+    from darksirens.population import get_model, pop_model_prior_parser
+
+    flags = dict(shared_beta=shared_beta, shared_spin=shared_spin, shared_gamma=shared_gamma)
+    groups = tuple(getattr(get_model(pop_model, **flags), "constraint_groups", None) or ())
+    if not groups:
+        return None
+    labels = [str(label) for label in pop_model_prior_parser(pop_model, **flags)[2]]
+    holds = jnp.asarray(True)
+    for kind, members in groups:
+        index = [labels.index(str(label)) for label in members]
+        for pop in branch_pops:
+            holds = holds & _constraint_holds(kind, [pop[i] for i in index])
+    return jnp.where(holds, 0.0, jnp.nan)
+
+
 def field_mixture_log_likelihood(
     cosmology,
     population,
@@ -503,12 +533,16 @@ def field_mixture_log_likelihood(
     # one population vector per catalog, multiplied into its own branch. None
     # (the default) is the one shared population, on the unchanged program.
     branch_pops = getattr(catalog_parameters, "populations", None)
+    pop_poison = None
     if branch_pops is not None:
         branch_pops = tuple(branch_pops)
         if n < 2:
             raise ValueError("per-catalog populations require two or more catalogs")
         if len(branch_pops) != n:
             raise ValueError(f"{len(branch_pops)} population vectors for {n} catalogs")
+        pop_poison = _population_constraint_poison(
+            branch_pops, pop_model, shared_beta, shared_spin, shared_gamma
+        )
 
     # Member-independent work, once per proposal.
     pieces = []
@@ -607,6 +641,9 @@ def field_mixture_log_likelihood(
         return pix if n == 1 else pix[:, k]
 
     def _reduce(views, member, branch_poison=None):
+        if pop_poison is not None:
+            branch_poison = pop_poison if branch_poison is None else branch_poison + pop_poison
+
         def prior(z, pix, _catalog):
             terms = [
                 (

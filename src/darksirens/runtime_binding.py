@@ -565,6 +565,7 @@ class BoundAnalysis:
                     spin_block=self.gw_pe.spin is not None,
                 ),
             )
+        _require_column_dtype(self)
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python
         # closures, and eager ``lax.scan`` traces per body-function object, so
@@ -846,6 +847,47 @@ class BoundAnalysis:
             )
 
         raise TypeError(f"unsupported analysis redshift type {type(self.analysis.redshift)!r}")
+
+
+def _require_column_dtype(bound: BoundAnalysis) -> None:
+    """Keep a binding's per-sample columns in the dtype its program reads.
+
+    ``bind_analysis(..., compute_dtype="float32")`` rounds the columns once,
+    refusing a value below the float32 normal range
+    (:func:`~darksirens.likelihood.mixed_precision.cast_event`). A binding
+    rebuilt with ``dataclasses.replace(bound, compute_dtype="float32")`` is
+    rounded and checked here the same way (a no-op for a float32 binding):
+    otherwise the weight would round the float64 columns itself and drop a
+    flushed sample silently. The default program on float32 columns
+    (``replace(bound32, compute_dtype=None)``) is refused: its values are the
+    rounded data's, under the float64 run fingerprint.
+    """
+    if bound.compute_dtype is not None:
+        from darksirens.likelihood.mixed_precision import cast_event
+
+        for name in ("gw_pe", "gw_selection"):
+            object.__setattr__(bound, name, cast_event(getattr(bound, name), bound.compute_dtype))
+        return
+    bits = jnp.finfo(jnp.result_type(float)).bits
+    for name in ("gw_pe", "gw_selection"):
+        event = getattr(bound, name)
+        dtypes = {
+            column: jnp.result_type(value)
+            for column, value in zip(event._fields, event)
+            if value is not None
+        }
+        narrow = [
+            column
+            for column, dtype in dtypes.items()
+            if jnp.issubdtype(dtype, jnp.floating) and jnp.finfo(dtype).bits < bits
+        ]
+        if narrow:
+            raise ValueError(
+                f"compute_dtype=None runs the default float64 program, but {name} "
+                f"columns {narrow} are {dtypes[narrow[0]]} (rounded by a "
+                "compute_dtype='float32' binding); bind again with "
+                "bind_analysis(..., compute_dtype=None) for the default program"
+            )
 
 
 def _jit_log_likelihood(bound: BoundAnalysis):

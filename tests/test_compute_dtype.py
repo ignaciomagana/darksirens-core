@@ -353,6 +353,55 @@ def test_a_column_below_the_float32_range_is_refused_and_overflow_is_zero_weight
     assert abs(float(b32(t)) - float(b64(t))) < TOL
 
 
+def test_replace_and_direct_calls_keep_the_underflow_refusal():
+    """``dataclasses.replace(bound, compute_dtype="float32")`` and a direct
+    likelihood call with it refuse a column below the float32 normal range,
+    as ``bind_analysis`` does. The weight used to round it to zero itself and
+    drop the sample whose float64 weight is the largest (event 0's log
+    evidence 87.2 -> -12.4, lnL -137.3 -> -236.9). The default program on a
+    float32 binding's rounded columns is refused too."""
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.likelihood.hierarchical import (
+        dark_siren_log_likelihood,
+        spectral_siren_log_likelihood,
+    )
+    from darksirens.runtime_binding import decode_parameters
+
+    events, injections = _stores()
+    tiny = np.array(events.prior_wt, copy=True)
+    tiny[0] = 1e-45
+    bad = replace(events, prior_wt=tiny)
+    match = "'prior_wt'.*below the normal float32 range"
+    spectral = bind_analysis(_analysis("spectral"), events=bad, injections=injections)
+    with pytest.raises(ValueError, match=match):
+        replace(spectral, compute_dtype="float32")
+    with pytest.raises(ValueError, match=match):
+        spectral_siren_log_likelihood(
+            CosmologyParameters(H0_TRUE, OM0, -1.0, 0.0),
+            jnp.asarray(get_fixed_population_params(MODEL), dtype=float),
+            spectral.gw_pe, spectral.gw_selection, spectral.n_events, spectral.nsamp,
+            spectral.n_draw, pop_model=MODEL, compute_dtype="float32",
+        )
+    dark = bind_analysis(_analysis("dark"), events=bad, injections=injections)
+    decoded = decode_parameters(dark, _fiducial_theta(dark, H0_TRUE))
+    with pytest.raises(ValueError, match=match):
+        dark_siren_log_likelihood(
+            decoded.cosmology, decoded.catalog, decoded.population,
+            dark.gw_pe, dark.catalog, dark.observed_density_cache,
+            dark.gw_selection, dark.catalog, dark.observed_density_cache,
+            dark.n_events, dark.nsamp, dark.n_draw, pop_model=MODEL, compute_dtype="float32",
+        )
+
+    # Onto clean data the replace is the float32 binding, bit for bit.
+    b64, b32 = _bind("spectral"), _bind("spectral", compute_dtype="float32")
+    onto = replace(b64, compute_dtype="float32")
+    assert onto.gw_pe.prior_wt.dtype == jnp.float32
+    t = jnp.asarray(_near_map_thetas(b64)[0])
+    assert _same_bits(onto(t), b32(t))
+    with pytest.raises(ValueError, match="compute_dtype=None runs the default float64 program"):
+        replace(b32, compute_dtype=None)
+
+
 # ---------------------------------------------------------------------------
 # Precision near the mock MAP, reductions in float64, gradients
 # ---------------------------------------------------------------------------

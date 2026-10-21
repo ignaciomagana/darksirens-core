@@ -30,11 +30,36 @@ from darksirens.population.utils import (
 
 @pytest.fixture
 def analytic():
-    configure_normalization_grids(pairing_scale="analytic")
+    """The analytic scale on the per-sample q-quadrature, the path that reads it.
+
+    Under the default ``pairing_norm="auto"`` both production pairings take the
+    per-point normaliser, which never reads ``pairing_scale``, so the analytic
+    and node-maximum arms below would run the same code.
+    """
+    before = normalization_grid_settings()
+    configure_normalization_grids(pairing_scale="analytic", pairing_norm="per_sample")
     try:
         yield
     finally:
-        configure_normalization_grids(pairing_scale="analytic")
+        configure_normalization_grids(
+            pairing_scale=before.pairing_scale, pairing_norm=before.pairing_norm
+        )
+
+
+@pytest.fixture
+def bound_calls(monkeypatch):
+    """Calls of the production pairings' scale bound, so a test sees it is read."""
+    import darksirens.population.parametric as parametric
+
+    calls = []
+    real = parametric._powerlaw_taper_scale_bound
+
+    def spy(*args):
+        calls.append(None)
+        return real(*args)
+
+    monkeypatch.setattr(parametric, "_powerlaw_taper_scale_bound", spy)
+    return calls
 
 
 def _pairings():
@@ -87,22 +112,25 @@ def test_the_bound_holds_at_every_node_and_is_tight_in_the_toe(name):
 
 
 @pytest.mark.parametrize("name", ["powerlaw", "gwtc5"])
-def test_density_matches_node_max(name, analytic):
+def test_density_matches_node_max(name, analytic, bound_calls):
     pairing = _pairings()[name]
     rng = np.random.default_rng(12)
     for theta, m_min, dm_min, m1 in _draws(name, rng, n_theta=20, n_m1=200):
         q = jnp.asarray(rng.uniform(0.0, 1.0, m1.shape))
         configure_normalization_grids(pairing_scale="node_max")
         want = np.asarray(pairing(m1, q, m_min, dm_min, theta))
+        assert not bound_calls
         configure_normalization_grids(pairing_scale="analytic")
         got = np.asarray(pairing(m1, q, m_min, dm_min, theta))
+        assert bound_calls
+        bound_calls.clear()
         assert np.array_equal(got == 0.0, want == 0.0)
         live = want > 0
         np.testing.assert_allclose(got[live], want[live], rtol=1e-12, atol=0.0)
 
 
 @pytest.mark.parametrize("pop_model", ["powerlaw+peak", "gwtc5_fiducial_bpl2peaks"])
-def test_population_gradients_stay_finite_in_the_toe_under_jit(pop_model, analytic):
+def test_population_gradients_stay_finite_in_the_toe_under_jit(pop_model, analytic, bound_calls):
     from darksirens.population import pop_model_prior_parser
 
     log_p_pop = pop_model_parser(pop_model)
@@ -120,6 +148,7 @@ def test_population_gradients_stay_finite_in_the_toe_under_jit(pop_model, analyt
         return jnp.sum(jnp.where(jnp.isfinite(lp), lp, 0.0))
 
     grad_a = np.asarray(jax.jit(jax.grad(total))(theta))
+    assert bound_calls
     configure_normalization_grids(pairing_scale="node_max")
     grad_n = np.asarray(jax.jit(jax.grad(total))(theta))
     assert np.all(np.isfinite(grad_a)), dict(zip(labels, grad_a))

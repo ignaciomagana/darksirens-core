@@ -203,6 +203,74 @@ def test_joint_constraints_are_copied_when_every_member_is():
     assert partial.parameters.joint_constraints == ()
 
 
+def _split_simplex_model():
+    """The GWTC-5 fiducial with only lambda_0 copied for catalog 2 (lambda_1
+    fixed), and a valid and an invalid value of the copy."""
+    lam0, lam1 = r"$\lambda_0$", r"$\lambda_1$"
+    with pytest.warns(RuntimeWarning, match="only"):
+        split = _model(
+            population=Population("brokenpowerlaw+2peaks", fixed="gwtc5"),
+            per_catalog_population={2: [lam0]},
+        )
+    plan = split.parameters
+    lam1_value = dict(zip(plan.population_labels, plan.fixed_population))[lam1]
+    lam0_c2 = per_catalog_population_label(lam0, 2)
+    return split, lam0, lam0_c2, 0.98 - lam1_value, 1.02 - lam1_value
+
+
+def test_a_branch_that_breaks_a_joint_constraint_rejects_the_point():
+    """A constraint group only part of which catalog 2 copies, or a partially
+    fixed group of catalog 1's, keeps the population model's likelihood-side
+    rejection under the blocks: a branch whose population breaks it has zero
+    density at every sample, and the likelihood is -inf there, as with one
+    shared population. The mixture's logsumexp used to drop that branch and
+    return the other branch's value (13.339948, the fcat_2 = 0 value, over
+    the whole invalid region)."""
+    split, lam0, lam0_c2, valid, invalid = _split_simplex_model()
+    bound = _bind(split)
+    low = _bind(split, compute_dtype="float32")
+    values = []
+    for fcat in (0.0, 0.5, 0.95):
+        theta = theta_of(split, {**SURVEY, "fcat_2": fcat, lam0_c2: valid})
+        values.append(float(bound(theta)))
+        assert np.isfinite(values[-1]), fcat
+        for b in (bound, low):
+            assert float(b(theta_of(split, {**SURVEY, "fcat_2": fcat, lam0_c2: invalid}))) == -np.inf
+    assert len(set(values)) == 3
+
+    # Catalog 1's own partial fix (lambda_1 fixed, lambda_0 sampled): the
+    # blocks reject where the shared population does.
+    partial = Population(
+        "gwtc5_fiducial_bpl2peaks",
+        fixed={
+            k: v
+            for k, v in Population("brokenpowerlaw+2peaks", fixed="gwtc5").fiducial_values.items()
+            if k != lam0
+        },
+    )
+    with pytest.warns(RuntimeWarning, match="fixed member"):
+        shared = _model(population=partial)
+    with pytest.warns(RuntimeWarning):
+        blocks = _model(population=partial, per_catalog_population={2: [lam0]})
+    bound_b, bound_s = _bind(blocks), _bind(shared)
+    # The copy at the base value: the shared-population likelihood.
+    point = {**SURVEY, "fcat_2": 0.5, lam0: valid, lam0_c2: valid}
+    _close(bound_b(theta_of(blocks, point)), bound_s(theta_of(shared, point)), 1e-12)
+    point = {**SURVEY, "fcat_2": 0.5, lam0: invalid, lam0_c2: valid}
+    assert float(bound_s(theta_of(shared, point))) == -np.inf
+    assert float(bound_b(theta_of(blocks, point))) == -np.inf
+
+
+@pytest.mark.slow
+def test_constraint_poison_keeps_gradients_finite_where_valid():
+    split, _, lam0_c2, valid, _ = _split_simplex_model()
+    bound = _bind(split)
+    theta = jnp.asarray(theta_of(split, {**SURVEY, lam0_c2: valid}))
+    grad = np.asarray(jax.grad(lambda x: bound(x))(theta))
+    assert np.all(np.isfinite(grad)), grad
+    assert grad[split.parameters.labels.index(lam0_c2)] != 0.0
+
+
 def test_fingerprint_records_blocks_only_when_set():
     default = parameter_plan_semantic(_model().parameters)
     assert "catalog_population" not in default

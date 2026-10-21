@@ -217,6 +217,43 @@ def test_bright_binding_matches_accepted_low_level_likelihood_exactly():
     assert np.isfinite(float(actual))
 
 
+def test_bright_likelihood_refuses_a_wrong_sample_count():
+    """A too-small nsamp regrouped the samples across events (event 1 scored on
+    event 0's samples, its own dropped) and returned a finite wrong value
+    instead of raising like the other hierarchies."""
+    events, injections = _stores(n_events=2, nsamp=4)
+    cps = (
+        _counterpart(events, sky_marginalized=True, sample=0),
+        _counterpart(events, sky_marginalized=True, sample=4),
+    )
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=cps,
+        counterpart_nside=1,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+
+    def call(nsamp):
+        return bright_siren_log_likelihood(
+            CosmologyParameters(67.74, 0.3075, -1.0, 0.0),
+            np.asarray(analysis.parameters.fixed_population),
+            bound.gw_pe,
+            bound.catalog,
+            cps,
+            bound.gw_selection,
+            2,
+            nsamp,
+            injections.ndraw,
+            pop_model=analysis.population.model_name,
+        )
+
+    np.testing.assert_array_equal(np.asarray(call(4)), np.asarray(bound(np.array([67.74]))))
+    for nsamp in (2, 3, 5):
+        with pytest.raises(ValueError, match=r"gw_pe has 8 samples, expected n_events\*nsamp"):
+            call(nsamp)
+
+
 def test_bright_binding_requires_one_counterpart_per_event():
     events, injections = _stores(n_events=2, nsamp=2)
     cp = _counterpart(events, sky_marginalized=True)

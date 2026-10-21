@@ -7,12 +7,19 @@ InferenceTarget used by every sampler backend.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, NamedTuple, Protocol
 
 import jax.numpy as jnp
 
 from darksirens.analysis import Analysis, ParameterPlan, SpectralRedshift
+from darksirens.cosmology.distances import threads_distance_table
 from darksirens.gw.types import GWEvent
+from darksirens.inference.run_fingerprint import (
+    canonical_semantic,
+    likelihood_options_semantic,
+    parameter_plan_semantic,
+)
 from darksirens.inference.target import InferenceTarget, combine_parameter_plans
 from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
 
@@ -186,6 +193,8 @@ def make_host_density_target(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    identity=None,
+    provenance=None,
 ) -> InferenceTarget:
     """Build a sampler target from a catalog-free core analysis plus an extension.
 
@@ -196,14 +205,20 @@ def make_host_density_target(
     model's and a partially fixed population pair's), so its ``ds.infer``
     result carries ``logZ_corrected`` as an ordinary one does.
 
-    The target carries no ``identity`` or ``provenance``, and its plan
-    (:func:`~darksirens.inference.target.combine_parameter_plans`) keeps only
-    the sampled coordinates, so its run fingerprint does not record the base
-    analysis's fixed values or which of two angular models with the same
-    coordinates (``"sphere_gp_z"``, ``"overdensity_gp"``) it uses. A caller
-    that checkpoints one adds them, e.g.
-    ``dataclasses.replace(target, provenance={"base": parameter_plan_semantic(
-    base_analysis.parameters)})``.
+    The target's likelihood is one ``jax.jit``, built here and reused by every
+    call, over the coordinate, the GW samples and the distance table; the
+    opaque states are constants of its program. ``redshift_model``'s methods
+    are therefore traced, as they already were under ``sel_batch_size`` or
+    ``pe_event_block``. Evaluated eagerly, every call re-traced the
+    likelihood, and with either option re-compiled its scans.
+
+    The run fingerprint of the target (``ds.infer`` with a checkpoint)
+    records the base analysis's own plan semantic (fixed values included),
+    its population and angular models, ``n_events``, ``nsamp`` and
+    ``n_draw``, the non-default likelihood options and, under
+    ``"companion"``, ``provenance`` (a mapping, or a zero-argument callable
+    returning one): the redshift model and the opaque states are the
+    companion's to describe there. ``identity`` is the target's, as given.
     """
 
     if not isinstance(base_analysis, Analysis):
@@ -219,24 +234,25 @@ def make_host_density_target(
         extension_plan,
     )
     n_base = len(base_analysis.parameters.labels)
+    pop = base_analysis.population
+    if isinstance(provenance, Mapping):
+        # Fail at construction, not at the first checkpoint.
+        canonical_semantic(provenance, "make_host_density_target(provenance=...)")
+    elif provenance is not None and not callable(provenance):
+        raise TypeError(
+            "provenance must be a mapping or a zero-argument callable returning one"
+        )
 
-    def log_likelihood(theta):
-        theta = jnp.asarray(theta)
-        if theta.ndim != 1 or int(theta.shape[0]) != len(combined_plan.labels):
-            raise ValueError(
-                f"theta must have shape ({len(combined_plan.labels)},), got "
-                f"{tuple(theta.shape)}"
-            )
+    from darksirens.runtime_binding import _decode_theta
 
-        from darksirens.runtime_binding import _decode_theta
-
+    @threads_distance_table()
+    def evaluate(theta, gw_pe, gw_selection, distance_table=None):
         cosmology, population, _catalog, angular = _decode_theta(
             base_analysis,
             theta[:n_base],
             z_depth=None,
         )
         redshift_params = theta[n_base:]
-        pop = base_analysis.population
         return host_density_log_likelihood(
             cosmology,
             population,
@@ -263,6 +279,39 @@ def make_host_density_target(
             return_diagnostics=False,
         )
 
+    def log_likelihood(theta):
+        theta = jnp.asarray(theta)
+        if theta.ndim != 1 or int(theta.shape[0]) != len(combined_plan.labels):
+            raise ValueError(
+                f"theta must have shape ({len(combined_plan.labels)},), got "
+                f"{tuple(theta.shape)}"
+            )
+        return evaluate(theta, gw_pe, gw_selection)
+
+    def target_provenance():
+        block = {
+            "analysis_parameters": parameter_plan_semantic(base_analysis.parameters),
+            "population": {
+                "model": str(pop.model_name),
+                "shared_beta": bool(pop.shared_beta),
+                "shared_spin": bool(pop.shared_spin),
+                "shared_gamma": bool(pop.shared_gamma),
+            },
+            "angular_model": str(base_analysis.angular_model),
+            "samples": {
+                "n_events": int(n_events),
+                "nsamp": int(nsamp),
+                "n_draw": float(n_draw),
+            },
+            "likelihood_options": likelihood_options_semantic({
+                "selection_neff_soft_guard": selection_neff_soft_guard,
+                "max_likelihood_variance": max_likelihood_variance,
+            }),
+        }
+        if provenance is not None:
+            block["companion"] = provenance() if callable(provenance) else provenance
+        return block
+
     from darksirens.inference.public import _log_prior_volume_fraction
 
     # ds.infer records the prior-box offset (the angular model's and a
@@ -270,9 +319,10 @@ def make_host_density_target(
     return InferenceTarget(
         log_likelihood=log_likelihood,
         parameters=combined_plan,
+        identity=identity,
+        provenance=target_provenance,
         log_prior_volume_fraction=_log_prior_volume_fraction(base_analysis),
     )
-
 
 __all__ = [
     "HostDensityLikelihoodDiagnostics",

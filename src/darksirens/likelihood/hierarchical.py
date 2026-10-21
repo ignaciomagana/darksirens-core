@@ -178,8 +178,10 @@ def spectral_siren_log_likelihood(
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     if compute_dtype is not None:
-        from .mixed_precision import make_log_weight, volume_log_prior
+        from .mixed_precision import make_log_weight, refuse_event_underflow, volume_log_prior
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         _log_weight = make_log_weight(
             dtype=compute_dtype,
             cosmology=cosmology,
@@ -415,8 +417,14 @@ def _ordinary_hierarchical_likelihood(
         pe_weight = _branch_weight(log_prior_pe, catalog_pe)
         sel_weight_core = _branch_weight(log_prior_sel, catalog_sel)
     if compute_dtype is not None:
-        from .mixed_precision import make_branch_log_weight, make_log_weight
+        from .mixed_precision import (
+            make_branch_log_weight,
+            make_log_weight,
+            refuse_event_underflow,
+        )
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         lowp = dict(
             dtype=compute_dtype,
             cosmology=cosmology,
@@ -526,8 +534,13 @@ def dark_siren_log_likelihood(
     reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
 
     ``catalog_params.selection`` selects the completeness. ``None`` (the
-    default) is the frozen per-row count ratio read from the observed-density
-    caches. A runtime magnitude-selection model is the opt-in
+    default) is the count ratio read from the observed-density caches, its
+    estimator chosen by the caches' type: an
+    :class:`~darksirens.catalog.completeness.ObservedDensityCache` gives the
+    frozen per-row ratio, a
+    :class:`~darksirens.catalog.completeness.PooledCountRatioCache` the
+    pooled one (what ``bind_analysis`` passes for the ``ds.model`` default,
+    ``count_ratio="pooled"``). A runtime magnitude-selection model is the opt-in
     ``completeness="selection"``: its radial curve, times ``row_fraction_pe``
     / ``row_fraction_sel`` (one coverage fraction per row of each catalog
     view) when given, is every row's completeness
@@ -738,6 +751,13 @@ def bright_siren_log_likelihood(
         raise ValueError(
             f"bright-siren counterparts has {len(counterparts)} entries but "
             f"n_events={n_events}"
+        )
+    # Each counterpart's slice is checked on its own below, which cannot see a
+    # wrong grouping: a too-small nsamp gives full slices of the wrong samples.
+    n_pe = int(gw_pe.dL.shape[0])
+    if n_pe != n_events * nsamp:
+        raise ValueError(
+            f"gw_pe has {n_pe} samples, expected n_events*nsamp={n_events * nsamp}"
         )
 
     log_p_pop = pop_model_parser(

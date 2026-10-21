@@ -73,7 +73,10 @@ def make_gw_event(
     chieff : array-like
         Effective inspiral spin.
     prior_wt : array-like
-        PE prior weights (normalised per event).
+        The proposal density the likelihood divides out of each sample: for
+        posterior samples the PE prior, normalised per event; for detected
+        injections the draw density at its physical scale, never normalised
+        (with ``n_draw`` it sets the scale of ``mu``).
     pixels : array-like of int
         HEALPix pixel indices.
     valid : array-like of bool, optional
