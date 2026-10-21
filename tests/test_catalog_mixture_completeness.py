@@ -715,9 +715,12 @@ def test_memory_layouts_give_the_default_likelihood(layout):
     analysis = _model([A_DEPTH, B, C], completeness=["selection", "incomplete", "complete"],
                       selection=[SEL_A, None, None], row_fraction=[FRACTION_A, None, None])
     # The reference is the historical program; each arm turns on one layout.
+    # A binding is traced under the settings it was bound with (it refuses a
+    # first trace under others), so the reference is evaluated inside them.
+    thetas = _points(analysis)
     with catalog_settings(**HISTORICAL_CATALOG):
         ref = _bind(analysis)
-    thetas = _points(analysis)
+        want = [float(ref(t)) for t in thetas]
     arm = dict(HISTORICAL_CATALOG)
     arm.update(missing_density="gather" if layout == "missing_density" else "grid",
                kernel_layout="galaxy_list" if layout == "kernel_layout" else "padded")
@@ -727,8 +730,8 @@ def test_memory_layouts_give_the_default_likelihood(layout):
             assert alt.model_operands.components[2].compact.galaxy_index is None
             assert alt.model_operands.components[1].compact.galaxy_index is not None
         got = [float(alt(t)) for t in thetas]
-    for g, t in zip(got, thetas):
-        _close(g, ref(t), 1e-12, layout)
+    for g, w in zip(got, want):
+        _close(g, w, 1e-12, layout)
 
 
 @pytest.mark.slow
