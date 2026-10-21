@@ -263,8 +263,8 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   (`z_top` the store's `z_depth`, or the end of the grid), `kappa` the kernel
   mass inside `(0, z_top]`, `w = count_ratio_window` (default 0.02) and
   `f_p` the `row_fraction` (accepted with the pooled ratios, otherwise only
-  with `"selection"`; 1 for every row without one). Its expectation is the kernel
-  mean of `C` for redshifts without errors. Where redshift errors are
+  with `"selection"`; 1 for every row without one). Its expectation is the
+  kernel mean of `C` for redshifts without errors. Where redshift errors are
   comparable to `z` near `z = 0`, the ratio exceeds 1 there and the clip
   removes the missing hosts (binding warns where it exceeds the
   `"pooled_kernel"` ratio by more than the factor 1.5).
@@ -293,8 +293,8 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   without a count-ratio catalog, are refused; the window is a real number
   of at least the histogram bin width 1e-4. `ParameterPlan.catalog_model`
   records `count_ratio`, `count_ratio_window` and the row fraction's sha256
-  only for a pooled ratio: a default count-ratio plan records them, and an explicit
-  `"row"` gives the plan and fingerprint of the default before 2026-10-10.
+  only for a pooled ratio: a default count-ratio plan records them, and an
+  explicit `"row"` gives the plan and fingerprint of the default before 2026-10-10.
   The low-level functions (`completion_curves`, `build_completion_state`,
   `build_observed_density_cache`, the likelihoods given no cache or an
   `ObservedDensityCache`) keep the per-row estimator; they select the pooled
@@ -320,9 +320,9 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   unless `mixture_density` is given; `"steradian"` (opt-in) multiplies
   branch k by `A_min / A_k`, so the weights are host fractions whatever the
   `nside`. With equal `nside` the two are the same bit for bit;
-  `ParameterPlan.catalog_model` records `"steradian"` only. `completeness` is one value for every catalog or a
-  list with one entry per catalog: `"incomplete"` (the count ratio),
-  `"selection"` or `"complete"` (`n_k = N_obs,p p_cat(z | p)`, no missing
+  `ParameterPlan.catalog_model` records `"steradian"` only. `completeness`
+  is one value for every catalog or a list with one entry per catalog:
+  `"incomplete"` (the count ratio), `"selection"` or `"complete"` (`n_k = N_obs,p p_cat(z | p)`, no missing
   hosts and no survey depth, `Z_k = sum_p N_obs,p`: the reference's field
   convention of `universe_model="dark_sirens_complete"`); a list of equal
   entries is the one value (same plan and fingerprint). `selection` and

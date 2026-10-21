@@ -300,9 +300,9 @@ transient memory of one unpinned kernel build: on that catalog the CPU
 compiler gives the build 14.9 GB of scratch, while the per-call catalog terms
 need 3.2 GB pinned against 15.4 GB unpinned. A conditional complete catalog
 is not pinned, as in the reference; under `catalog_sky_weighting="field"`
-the pin applies to every catalog, complete ones included. `kernel_pin="off"` keeps the per-call
-quadrature, and the bound program is then byte-identical to the previous
-release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
+the pin applies to every catalog, complete ones included. `kernel_pin="off"`
+keeps the per-call quadrature, and the bound program is then byte-identical
+to the previous release's. `ParameterPlan` gains `kernel_pin` and `kernel_pin_active`, and
 `run_fingerprint.parameter_plan_semantic(plan)` records both.
 
 ### Catalog kernel pin on the field seam (opt-in, per target)
