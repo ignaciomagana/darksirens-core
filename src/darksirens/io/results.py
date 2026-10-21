@@ -172,9 +172,15 @@ def save_result(path: str | PathLike[str], result: dict, *, labels=None) -> None
     - ``result_json``: attribute, every entry except the datasets above as
       JSON (``guard_report``, sampler diagnostics, the scalars again;
       non-finite floats as ``null``);
+    - ``code_identity``: attribute, the JSON of the code that wrote the file
+      (:func:`darksirens._code_identity.code_identity`: ``darksirens_version``
+      and, when it can be read, ``git_sha``, ``git_dirty`` and
+      ``tinyns_commit``);
     - ``result_complete`` and ``result_schema_version``: the completion
       marker (:func:`result_is_complete`).
     """
+    from darksirens._code_identity import code_identity
+
     if labels is None:
         labels = result.get("labels")
     samples = np.asarray(result["samples"], dtype=float)
@@ -199,6 +205,7 @@ def save_result(path: str | PathLike[str], result: dict, *, labels=None) -> None
             if value is not None and key not in handle.attrs:
                 handle.attrs[key] = value
         handle.attrs["result_json"] = json.dumps(_json_value(rest), sort_keys=True)
+        handle.attrs["code_identity"] = json.dumps(code_identity(), sort_keys=True)
 
 
 __all__ = [

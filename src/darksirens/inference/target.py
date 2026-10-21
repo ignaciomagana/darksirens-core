@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import math
+from numbers import Real
 from typing import Any, Callable
 
 from darksirens.analysis import ParameterPlan
@@ -172,35 +173,39 @@ class InferenceTarget:
     lists, str-keyed mappings, numpy arrays; anything else raises). Core
     never interprets either. Neither enters the dataclass hash.
 
-    ``log_prior_volume_fraction`` (optional, a finite float <= 0) declares a
-    data-independent offset of the target's evidence: the log of the fraction
-    of the sampled prior box on which the likelihood is not identically
-    rejected, e.g. an angular model whose ``log_g`` is ``-inf`` outside its
-    positivity region (``angular_log_prior_volume_correction``).  When set,
-    ``ds.infer`` records it as ``result["log_prior_volume_fraction"]`` and
-    ``result["logZ_corrected"] = logZ - log_prior_volume_fraction`` beside the
-    raw ``logZ``, as it does for an ordinary analysis.  ``None`` (the
-    default) leaves the result as the sampler returned it.
+    ``log_prior_volume_fraction`` (optional, a finite number <= 0) is the
+    log of the fraction of the prior box on which the likelihood is not
+    rejected outright, when that fraction is a known constant (an angular
+    model whose ``log_g`` rejects part of the box, a partially fixed joint
+    prior pair). ``ds.infer`` then records it in the result with
+    ``logZ_corrected = logZ - log_prior_volume_fraction``, as for an
+    ordinary analysis; ``None`` (the default) records neither. Core's own
+    target builders set it from their analysis.
     """
 
     log_likelihood: Callable
     parameters: ParameterPlan
     identity: Any = field(default=None, kw_only=True, hash=False)
     provenance: Any = field(default=None, kw_only=True, hash=False)
-    log_prior_volume_fraction: Any = field(default=None, kw_only=True, hash=False)
+    log_prior_volume_fraction: float | None = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         if not callable(self.log_likelihood):
             raise TypeError("log_likelihood must be callable")
         _validate_parameter_plan(self.parameters)
-        if self.log_prior_volume_fraction is not None:
-            fraction = float(self.log_prior_volume_fraction)
-            if not (math.isfinite(fraction) and fraction <= 0.0):
-                raise ValueError(
-                    "InferenceTarget.log_prior_volume_fraction must be a finite "
-                    f"log fraction (<= 0), got {self.log_prior_volume_fraction!r}"
+        fraction = self.log_prior_volume_fraction
+        if fraction is not None:
+            if isinstance(fraction, bool) or not isinstance(fraction, Real):
+                raise TypeError(
+                    "InferenceTarget.log_prior_volume_fraction must be a number "
+                    f"or None, got {fraction!r}"
                 )
-            object.__setattr__(self, "log_prior_volume_fraction", fraction)
+            if not (math.isfinite(float(fraction)) and float(fraction) <= 0.0):
+                raise ValueError(
+                    "InferenceTarget.log_prior_volume_fraction is the log of a "
+                    f"fraction: it must be finite and <= 0, got {fraction!r}"
+                )
+            object.__setattr__(self, "log_prior_volume_fraction", float(fraction))
         from .run_fingerprint import canonical_semantic
 
         # Fail at construction, not at the first checkpoint.

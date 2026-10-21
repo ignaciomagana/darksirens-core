@@ -177,6 +177,14 @@ def fingerprint_from_semantic(semantic, *, advisory=None) -> dict:
     }
 
 
+#: Angular models that declare the same coordinates (labels, bounds, prior
+#: kinds) as another registered model, so a plan's coordinates cannot tell
+#: them apart: :func:`parameter_plan_semantic` records their name
+#: (``ParameterPlan.angular_model``). Every other model is told apart by its
+#: coordinates, and its block carries no name, as before.
+ANGULAR_MODELS_SHARING_COORDINATES = frozenset({"sphere_gp_z", "overdensity_gp"})
+
+
 def parameter_plan_semantic(plan) -> dict:
     """Canonical semantic block of a ParameterPlan, fixed values included.
 
@@ -185,8 +193,11 @@ def parameter_plan_semantic(plan) -> dict:
     ``allow_out_of_prior``, in the catalog kernel pin (``kernel_pin``
     setting, and whether it applies), in ``n0_units`` or in the catalog model
     (``ParameterPlan.catalog_model``: a selection completeness, its selection
-    model and row-fraction digest) or in their per-catalog population blocks
-    (``ParameterPlan.catalog_population``), have different blocks, so a run
+    model and row-fraction digest, a complete catalog's opt-in
+    ``empty_policy``), in their per-catalog population blocks
+    (``ParameterPlan.catalog_population``) or in an angular model that shares
+    its coordinates with another (:data:`ANGULAR_MODELS_SHARING_COORDINATES`),
+    have different blocks, so a run
     fingerprint built from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
@@ -269,6 +280,14 @@ def parameter_plan_semantic(plan) -> dict:
                 "n_catalog_population": int(plan.n_catalog_population),
             }
             if getattr(plan, "catalog_population", ())
+            else {}
+        ),
+        # And the angular model's name, for the models whose coordinates do
+        # not tell them apart; every other plan's block is unchanged.
+        **(
+            {"angular_model": str(plan.angular_model)}
+            if getattr(plan, "angular_model", "isotropic")
+            in ANGULAR_MODELS_SHARING_COORDINATES
             else {}
         ),
     })
@@ -525,15 +544,18 @@ def core_environment_advisory() -> dict:
     """Advisory provenance: versions and every ``DARKSIRENS_*`` variable set.
 
     Belongs in the fingerprint's ``advisory`` block (not hashed); its
-    ``code.darksirens_version`` entry feeds the code-identity drift warning.
-    The target-setting settings themselves are hashed via
+    ``code`` entry (:func:`darksirens._code_identity.code_identity`: the
+    version and, when it can be read, the git commit of darksirens and of
+    TinyNS) feeds the code-identity drift warning, which a resume under
+    another core commit with the same configuration then raises. The
+    target-setting settings themselves are hashed via
     :func:`core_numerics_semantic`.
     """
 
     import platform
     from importlib import metadata
 
-    import darksirens
+    from darksirens._code_identity import code_identity
 
     def _dist_version(name):
         try:
@@ -542,7 +564,7 @@ def core_environment_advisory() -> dict:
             return None
 
     return {
-        "code": {"darksirens_version": str(darksirens.__version__)},
+        "code": code_identity(),
         "numerics_stack": {
             "python": platform.python_version(),
             "numpy": np.__version__,

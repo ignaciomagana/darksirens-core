@@ -41,42 +41,62 @@ _SAMPLER_DEFAULTS = {
 }
 
 
-# Every other option a core backend, the checkpoint planner or the run
-# fingerprint reads from the sampler namespace (with TinyNS's tinyns_<field>
-# options, _known_sampler_options). tests/test_public_infer.py checks this
-# against the sources.
+# Sampler options a backend reads besides _SAMPLER_DEFAULTS (and TinyNS's
+# ``tinyns_<setting>`` names, see _known_sampler_options). The backends read
+# options with getattr and a default, so infer refuses every other keyword:
+# a misspelt or foreign name would otherwise be dropped without a word.
 _BACKEND_OPTIONS = frozenset({
-    "resume",
+    # The resume gate of a target run (run_fingerprint).
     "resume_force",
-    "checkpoint_interval",
-    "run_dir",
-    "save_path",
+    # Dynesty, and the directory of its optional diagnostics.
     "dynesty_walks",
     "dynesty_diagnostics",
+    "run_dir",
+    "save_path",
+    # NumPyro NUTS.
+    "nuts_init_tries",
+    "nuts_init_seed_offset",
+    "nuts_target_accept",
+    "nuts_max_tree_depth",
     "nuts_warmup",
     "nuts_samples",
     "nuts_chains",
     "nuts_chain_method",
-    "nuts_target_accept",
-    "nuts_max_tree_depth",
-    "nuts_init_tries",
-    "nuts_init_seed_offset",
+    # TinyNS.
     "tinyns_preset",
-    "tinyns_checkpoint_path",
-    "tinyns_checkpoint_path_out",
-    "tinyns_resume_from",
-    # Mirrors core stamps back onto the namespace.
-    "run_fingerprint_digest",
-    "resume_forced_mismatch",
-    "tinyns_resolved_config",
 })
 
-# Likelihood options that are not sampler options: the namespace would
-# swallow them, and the likelihood would never see them.
-_LIKELIHOOD_OPTION_HINTS = {
+# infer's own keywords, offered as close matches of an unknown one.
+_INFER_KEYWORDS = (
+    "events",
+    "injections",
+    "sampler",
+    "selection_neff_guard",
+    "max_likelihood_variance",
+    "sel_batch_size",
+    "pe_event_block",
+    "compute_dtype",
+    "guard_report",
+)
+
+# Names another darksirens surface spells differently.
+_OPTION_HINTS = {
     "selection_neff_soft_guard": (
-        "selection_neff_guard='soft' (or 'hard'; 'auto', the default, is soft "
-        "for numpyro only)"
+        "this is bind_analysis's name for the soft guard; ds.infer takes "
+        "selection_neff_guard='soft' (for an ordinary analysis: an "
+        "InferenceTarget's likelihood is built with the guard instead)"
+    ),
+    "resume": (
+        "a command-line name; ds.infer resumes the checkpoint named by "
+        "resume_from_resolved (or tinyns_resume_from)"
+    ),
+    "resume_from": (
+        "ds.infer resumes the checkpoint named by resume_from_resolved (or "
+        "tinyns_resume_from)"
+    ),
+    "checkpoint_interval": (
+        "a command-line name; ds.infer checkpoints with "
+        "checkpoint_interval_seconds and checkpoint_file_resolved"
     ),
 }
 
@@ -85,34 +105,35 @@ def _known_sampler_options():
     from darksirens.inference.tinyns_config import BASE_DEFAULTS
 
     return (
-        frozenset(_SAMPLER_DEFAULTS)
+        set(_SAMPLER_DEFAULTS)
         | _BACKEND_OPTIONS
-        | frozenset(f"tinyns_{name}" for name in BASE_DEFAULTS)
+        | {f"tinyns_{name}" for name in BASE_DEFAULTS}
     )
 
 
 def _check_sampler_options(options):
-    """Refuse a likelihood option passed as a sampler option; warn on unknown ones.
+    """Refuse a keyword that neither infer nor any sampler backend reads."""
+    import difflib
 
-    ``infer`` passes ``**sampler_options`` to the backends as attributes,
-    and a backend reads only the names it knows, so a misspelt option (or a
-    likelihood option under its old name) used to run without it, silently.
-    """
-    for name, hint in _LIKELIHOOD_OPTION_HINTS.items():
-        if name in options:
-            raise TypeError(
-                f"{name} is not a sampler option and would be ignored: the "
-                f"likelihood's guard is set with ds.infer(..., {hint})"
+    known = _known_sampler_options()
+    unknown = sorted(name for name in options if name not in known)
+    if not unknown:
+        return
+    candidates = sorted(known | set(_INFER_KEYWORDS))
+    notes = []
+    for name in unknown:
+        hint = _OPTION_HINTS.get(name)
+        if hint is None:
+            close = difflib.get_close_matches(name, candidates, n=1)
+            hint = (
+                f"did you mean {close[0]!r}?"
+                if close
+                else "no sampler backend reads it"
             )
-    unknown = sorted(set(options) - _known_sampler_options())
-    if unknown:
-        warnings.warn(
-            f"ds.infer: no core backend reads the sampler option(s) {unknown}; they "
-            "are ignored (check the spelling: NumPyro takes nuts_warmup/nuts_samples, "
-            "TinyNS tinyns_<setting>, Dynesty dynesty_walks).",
-            UserWarning,
-            stacklevel=4,
-        )
+        notes.append(f"{name!r}: {hint}")
+    raise TypeError(
+        "ds.infer got unknown keyword argument(s): " + "; ".join(notes)
+    )
 
 
 def _sampler_namespace(sampler, options):
@@ -183,26 +204,33 @@ def _is_float32(compute_dtype):
         return False
 
 
-def _apply_angular_prior_volume_correction(result, analysis):
-    """Record the angular prior-box offset carried by a reported evidence.
+def _log_prior_volume_fraction(analysis):
+    """Log of the prior-box fraction an ordinary analysis's likelihood keeps.
 
     An angular model whose ``log_g`` rejects part of the prior box makes the
     sampler integrate an unnormalized constrained prior, so the raw ``logZ``
     carries a data-independent offset that differs between models (measured
-    -0.50 nat for ``multipole`` against -3.38 for ``multipole_l3``). The raw
-    value stays untouched; the corrected one is recorded alongside it.
+    -0.50 nat for ``multipole`` against -3.38 for ``multipole_l3``). A
+    partially fixed joint prior pair does the same
+    (``ParameterPlan.fixed_constraint_log_fraction``, ln 0.4 = -0.92 nat for
+    the GWTC-5 ``lambda_0 = 0.6``). This is their sum.
     """
     from darksirens.population.angular import angular_log_prior_volume_correction
 
-    fraction = angular_log_prior_volume_correction(
+    angular = angular_log_prior_volume_correction(
         getattr(analysis, "angular_model", "isotropic")
     )
-    return _record_prior_volume_fraction(result, fraction)
+    return angular + float(
+        getattr(analysis.parameters, "fixed_constraint_log_fraction", 0.0)
+    )
 
 
-def _record_prior_volume_fraction(result, fraction):
-    """``log_prior_volume_fraction`` and ``logZ_corrected`` beside the raw ``logZ``."""
-    fraction = float(fraction)
+def _apply_prior_volume_correction(result, fraction):
+    """Record the prior-box offset carried by a reported evidence.
+
+    The raw ``logZ`` stays untouched; the corrected one is recorded alongside
+    it.
+    """
     result["log_prior_volume_fraction"] = fraction
     logZ = result.get("logZ")
     if logZ is not None and math.isfinite(float(logZ)):
@@ -296,6 +324,38 @@ def _stamp_target_fingerprint(target, sampler, opts):
     return fingerprint["digest"]
 
 
+def _warn_unverified_resume(sampler, opts):
+    """Warn when an ordinary run resumes a checkpoint nothing has fingerprinted.
+
+    ``ds.infer`` fingerprints target runs only. A caller that gates an
+    ordinary run itself writes ``run_fingerprint.json`` beside the
+    checkpoint, which silences the warning.
+    """
+    _, resume_dir = _checkpoint_dirs(sampler, opts)
+    if resume_dir is None:
+        return
+    from darksirens.inference.run_fingerprint import FINGERPRINT_BASENAME
+
+    if os.path.isfile(os.path.join(resume_dir, FINGERPRINT_BASENAME)):
+        return
+    warnings.warn(
+        f"ds.infer resumes the checkpoint in {resume_dir!r} without checking "
+        "that it was written under this run's settings: ds.infer fingerprints "
+        "InferenceTarget runs only, not ordinary analyses. A setting that "
+        "changed in between (for example a default: the pooled count ratio "
+        "since 2026-10-10, pairing_norm and kernel_window since 2026-10-02) "
+        "makes the resumed run mix two likelihoods. To gate it, build a "
+        "fingerprint from parameter_plan_semantic(analysis.parameters), "
+        "core_numerics_semantic(ds.log_likelihood(...)) and your data "
+        "identity and pass it to gate_and_stamp_checkpoint_fingerprint "
+        "(darksirens.inference.run_fingerprint) before each run; the "
+        "run_fingerprint.json it writes beside the checkpoint silences this "
+        "warning.",
+        UserWarning,
+        stacklevel=4,  # the caller of infer()
+    )
+
+
 def _prior_transform(plan):
     from darksirens.inference.prior import make_prior_transform
 
@@ -316,6 +376,8 @@ def _execute_target(
     digest = (
         None if target is None else _stamp_target_fingerprint(target, sampler, opts)
     )
+    if target is None and len(plan.labels):
+        _warn_unverified_resume(sampler, opts)
 
     from darksirens.inference.sampling import run_sampler
 
@@ -427,11 +489,10 @@ def infer(
     Ordinary analyses retain the existing API and require both standardized GW
     stores. An :class:`InferenceTarget` already owns its likelihood, so stores
     and the five likelihood options below must be omitted. Backend-specific
-    options keep their existing names. A sampler option that no core backend
-    reads (a misspelt name) warns, ``UserWarning``, as it is ignored; the
-    likelihood option ``selection_neff_soft_guard`` (``bind_analysis``'s name
-    for the resolved guard) raises ``TypeError``, pointing to
-    ``selection_neff_guard``.
+    options keep their existing names. A keyword that neither ``infer`` nor
+    any sampler backend reads (a misspelling, or another surface's name such
+    as ``bind_analysis``'s ``selection_neff_soft_guard``) raises
+    ``TypeError`` before anything is bound or run.
 
     ``sampler`` is ``'dynesty'``, ``'tinyns'`` or ``'numpyro'``. ``None``
     (the default) is ``'dynesty'``, the optional extra
@@ -447,8 +508,16 @@ def infer(
     sampler options, and never enter the sampler namespace.
 
     Ordinary results also carry ``log_prior_volume_fraction`` and, when the
-    sampler reports a finite ``logZ``, ``logZ_corrected``. The raw ``logZ``
-    stays exactly as the sampler reported it.
+    sampler reports a finite ``logZ``, ``logZ_corrected`` (``logZ`` minus
+    the fraction). The fraction is the log of the prior-box fraction the
+    likelihood keeps: the angular model's (one whose ``log_g`` rejects part
+    of the box) plus a partially fixed joint prior pair's
+    (``ParameterPlan.fixed_constraint_log_fraction``). The raw ``logZ``
+    stays exactly as the sampler reported it. A target result carries both
+    keys when the target declares ``InferenceTarget.log_prior_volume_fraction``,
+    as the targets core builds from an analysis do
+    (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`,
+    :func:`~darksirens.likelihood.host_density.make_host_density_target`).
 
     ``guard_report`` (default ``True``) evaluates an ordinary analysis's
     likelihood diagnostics at 32 prior draws before sampling (an integer sets
@@ -472,7 +541,10 @@ def infer(
     unchanged. Ordinary analyses are not fingerprinted here: a caller that
     checkpoints one composes its fingerprint from
     ``parameter_plan_semantic``, ``core_numerics_semantic(bound)`` and its
-    own data identity.
+    own data identity. An ordinary run that resumes a checkpoint with no
+    ``run_fingerprint.json`` beside it therefore warns that nothing checked
+    the checkpoint's settings against this run's (a default that changed in
+    between would mix two likelihoods); the resume itself goes ahead.
 
     Sampler names are intentionally not validated here. The Phase-6 dispatcher
     must see the request first because a zero-free target has exact evidence and
@@ -511,13 +583,13 @@ def infer(
             sampler_options=sampler_options,
             target=analysis,
         )
-        # A target that declares its prior-box offset (the core-built mixture
-        # and host-density targets do, from their angular model) gets the
-        # same corrected evidence beside the raw one as an ordinary analysis.
-        fraction = getattr(analysis, "log_prior_volume_fraction", None)
-        if fraction is not None:
-            result = _record_prior_volume_fraction(result, fraction)
-        return result
+        # Core's own target builders declare the offset of their analysis; a
+        # companion's target may declare its own.
+        if analysis.log_prior_volume_fraction is None:
+            return result
+        return _apply_prior_volume_correction(
+            result, float(analysis.log_prior_volume_fraction)
+        )
 
     if events is None or injections is None:
         raise TypeError(
@@ -578,7 +650,7 @@ def infer(
     )
     if report is not None:
         result["guard_report"] = report
-    return _apply_angular_prior_volume_correction(result, analysis)
+    return _apply_prior_volume_correction(result, _log_prior_volume_fraction(analysis))
 
 
 __all__ = ["DEFAULT_SAMPLER", "infer", "log_likelihood"]

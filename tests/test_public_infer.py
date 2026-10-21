@@ -712,41 +712,55 @@ def test_the_old_soft_guard_name_is_refused_not_swallowed(monkeypatch):
     resolved guard; passed to infer it went into the sampler namespace and the
     likelihood kept the default guard, without a word."""
     calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
-    with pytest.raises(TypeError, match=r"selection_neff_soft_guard is not a sampler option.*selection_neff_guard='soft'"):
+    with pytest.raises(TypeError, match=r"selection_neff_soft_guard.*selection_neff_guard='soft'"):
         infer(_angular_analysis("isotropic"), events=object(), injections=object(),
               sampler="numpyro", selection_neff_soft_guard=True)
     assert calls == {}
     import darksirens as ds
 
     target = ds.InferenceTarget(lambda theta: -1.0, _target_plan())
-    with pytest.raises(TypeError, match="selection_neff_soft_guard is not a sampler option"):
+    with pytest.raises(TypeError, match="selection_neff_soft_guard"):
         infer(target, sampler="dynesty", selection_neff_soft_guard=False)
 
 
-def test_unknown_sampler_options_warn(monkeypatch):
+def test_unknown_sampler_options_are_refused(monkeypatch):
     """A misspelt option (NumPyro's are nuts_warmup/nuts_samples) ran without
-    it: no backend reads it."""
+    it: no backend reads it. It is refused, naming the close match, before
+    anything runs (tests/test_infer_options.py has the other names)."""
     import warnings
 
     calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
-    with pytest.warns(UserWarning, match=r"sampler option\(s\) \['num_samples', 'num_warmup'\]"):
+    with pytest.raises(TypeError, match=r"'num_samples': did you mean 'nuts_samples'\?"):
         infer(_angular_analysis("isotropic"), events=object(), injections=object(),
               sampler="numpyro", guard_report=False, num_warmup=5, num_samples=5)
-    assert calls["opts"].num_warmup == 5  # passed through, as before
+    assert calls == {}
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         infer(
             _angular_analysis("isotropic"), events=object(), injections=object(),
             sampler="tinyns", guard_report=False, nlive=50, nuts_warmup=5, nuts_samples=5,
-            tinyns_walks=9, tinyns_preset="prior", dynesty_walks=3, checkpoint_interval="10m",
-            resume=False, resume_force=False, run_dir="/tmp/run", save_path="/tmp/run",
+            tinyns_walks=9, tinyns_preset="prior", dynesty_walks=3,
+            resume_force=False, run_dir="/tmp/run", save_path="/tmp/run",
         )
 
 
+# Names core stamps onto the options itself (mirrors of resolved state), or
+# that only the legacy command line's checkpoint resolution reads
+# (checkpointing.resolve_checkpoint_plan, which ds.infer does not call):
+# never infer keywords (tests/test_infer_options.py).
+_NOT_INFER_OPTIONS = {
+    "tinyns_resolved_config",
+    "run_fingerprint_digest",
+    "resume_forced_mismatch",
+    "resume",
+    "checkpoint_interval",
+}
+
+
 def test_every_option_a_backend_reads_is_a_known_sampler_option():
-    """The list the warning checks against covers every name read from the
+    """The list infer checks against covers every name read from the
     sampler namespace in the core sources (getattr/hasattr/attribute reads),
-    so a new backend option cannot be warned about by mistake."""
+    so a new backend option cannot be refused by mistake."""
     import pathlib
     import re
 
@@ -763,4 +777,5 @@ def test_every_option_a_backend_reads_is_a_known_sampler_option():
             names.add(match.group(1) or match.group(2))
     names.discard("sampler")  # set by the namespace itself
     assert names, "the scan found no option reads"
+    names -= _NOT_INFER_OPTIONS
     assert names <= _known_sampler_options(), sorted(names - _known_sampler_options())
