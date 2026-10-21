@@ -575,6 +575,12 @@ class BoundAnalysis:
         ``selection_log_correction``): the same likelihood function evaluated
         with ``return_diagnostics=True``, in its own jitted program, built on
         the first call. :meth:`__call__` and its program are untouched.
+        For a one-catalog field analysis (``catalog_sky_weighting="field"``)
+        under the hard guard, ``log_mu`` and every ``event_log_evidence`` are
+        unnormalised, each offset by ``+log Z_1``, which cancels from the
+        likelihood; under the soft guard (``selection_neff_soft_guard=True``)
+        the density is ``n_1 / Z_1`` and they are normalised (the frozen
+        reference normalises them under either guard).
         """
         fn = self.__dict__.get("_diagnostics")
         if fn is None:
