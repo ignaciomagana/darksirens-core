@@ -398,10 +398,12 @@ def _two_catalog_analysis(per_catalog_population):
 @pytest.mark.parametrize("copies", [[_L1], [_L0, _L1], [_L0]])
 def test_a_per_catalog_copy_of_a_partially_fixed_pair_has_no_constant_offset(copies):
     # The verifier's scenario: with lambda_0 = 0.6 fixed and catalog 2's own
-    # lambda_1, the bound log L is -inf only where both copies leave
-    # [0, 0.4] (a 0.36 corner of the box), and finite but changed where one
-    # does, so the raw logZ carries no constant ln 0.4 offset. The plan
-    # recorded ln 0.4 and the warning said ds.infer adds it.
+    # lambda_1, the plan recorded ln 0.4 and the warning said ds.infer adds
+    # it. With a copy the bound log L is -inf wherever any catalog's vector
+    # leaves the support (the likelihood package's per-catalog rejection), so
+    # the kept fraction depends on which members are copied; it is not
+    # computed, and the warning says that log_prior_volume_fraction does not
+    # include it.
     analysis, texts = _two_catalog_analysis({2: copies})
     assert analysis.parameters.fixed_constraint_log_fraction == 0.0
     (text,) = [t for t in texts if "has fixed member(s)" in t]
@@ -439,9 +441,12 @@ def test_a_mixture_target_with_a_copied_pair_member_records_no_constraint_offset
         t[i1], t[i2] = v1, v2
         return float(log_likelihood(t))
 
-    # The premise of a constant fraction fails: one copy out of [0, 0.4]
-    # leaves the likelihood finite.
-    assert math.isfinite(at(0.9, 0.3)) and math.isfinite(at(0.3, 0.9))
+    # Every catalog's vector is rejected: one copy out of [0, 0.4] makes the
+    # likelihood -inf (it was finite before per-catalog rejection). The kept
+    # fraction (0.4 ** 2 here) is not computed for a copied member, so the
+    # target records none.
+    assert math.isfinite(at(0.3, 0.3))
+    assert at(0.9, 0.3) == -math.inf and at(0.3, 0.9) == -math.inf
     assert at(0.9, 0.9) == -math.inf
     _fake_backend(monkeypatch, {"logZ": -7.0})
     result = infer(target, sampler="dynesty")

@@ -326,9 +326,11 @@ class ParameterPlan:
     the likelihood is zero outside the interval the fixed member leaves it,
     so the raw ``logZ`` carries this data-independent offset, which
     ``ds.infer`` adds to ``log_prior_volume_fraction``. It is ``0.0`` too
-    when that offset is no known constant (a pair member with a per-catalog
-    copy, whose rejection acts per catalog; the warning says so). It derives
-    from the fixed values, so the fingerprint block does not record it.
+    when that offset is not computed (a pair member with a per-catalog copy:
+    the likelihood is zero wherever any catalog's population vector leaves
+    the support, and the fraction that keeps depends on which members are
+    copied; the warning says so). It derives from the fixed values, so the
+    fingerprint block does not record it.
     """
 
     labels: tuple[str, ...]
@@ -1323,10 +1325,10 @@ def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None, copied=()) ->
     sampled member has a uniform prior (``kinds``) and appears in no other
     partially fixed pair, and none of whose members has a per-catalog copy
     (``copied``, the base labels of ``model(per_catalog_population=...)``;
-    with a copy the rejection acts per catalog, and the likelihood is zero
-    only where every catalog's copy leaves the support, which is no constant
-    fraction of the box). Another pair's offset is not known here and is
-    named in its warning.
+    with a copy the likelihood is zero wherever any catalog's population
+    vector leaves the support, and the fraction of the box that keeps
+    depends on which members are copied, which is not computed here).
+    Another pair's offset is not known here and is named in its warning.
     """
     groups = [
         (kind, [str(label) for label in group])
@@ -1386,9 +1388,9 @@ def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None, copied=()) ->
             offset = (
                 "a per-catalog copy of "
                 f"{[label for label in members if label in copied]} makes the "
-                "rejection act per catalog, so logZ carries an offset that is "
-                "no constant prior fraction and that log_prior_volume_fraction "
-                "does not include"
+                "rejection act on every catalog's population vector, so logZ "
+                "carries an offset that depends on which members are copied and "
+                "that log_prior_volume_fraction does not include"
             )
         else:
             offset = (

@@ -100,7 +100,7 @@ def test_float32_columns_need_compute_dtype_float32():
     analysis = _model(A, count_ratio="row")
     single = _bind(analysis, compute_dtype="float32")
     assert single.gw_pe.dL.dtype == jnp.float32
-    with pytest.raises(ValueError, match="gw_pe.m1det is float32, but this BoundAnalysis has compute_dtype=None"):
+    with pytest.raises(ValueError, match=r"compute_dtype=None runs the default float64 program, but gw_pe columns \['m1det'"):
         dataclasses.replace(single, compute_dtype=None)
 
 

@@ -1004,10 +1004,11 @@ def _require_bound_operands(bound) -> None:
     The likelihood picks the count-ratio estimator by the type of the cache it
     is given and reads a row fraction whenever the operands carry one, so a
     binding rebuilt with ``dataclasses.replace`` under another analysis (or
-    with another cache, operands, depth or per-sample columns) would evaluate
-    a likelihood that the plan, and a run fingerprint built from it, does not
-    record. Every binding :func:`bind_analysis` makes passes: it builds these
-    operands from the analysis.
+    with another cache, operands or depth) would evaluate a likelihood that
+    the plan, and a run fingerprint built from it, does not record. Every
+    binding :func:`bind_analysis` makes passes: it builds these operands from
+    the analysis. The per-sample columns' dtype is checked by
+    :func:`_require_column_dtype`.
     """
     from collections.abc import Mapping
 
@@ -1066,21 +1067,6 @@ def _require_bound_operands(bound) -> None:
                 + ("none" if operands is None else f"{type(operands).__name__} operands")
                 + "; bind the analysis with bind_analysis"
             )
-    if bound.compute_dtype is None:
-        # The default program reads float64 columns; float32-rounded ones
-        # belong to compute_dtype="float32".
-        for name, event in (("gw_pe", bound.gw_pe), ("gw_selection", bound.gw_selection)):
-            for column in event._fields:
-                dtype = getattr(getattr(event, column), "dtype", None)
-                if dtype is not None and jnp.issubdtype(dtype, jnp.floating) and (
-                    dtype != jnp.float64
-                ):
-                    raise ValueError(
-                        f"{name}.{column} is {dtype}, but this BoundAnalysis has "
-                        "compute_dtype=None, the float64 program; bind the analysis "
-                        "with bind_analysis(..., compute_dtype='float32') for the "
-                        "float32 one"
-                    )
 
 
 def _trace_settings():
