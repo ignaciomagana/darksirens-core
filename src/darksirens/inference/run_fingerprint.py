@@ -393,12 +393,36 @@ def _bound_kernel_window(likelihood):
     return (min(tolerances),)
 
 
+def _bound_normalization_grids(likelihood):
+    """The normalisation grids a binding's likelihood traces with, or ``None``.
+
+    The opt-in pairing m1 grid is sized for the binding's own population model
+    (``pop_model_parser`` sizes it whenever the likelihood is traced), so a
+    binding records that grid, not whatever a later binding of a wider model
+    left in the process.  ``None`` without a binding or with the grid off.
+    """
+    from darksirens.population import utils
+
+    if utils.normalization_grid_settings().pairing_m1_grid is None:
+        return None
+    pop = getattr(getattr(likelihood, "analysis", None), "population", None)
+    if likelihood is None or isinstance(likelihood, Mapping) or pop is None:
+        return None
+    from darksirens.population.registry import get_model, population_m1_support_max
+
+    model = get_model(pop.model_name, shared_beta=pop.shared_beta,
+                      shared_spin=pop.shared_spin, shared_gamma=pop.shared_gamma)
+    return utils.pairing_grid_settings_for_support(population_m1_support_max(model))
+
+
 def core_numerics_semantic(likelihood=None) -> dict:
     """Target-setting numerics core resolved in THIS process.
 
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
-    ``DARKSIRENS_SKY_ZNORM_HI``, ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
+    ``DARKSIRENS_GP_NORM_QUADRATURE``, ``DARKSIRENS_SKY_ZNORM_HI``,
+    ``DARKSIRENS_SKY_ZNORM_PER_LS``, ``DARKSIRENS_SKY_Z_NODE_HI``,
+    ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
     ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
     ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
     runtime by ``configure_normalization_grids`` and the catalog evaluation
@@ -424,7 +448,10 @@ def core_numerics_semantic(likelihood=None) -> dict:
     options (``compute_dtype``, ``max_likelihood_variance``,
     ``selection_neff_soft_guard``) are added under ``"likelihood_options"``;
     a default binding, or none, adds no key, so the block is then exactly
-    the one ``core_numerics_semantic()`` has always returned.
+    the one ``core_numerics_semantic()`` has always returned.  With the
+    opt-in pairing m1 grid on, a binding's ``normalization_grids`` are the
+    grid sized for its own population model (what its likelihood traces
+    with); without a binding they are the process's current settings.
     """
 
     from darksirens.catalog.settings import catalog_evaluation_settings
@@ -439,6 +466,21 @@ def core_numerics_semantic(likelihood=None) -> dict:
         if options:
             extra["likelihood_options"] = options
 
+    gp_normaliser = {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N}
+    if gp._NORM_QUADRATURE != "lattice":
+        # Opt-in (DARKSIRENS_GP_NORM_QUADRATURE); the default enters no key, so
+        # every existing fingerprint is unchanged.
+        gp_normaliser["quadrature"] = gp._NORM_QUADRATURE
+    angular_normaliser = {
+        "z_hi": angular_advanced._ZNORM_HI,
+        "nodes": angular_advanced._ZNORM_N,
+    }
+    # Opt-in sky knobs (DARKSIRENS_SKY_ZNORM_PER_LS, DARKSIRENS_SKY_Z_NODE_HI);
+    # their frozen defaults enter no key.
+    if angular_advanced._ZNORM_PER_LS != 3.0:
+        angular_normaliser["per_ls"] = angular_advanced._ZNORM_PER_LS
+    if angular_advanced._Z_NODE_HI != 3.0:
+        angular_normaliser["z_node_hi"] = angular_advanced._Z_NODE_HI
     catalog_evaluation = catalog_evaluation_settings().to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
@@ -447,22 +489,20 @@ def core_numerics_semantic(likelihood=None) -> dict:
         catalog_evaluation.pop("kernel_window", None)
         if bound_window[0] is not None:
             catalog_evaluation["kernel_window"] = bound_window[0]
+    grids = _bound_normalization_grids(likelihood) or utils.normalization_grid_settings()
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {
             "zmax": distances.zMax,
             "nodes": distances._ZGRID_NODES,
         },
-        "gp_redshift_normaliser": {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N},
+        "gp_redshift_normaliser": gp_normaliser,
         "gp_population_edges": {
             "mass": list(gp._GPPOP_M_EDGES),
             "redshift": list(gp._GPPOP_Z_EDGES),
         },
-        "angular_redshift_normaliser": {
-            "z_hi": angular_advanced._ZNORM_HI,
-            "nodes": angular_advanced._ZNORM_N,
-        },
-        "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        "angular_redshift_normaliser": angular_normaliser,
+        "normalization_grids": grids.to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
         **extra,
     })

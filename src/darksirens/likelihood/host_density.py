@@ -251,7 +251,16 @@ def make_host_density_target(
             return_diagnostics=False,
         )
 
-    return InferenceTarget(log_likelihood=log_likelihood, parameters=combined_plan)
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    # ds.infer records the angular prior-box offset beside the raw logZ.
+    return InferenceTarget(
+        log_likelihood=log_likelihood,
+        parameters=combined_plan,
+        log_prior_volume_fraction=angular_log_prior_volume_correction(
+            base_analysis.angular_model
+        ),
+    )
 
 
 __all__ = [

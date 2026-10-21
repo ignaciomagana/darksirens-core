@@ -123,6 +123,12 @@ def _apply_angular_prior_volume_correction(result, analysis):
     fraction = angular_log_prior_volume_correction(
         getattr(analysis, "angular_model", "isotropic")
     )
+    return _record_prior_volume_fraction(result, fraction)
+
+
+def _record_prior_volume_fraction(result, fraction):
+    """``log_prior_volume_fraction`` and ``logZ_corrected`` beside the raw ``logZ``."""
+    fraction = float(fraction)
     result["log_prior_volume_fraction"] = fraction
     logZ = result.get("logZ")
     if logZ is not None and math.isfinite(float(logZ)):
@@ -419,13 +425,20 @@ def infer(
                 "InferenceTarget; build the target's likelihood with them instead"
             )
         sampler = _resolve_sampler(sampler, plan)
-        return _execute_target(
+        result = _execute_target(
             analysis.log_likelihood,
             analysis.parameters,
             sampler=sampler,
             sampler_options=sampler_options,
             target=analysis,
         )
+        # A target that declares its prior-box offset (the core-built mixture
+        # and host-density targets do, from their angular model) gets the
+        # same corrected evidence beside the raw one as an ordinary analysis.
+        fraction = getattr(analysis, "log_prior_volume_fraction", None)
+        if fraction is not None:
+            result = _record_prior_volume_fraction(result, fraction)
+        return result
 
     if events is None or injections is None:
         raise TypeError(

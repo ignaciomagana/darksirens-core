@@ -37,10 +37,14 @@ Redshift convention
 -------------------
 ``z`` is always a *conditioning / rate* axis, never a probability axis: the
 GP is normalised only over the probability axes ``{m1, q, chi}`` that it spans
-(conditional on ``z`` when ``z`` is a GP axis), and the marginal redshift
-evolution is always the parametric ``(1 + z)**(gamma - 1)`` rate term.  A GP
-on ``z`` therefore adds *conditional shape evolution* (e.g. a mass function
-that evolves with redshift) on top of the parametric rate.
+(conditional on ``z`` when ``z`` is a GP axis).  For a model with at least one
+probability axis in the GP the marginal redshift evolution is therefore the
+parametric ``(1 + z)**(gamma - 1)`` rate term, and a GP on ``z`` adds
+*conditional shape evolution* (e.g. a mass function that evolves with
+redshift) on top of it.  ``gp1d_z`` is the exception: it has no probability
+axis to normalise over, so ``exp(f(z))`` multiplies the marginal rate itself,
+``R(z) ~ (1 + z)**(gamma - 1) exp(f(z))``, a free-form rate modulation (its
+overall scale cancels with the selection term, its shape does not).
 
 Import note
 -----------
@@ -80,6 +84,7 @@ from .utils import (
 AXIS_ORDER = ("m1", "q", "chi", "z")          # canonical ordering
 _PROB_AXES = ("m1", "q", "chi")               # normalised over these
 _COND_AXES = ("z",)                           # conditioning / rate axis
+GP_MEAN_MODES = ("shape", "zero")             # JointGPPopulation.mean_mode
 
 _LOGSAFE = 1e-12
 _FIELD_CLIP = 10.0
@@ -127,14 +132,57 @@ else:
     _ZNORM_HI = max(3.0, float(zMax))
 _ZNORM_N = max(24, 1 + math.ceil(4.0 * math.log1p(_ZNORM_HI) / _Z_LS_FLOOR))
 
+# Opt-in quadrature for the probability-axis normalisers that do NOT cancel in
+# the selection-normalised likelihood: every z-conditional N(z) and every
+# m1-conditional N(m1) (env DARKSIRENS_GP_NORM_QUADRATURE, latched at import like
+# DARKSIRENS_GP_ZNORM_HI, read at trace time).  "lattice" (the default) is the
+# frozen reference's rule: the coarse _KD_N lattice or the shared normalisation
+# grids, whose spacing knows neither the sampled tapers nor the length-scale
+# floors.  At the prior corner (log_amp at its ceiling, ls_chi and ls_z at their
+# floors, xi ~ N(0, 1)) it lets int p_gp(m1, chi | z) of gp3d_m1_chi_z run from
+# 0.98 at z = 0.1 to 1.61 at z = 1.2: a theta-dependent factor on R(z) that the
+# selection term does not remove.  "resolved" integrates on nodes that follow
+# the sampled support and put _RESOLVED_NODES_PER_LS nodes on each length-scale
+# floor in the GP coordinate (_resolved_counts,
+# JointGPPopulation._normalise_resolved), with the field contracted one axis at
+# a time (the kernel is a product over axes), so the finer lattice never forms
+# a (G, M) cross-kernel; it interpolates log N between the z nodes with a cubic
+# stencil (_zeta_cubic) instead of linearly (the additive model: linearly, on
+# twice as many nodes), and normalises the baseline pairing of the q-free
+# models with PowerLawPairing's own rule.  A z-free,
+# m1-free normaliser is a constant of theta that cancels between the event and
+# selection terms, so it keeps the lattice under either value.  Measured on
+# CPU, 512 queries, value / value and gradient, lattice -> resolved:
+# gp3d_m1_chi_z 0.08 / 1.5 s -> 0.07 / 0.35 s, gp3d_q_chi_z 0.66 / 6.5 s ->
+# 1.3 / 6.5 s, gp4d_additive 0.96 / 8.5 s -> 7.7 / 44 s; gp4d resolved 9.4 / 53 s
+# at 5.8 GB peak (its lattice gradient needs 13.9 GiB, see _znorm_interp).
+GP_NORM_QUADRATURES = ("lattice", "resolved")
+_NORM_QUADRATURE = os.environ.get("DARKSIRENS_GP_NORM_QUADRATURE", "lattice")
+_RESOLVED_NODES_PER_LS = {"rbf": 4, "matern32": 8}   # by the axis's kernel family
+_RESOLVED_TAPER_N = 33                     # min nodes across each m1 taper window
+
+
+def _norm_quadrature() -> str:
+    if _NORM_QUADRATURE not in GP_NORM_QUADRATURES:
+        raise ValueError(
+            f"GP normaliser quadrature must be one of {GP_NORM_QUADRATURES}, got "
+            f"{_NORM_QUADRATURE!r} (env DARKSIRENS_GP_NORM_QUADRATURE)"
+        )
+    return _NORM_QUADRATURE
+
+
+_norm_quadrature()
+
 
 def _coarse_axis_grid(axis: str, n: int | None = None):
     lo, hi = _KD_SPAN[axis]
     return jnp.linspace(lo, hi, _KD_N[axis] if n is None else int(n))
 
 
-def _znorm_nodes():
+def _znorm_nodes(n=None):
     """Tabulation nodes for the z-conditional normaliser, uniform in log1p(z).
+
+    ``n`` defaults to ``_ZNORM_N``.
 
     Same argument as ``AxisCfg.nodes_phys`` for the z axis, which this failed to
     carry over: the GP coordinate is ``log1p(z)`` (``_to_coord``) and ``ls_z``
@@ -145,8 +193,12 @@ def _znorm_nodes():
     conditional density stopped integrating to 1 (measured on the model's own
     quadrature: int p_gp dq = 1.90 at z = 0.30 for gp2d_q_z at the ls_z floor,
     0.93 at z = 0.10; 0.999 after this change).
+
+    The resolved quadrature (``_NORM_QUADRATURE``) keeps these nodes for the
+    joint models but interpolates log N between them with the cubic stencil of
+    ``_zeta_cubic``; the additive model doubles them instead.
     """
-    return jnp.expm1(jnp.linspace(0.0, math.log1p(_ZNORM_HI), _ZNORM_N))
+    return jnp.expm1(jnp.linspace(0.0, math.log1p(_ZNORM_HI), _ZNORM_N if n is None else n))
 
 
 def _m1norm_grid(m_min, dm_min):
@@ -189,8 +241,39 @@ def _m1norm_grid(m_min, dm_min):
     return jnp.concatenate([toe, above[1:]])
 
 
-def _interp2_log(ltab, zg, m1g, z_q, m1_q):
+def _zeta_cubic(lzq, n):
+    """Four-point Lagrange stencil on the ``n`` uniform log1p(z) nodes of ``_znorm_nodes``.
+
+    Returns the first stencil index ``(Nq,)`` and the weights ``(Nq, 4)``;
+    queries outside the nodes are clamped to the end values, like ``jnp.interp``.
+    The resolved quadrature interpolates log N(z) with it: linear interpolation
+    leaves h^2/8 (log N)'' between nodes, measured up to 2.5% between the
+    shipped nodes (gp3d_m1_chi_z, log_amp ceiling, ls_chi and ls_z floors) and
+    0.6% with twice as many; this stencil on the shipped nodes leaves 0.02%.
+    """
+    h = math.log1p(_ZNORM_HI) / (n - 1)
+    s = jnp.clip(lzq / h, 0.0, n - 1.0)
+    i0 = jnp.clip(jnp.floor(s).astype(jnp.int32) - 1, 0, n - 4)
+    u = s - i0
+    w = jnp.stack([-(u - 1.0) * (u - 2.0) * (u - 3.0) / 6.0,
+                   u * (u - 2.0) * (u - 3.0) / 2.0,
+                   -u * (u - 1.0) * (u - 3.0) / 2.0,
+                   u * (u - 1.0) * (u - 2.0) / 6.0], axis=-1)
+    return i0, w
+
+
+def _zeta_cubic_interp(ltab, lzq):
+    """``ltab`` (Nz, ...) at the queries' log1p(z) by ``_zeta_cubic``: (Nq, ...)."""
+    i0, w = _zeta_cubic(lzq, ltab.shape[0])
+    vals = jnp.stack([ltab[i0 + k] for k in range(4)], axis=1)       # (Nq, 4, ...)
+    return jnp.sum(w.reshape(w.shape + (1,) * (vals.ndim - 2)) * vals, axis=1)
+
+
+def _interp2_log(ltab, zg, m1g, z_q, m1_q, *, cubic_z=False):
     """Bilinear, edge-clamped interpolation of a ``(Nz, Nm1)`` log-table.
+
+    ``cubic_z`` (the resolved quadrature) replaces the linear step in z by the
+    four-point stencil of ``_zeta_cubic``; m1 stays linear in log m1.
 
     Evaluates ``exp(bilerp(ltab))`` at the *paired* queries ``(z_q, m1_q)``
     (both 1-D, same length) using ``jnp.searchsorted`` + clipped linear weights.
@@ -212,6 +295,12 @@ def _interp2_log(ltab, zg, m1g, z_q, m1_q):
 
     im = jnp.clip(jnp.searchsorted(lm1g, lm1q) - 1, 0, lm1g.shape[0] - 2)
     wm = jnp.clip((lm1q - lm1g[im]) / (lm1g[im + 1] - lm1g[im]), 0.0, 1.0)
+
+    if cubic_z:
+        i0, w = _zeta_cubic(lzq, ltab.shape[0])
+        lo = sum(w[:, k] * ltab[i0 + k, im] for k in range(4))
+        hi = sum(w[:, k] * ltab[i0 + k, im + 1] for k in range(4))
+        return jnp.exp(lo * (1.0 - wm) + hi * wm)
 
     top = ltab[iz, im] * (1.0 - wm) + ltab[iz, im + 1] * wm
     bot = ltab[iz + 1, im] * (1.0 - wm) + ltab[iz + 1, im + 1] * wm
@@ -246,8 +335,10 @@ def _znorm_interp(eval_norm_fn, z_query):
     import jax
     zg = _znorm_nodes()
     norms = jax.lax.map(jax.checkpoint(eval_norm_fn), zg)
-    return jnp.exp(jnp.interp(jnp.log1p(z_query), jnp.log1p(zg),
-                              jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))))
+    ltab = jnp.log(jnp.where(norms > 0, norms, _LOGSAFE))
+    if _norm_quadrature() == "resolved":
+        return jnp.exp(_zeta_cubic_interp(ltab, jnp.log1p(z_query)))
+    return jnp.exp(jnp.interp(jnp.log1p(z_query), jnp.log1p(zg), ltab))
 
 
 def _to_coord(axis: str, m1, q, chi, z):
@@ -304,6 +395,19 @@ class AxisCfg:
 
 
 # Default per-axis configurations (kernels: Matern-3/2 for m1, RBF elsewhere).
+#
+# Node spacing against the length-scale floors -- a known limit, inherited from
+# the frozen reference and NOT enforced: the field is mu + k(x, Z) K^-1 f(Z),
+# whose prior variance is amp^2 only AT the inducing nodes.  Where ls is well
+# below the node spacing in the GP coordinate the deviation is pinned to the
+# mean between nodes, so the low end of a length-scale posterior describes a
+# comb locked to the node positions, not a correlation length.  Spacings
+# against floors: m1 0.39 (0.15), q 0.129 (0.05), chi 0.33 at chi_eff = 0, which
+# has no node (0.05), z 0.256 (0.05).  At ls_chi = 0.05 the prior std of the
+# deviation at chi_eff = 0 is 0.6% of amp (36% at 0.1, 74% at 0.15).  Raising
+# the floors or the node counts would change every GP model's prior or
+# parameter vector, so it is left to a model decision; a direct construction
+# can pass its own ``axes_cfg``.
 _DEFAULT_AXES = {
     "m1":  AxisCfg("m1",  "matern32", 10, 3.0,   100.0, math.log(0.15), math.log(2.0)),
     "q":   AxisCfg("q",   "rbf",       8, 0.10,    1.0, math.log(0.05), math.log(0.8)),
@@ -398,6 +502,147 @@ def _grid_integrate(values, grids):
     return out
 
 
+def _m1_ratio_log_table(tab):
+    """log of an m1-conditional ``N/S`` table, node 0 (m1 = m_min) inherited.
+
+    Node 0 is m1 = m_min (empty support, ratio 0).  N/S grows with m1 there, so
+    inheriting node 1 over-states N in the first cell: the density can only be
+    UNDER-estimated, never blow up.
+    """
+    tab = tab.at[..., 0].set(tab[..., 1])
+    return jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
+
+
+# ---- resolved normaliser lattice (opt-in, see _NORM_QUADRATURE) -------------
+
+def _resolved_counts(axes_cfg):
+    """Static node counts of the resolved lattice, from the length-scale floors.
+
+    m1 is log-spaced on three segments -- the low taper window, the bulk and
+    the high taper window -- each at most ls_m1_floor / (nodes per ls) apart in
+    log m1 over the widest span the shared mass priors allow, with at least
+    _RESOLVED_TAPER_N nodes across each taper.  q uses the support-relative
+    nodes of _support_q_nodes, whose widest step is (pi/2)/(n - 1) of the
+    support; chi is uniform, and its coordinate sin(pi chi/2) moves at most
+    pi/2 per unit chi.  The nodes per length scale follow the axis's kernel
+    (_RESOLVED_NODES_PER_LS): an RBF field is analytic and the trapezoid
+    converges fast on it, a Matern-3/2 field is only C^1 and converges as h^2
+    (gp2d_m1_z at the ls_m1 floor, log_amp ceiling, alpha_gp = 8: 1.6% off at
+    four nodes per ls, 0.4% at eight).
+    """
+    cfg = {a: axes_cfg.get(a, _DEFAULT_AXES[a]) for a in _PROB_AXES}
+    step = {a: math.exp(c.log_ls_lo) / _RESOLVED_NODES_PER_LS[c.family] for a, c in cfg.items()}
+    h_m1 = step["m1"]
+    n_toe = max(_RESOLVED_TAPER_N,
+                math.ceil(math.log1p(_B_DMMIN[1] / _B_MMIN[0]) / h_m1) + 1)
+    n_bulk = math.ceil(math.log(_B_MMAX[1] / _B_MMIN[0]) / h_m1) + 1
+    n_hi = max(_RESOLVED_TAPER_N,
+               math.ceil(math.log(_B_MMAX[0] / (_B_MMAX[0] - _B_DMMAX[1])) / h_m1) + 1)
+    n_q = math.ceil(0.5 * math.pi / step["q"]) + 1
+    n_chi = math.ceil(math.pi / step["chi"]) + 1
+    return {"m1": (n_toe, n_bulk, n_hi), "q": n_q, "chi": n_chi}
+
+
+def _trapezoid_weights(x):
+    """Trapezoid weights of the (possibly non-uniform) 1-D nodes ``x``."""
+    d = jnp.diff(x)
+    zero = jnp.zeros((1,), dtype=d.dtype)
+    return 0.5 * (jnp.concatenate([zero, d]) + jnp.concatenate([d, zero]))
+
+
+def _resolved_m1_nodes(m_min, dm_min, m_max, dm_max, counts):
+    """Support-following m1 nodes: [m_min, m_min+dm_min], bulk, [m_max-dm_max, m_max]."""
+    n_toe, n_bulk, n_hi = counts
+    lo = jnp.maximum(jnp.asarray(m_min, dtype=float), _LOGSAFE)
+    b1 = lo + jnp.maximum(jnp.asarray(dm_min, dtype=float), _LOGSAFE)
+    b2 = jnp.maximum(m_max - dm_max, b1)
+    b3 = jnp.maximum(m_max, b2)
+
+    def seg(a, b, n):
+        return jnp.exp(jnp.linspace(jnp.log(a), jnp.log(b), n))
+
+    return jnp.concatenate([seg(lo, b1, n_toe), seg(b1, b2, n_bulk)[1:],
+                            seg(b2, b3, n_hi)[1:]])
+
+
+def _support_q_nodes(n):
+    """t = (1 - cos(pi u))/2 on uniform u, and the weights of int_0^1 dt.
+
+    The nodes cluster at both ends of the q-support, where the m2 = q m1 taper
+    is a boundary layer of width dm_min/(m1 - m_min) at the low end; the
+    endpoint weights vanish, so the support edge itself is never weighted.
+    """
+    u = jnp.linspace(0.0, 1.0, n)
+    t = 0.5 * (1.0 - jnp.cos(jnp.pi * u))
+    return t, _trapezoid_weights(u) * (0.5 * jnp.pi * jnp.sin(jnp.pi * u))
+
+
+def _q_support_lattice(m1, m_min, n_q):
+    """q nodes spanning each m1 node's own support [m_min/m1, 1], and weights."""
+    t, wt = _support_q_nodes(n_q)
+    q_lo = jnp.clip(m_min / m1, 0.0, 1.0)
+    width = 1.0 - q_lo
+    return q_lo[:, None] + width[:, None] * t[None, :], width[:, None] * wt[None, :]
+
+
+def _chi_lattice(n_chi):
+    c = jnp.linspace(-1.0, 1.0, n_chi)
+    return c, _trapezoid_weights(c)
+
+
+_BASELINE_PAIRING = []
+
+
+def _baseline_powerlaw_pairing():
+    """The parametric q**beta_q pairing the resolved baseline delegates to (lazy)."""
+    if not _BASELINE_PAIRING:
+        from .parametric import PowerLawPairing
+
+        _BASELINE_PAIRING.append(
+            PowerLawPairing(ParamSpec(r"$\beta_q$", *_B_BETA_Q, name="beta_q")))
+    return _BASELINE_PAIRING[0]
+
+
+def _axis_kernels(families, ls):
+    """Unit-amplitude per-axis kernels whose product (times amp^2) is _build_kernel."""
+    from tinygp import kernels   # lazy: tinygp only needed to evaluate
+
+    fam_map = {"matern32": kernels.Matern32, "rbf": kernels.ExpSquared}
+    return [fam_map[f](scale=l) for f, l in zip(families, ls)]
+
+
+def _lattice_dev(axes, kerns, nodes, alpha, zval, m1_c=None, q_c=None, chi_c=None):
+    """``k(x, Z) @ alpha / amp^2`` on a lattice, contracted one axis at a time.
+
+    ``k(x, Z) = amp^2 prod_a kerns[a](x_a, nodes[a])`` and the inducing set is
+    the tensor product of ``nodes`` (``JointGPPopulation._Z``, meshgrid "ij"),
+    so ``alpha`` reshaped to the per-axis node counts can be contracted axis by
+    axis: equal to the explicit cross-kernel product up to rounding, at the cost
+    of the lattice itself instead of lattice x M.  ``axes`` are in canonical
+    order; z is held at ``zval``; ``m1_c`` (Nm1,), ``q_c`` (Nm1, Nq) -- q nodes
+    may depend on the m1 node -- and ``chi_c`` (Nchi,) are GP coordinates.
+    Returns shape ``(Nm1|1, Nq|1, Nchi|1)``.
+    """
+    axes, kerns, nodes = list(axes), list(kerns), list(nodes)
+    T = alpha.reshape([n.shape[0] for n in nodes])
+    if "z" in axes:
+        j = axes.index("z")
+        kz = kerns[j](jnp.atleast_1d(jnp.log1p(zval)), nodes[j])[0]
+        T = jnp.tensordot(T, kz, axes=([j], [0]))
+        del axes[j], kerns[j], nodes[j]
+    for a, x in (("chi", chi_c), ("m1", m1_c)):
+        if a in axes:
+            j = axes.index(a)
+            T = jnp.moveaxis(jnp.tensordot(T, kerns[j](x, nodes[j]), axes=([j], [1])), -1, j)
+    n_chi = chi_c.shape[0] if "chi" in axes else 1
+    if "q" in axes:
+        j = axes.index("q")
+        kq = kerns[j](q_c.ravel(), nodes[j]).reshape(q_c.shape + (nodes[j].shape[0],))
+        spec = "itb,ib...->it..." if "m1" in axes else "itb,b...->it..."
+        return jnp.einsum(spec, kq, T).reshape(q_c.shape[0], q_c.shape[1], n_chi)
+    return T.reshape(m1_c.shape[0] if "m1" in axes else 1, 1, n_chi)
+
+
 def _broadcast_logp_inputs(m1, q, z, chieff):
     """Broadcast population-model inputs and flatten the query axes for GP eval.
 
@@ -428,7 +673,9 @@ class JointGPPopulation:
     ``p(m1, q, chi, z) = G(gp_axes) * Prod_{a not in gp_axes} B_a``, with the GP
     factor ``G`` normalised over its probability axes (m1, q, chi) -- conditional
     on z when z is a GP axis -- and the marginal redshift rate carried by the
-    parametric ``(1+z)**(gamma-1)`` term.  Low-mass tapers and the ``m2 = q*m1``
+    parametric ``(1+z)**(gamma-1)`` term, except for ``gp_axes == ("z",)``
+    (``gp1d_z``), where nothing is normalised and ``exp(f(z))`` modulates the
+    marginal rate itself.  Low-mass tapers and the ``m2 = q*m1``
     secondary cut are applied consistently to both the density and its
     normalisation integral.
 
@@ -452,12 +699,27 @@ class JointGPPopulation:
     latex: str = "GP"
 
     def __post_init__(self):
+        # Refuse what would otherwise be dropped silently: an unknown axis name
+        # used to vanish from gp_axes (("m1", "chieff") built gp1d_m1), and a
+        # mean_mode other than the two below dropped alpha_gp/beta_gp and ran
+        # zero-mean.
+        unknown = [a for a in self.gp_axes if a not in AXIS_ORDER]
+        if unknown:
+            raise ValueError(
+                f"unknown GP axis name(s) {unknown}; expected a subset of {AXIS_ORDER}"
+            )
+        if self.mean_mode not in GP_MEAN_MODES:
+            raise ValueError(
+                f"unknown GP mean_mode {self.mean_mode!r}; expected one of {GP_MEAN_MODES}"
+            )
         self.gp_axes = tuple(a for a in AXIS_ORDER if a in self.gp_axes)
         if not self.gp_axes:
             raise ValueError("JointGPPopulation needs at least one GP axis")
         self._cfgs = [self.axes_cfg[a] for a in self.gp_axes]
         self._families = [c.family for c in self._cfgs]
         node_axes = [c.nodes_coord() for c in self._cfgs]
+        self._nodes = node_axes
+        self._res = _resolved_counts(self.axes_cfg)
         mesh = jnp.meshgrid(*node_axes, indexing="ij")
         self._Z = jnp.stack([m.ravel() for m in mesh], axis=-1)   # (M, d)
         self.M = int(self._Z.shape[0])
@@ -563,7 +825,7 @@ class JointGPPopulation:
         p_gp_un = p_gp_un * self._taper_cut(m1, q, m_min, dm_min, m_max, dm_max)
 
         norm = self._normalise(kern, alpha, alpha_gp, beta_gp,
-                               m1, z, m_min, dm_min, m_max, dm_max)
+                               m1, z, m_min, dm_min, m_max, dm_max, amp=amp, ls=ls)
         p_gp = p_gp_un / jnp.where(norm > 0, norm, 1.0)
 
         # ---- baseline factors for non-GP probability axes ----
@@ -571,7 +833,7 @@ class JointGPPopulation:
         if "m1" not in self.gp_axes:
             p_base = p_base * self._baseline_mass(m1, alpha_mass, m_min, dm_min, m_max, dm_max)
         if "q" not in self.gp_axes:
-            p_base = p_base * self._baseline_pairing(m1, q, beta_q, m_min, dm_min)
+            p_base = p_base * self._pairing_factor(m1, q, beta_q, m_min, dm_min)
         if "chi" not in self.gp_axes:
             p_base = p_base * self._baseline_spin(chi, mu_chi, sig_chi)
 
@@ -592,8 +854,12 @@ class JointGPPopulation:
         return s
 
     def _normalise(self, kern, alpha, alpha_gp, beta_gp,
-                   m1, z, m_min, dm_min, m_max, dm_max):
+                   m1, z, m_min, dm_min, m_max, dm_max, *, amp=None, ls=None):
         """Integrate exp(f) * tapers over the probability axes.
+
+        ``amp``/``ls`` (the kernel's amplitude and length scales) are needed
+        only by the opt-in resolved quadrature (``_NORM_QUADRATURE``), which
+        contracts the field axis by axis instead of through ``kern``.
 
         When z is a GP axis the field is z-dependent; the integral is then a
         smooth function of z evaluated on a small z-grid and interpolated to the
@@ -615,9 +881,11 @@ class JointGPPopulation:
         """
         if not self._prob_gp:
             # Pure rate-axis GP (e.g. gp1d_z): no PROBABILITY axis to normalise
-            # over (z is a rate/evolution axis, handled by the baseline
-            # factors), so the prob-axis normalisation is unity. meshgrid() over
-            # an empty axis list would otherwise IndexError at flat[0].shape[0].
+            # over, so the prob-axis normalisation is unity and exp(f(z)) is a
+            # free-form modulation of the marginal rate R(z), on top of the
+            # parametric (1+z)**(gamma-1) (the baseline factors cover m1, q and
+            # chi only). meshgrid() over an empty axis list would otherwise
+            # IndexError at flat[0].shape[0].
             return jnp.ones_like(z) if self._z_in_gp else jnp.asarray(1.0)
         # Coarsen the probability-axis normalisation grid whenever the full
         # tensor grid would be intractable: any z-conditioned multi-prob-axis
@@ -628,6 +896,13 @@ class JointGPPopulation:
         # so its normalisation is unchanged.
         coarse = (self._z_in_gp and len(self._prob_gp) >= 2) or len(self._prob_gp) >= 3
         m1_cond = ("q" in self._prob_gp) and ("m1" not in self.gp_axes)
+        if (self._z_in_gp or m1_cond) and _norm_quadrature() == "resolved":
+            if amp is None or ls is None:
+                raise ValueError(
+                    "the resolved GP normaliser quadrature needs the kernel's amp and ls"
+                )
+            return self._normalise_resolved(amp, ls, alpha, alpha_gp, beta_gp, m1, z,
+                                            m_min, dm_min, m_max, dm_max, m1_cond)
         if coarse:
             # The q-support just above m_min is a sliver of width (m1 - m_min)/m1
             # that 24 nodes over [0.02, 1] cannot resolve: measured on an
@@ -695,13 +970,6 @@ class JointGPPopulation:
                         .at[rows, jq].add(c * (1.0 - wq))
                         .at[rows, jq + 1].add(c * wq))                      # (Nm1, Nq)
 
-            def _ratio_table(tab):
-                # Node 0 is m1 = m_min (empty support, ratio 0).  N/S grows with
-                # m1 there, so inheriting node 1 over-states N in the first cell:
-                # the density can only be UNDER-estimated, never blow up.
-                tab = tab.at[..., 0].set(tab[..., 1])
-                return jnp.log(jnp.where(tab > 0, tab, _LOGSAFE))
-
             def _eval_norm(zval):
                 # Field is m1-independent on this branch: evaluate it once as
                 # (G,), then contract its q axis with the m1-dependent weights.
@@ -730,8 +998,8 @@ class JointGPPopulation:
                 # AND the (G, M) cross-kernel inside over all z nodes at once is
                 # what made gp4d need 52.7 GiB of scratch (see _znorm_interp).
                 tab = jax.lax.map(jax.checkpoint(_eval_norm), zg)              # (Nz, Nm1)
-                return _interp2_log(_ratio_table(tab), zg, m1g, z, m1) * s_q  # (Nquery,)
-            ltab = _ratio_table(_eval_norm(0.0))                              # (Nm1,)
+                return _interp2_log(_m1_ratio_log_table(tab), zg, m1g, z, m1) * s_q
+            ltab = _m1_ratio_log_table(_eval_norm(0.0))                       # (Nm1,)
             return jnp.exp(jnp.interp(
                 jnp.log(jnp.clip(m1, _LOGSAFE, None)), jnp.log(m1g), ltab)) * s_q
 
@@ -753,6 +1021,104 @@ class JointGPPopulation:
         if self._z_in_gp:
             return _znorm_interp(_eval_norm, z)         # (Nquery,)
         return _eval_norm(0.0)                          # scalar
+
+    def _normalise_resolved(self, amp, ls, alpha, alpha_gp, beta_gp, m1, z,
+                            m_min, dm_min, m_max, dm_max, m1_cond):
+        """Opt-in ``_normalise`` on the resolved lattice (see ``_NORM_QUADRATURE``).
+
+        Same integrand as the lattice rule -- ``mean + clip(GP deviation)``,
+        exponentiated, times ``_taper_cut`` -- on nodes that follow the sampled
+        support: m1 from ``_resolved_m1_nodes``, q spanning each m1 node's own
+        support, chi uniform, all at ``_RESOLVED_NODES_PER_LS`` nodes per
+        length-scale floor.  The field is evaluated AT those nodes (no q lattice
+        read off by interpolation) by contracting ``alpha`` one axis at a time.
+        The z nodes and the m1-conditional ``N/S`` table are those of the
+        lattice rule; log N is interpolated in z by ``_zeta_cubic``.
+        """
+        import jax
+        kerns = _axis_kernels(self._families, ls)
+        a2 = amp ** 2
+        res = self._res
+        chi_c = wc = None
+        if "chi" in self._prob_gp:
+            chi, wc = _chi_lattice(res["chi"])
+            chi_c = _to_coord("chi", None, None, chi, None)
+        shape_mean = self.mean_mode == "shape"
+
+        if m1_cond:
+            # The field is m1-independent here, but the q-support is not: the
+            # table is N(m1)/S(m1) on _m1norm_grid's nodes, as in _normalise.
+            m1g = _m1norm_grid(m_min, dm_min)
+            q, wq = _q_support_lattice(m1g, m_min, res["q"])
+            s_m1g = sfilter_low(m1g, m_min, dm_min)
+            weight = (self._taper_cut(m1g[:, None], q, m_min, dm_min, m_max, dm_max)
+                      / jnp.where(s_m1g > 0, s_m1g, 1.0)[:, None]) * wq     # (Nm1, Nq)
+            mu = beta_gp * jnp.log(q + 0.01) if shape_mean else jnp.zeros_like(q)
+
+            def _eval_norm(zval):
+                dev = a2 * _lattice_dev(self.gp_axes, kerns, self._nodes, alpha, zval,
+                                        q_c=q, chi_c=chi_c)
+                val = jnp.exp(mu[..., None] + jnp.clip(dev, -_FIELD_CLIP, _FIELD_CLIP))
+                val = val * weight[..., None]
+                if wc is not None:
+                    val = val * wc
+                return jnp.sum(val, axis=(1, 2))                              # (Nm1,)
+
+            s_q = sfilter_low(m1, m_min, dm_min)
+            if self._z_in_gp:
+                zg = _znorm_nodes()
+                tab = jax.lax.map(jax.checkpoint(_eval_norm), zg)
+                return _interp2_log(_m1_ratio_log_table(tab), zg, m1g, z, m1,
+                                    cubic_z=True) * s_q
+            ltab = _m1_ratio_log_table(_eval_norm(0.0))
+            return jnp.exp(jnp.interp(
+                jnp.log(jnp.clip(m1, _LOGSAFE, None)), jnp.log(m1g), ltab)) * s_q
+
+        # z-conditioned, m1 in the GP whenever q is.
+        m1n = wm = m1_c = None
+        m1_3 = q_3 = jnp.ones((1, 1, 1))
+        if "m1" in self._prob_gp:
+            m1n = _resolved_m1_nodes(m_min, dm_min, m_max, dm_max, res["m1"])
+            wm = _trapezoid_weights(m1n)
+            m1_c = jnp.log(m1n)
+            m1_3 = m1n[:, None, None]
+        q = wq = None
+        if "q" in self._prob_gp:
+            q, wq = _q_support_lattice(m1n, m_min, res["q"])
+            q_3 = q[:, :, None]
+        taper = self._taper_cut(m1_3, q_3, m_min, dm_min, m_max, dm_max)
+        mu = jnp.zeros((1, 1, 1))
+        if shape_mean and "m1" in self.gp_axes:
+            mu = mu - alpha_gp * m1_c[:, None, None]
+        if shape_mean and "q" in self.gp_axes:
+            mu = mu + beta_gp * jnp.log(q_3 + 0.01)
+
+        def _eval_norm(zval):
+            dev = a2 * _lattice_dev(self.gp_axes, kerns, self._nodes, alpha, zval,
+                                    m1_c=m1_c, q_c=q, chi_c=chi_c)
+            val = jnp.exp(mu + jnp.clip(dev, -_FIELD_CLIP, _FIELD_CLIP)) * taper
+            val = jnp.sum(val * wc, axis=-1) if wc is not None else val[..., 0]
+            val = jnp.sum(val * wq, axis=-1) if wq is not None else val[..., 0]
+            return jnp.sum(val * wm, axis=-1) if wm is not None else val[..., 0]
+
+        return _znorm_interp(_eval_norm, z)
+
+    def _pairing_factor(self, m1, q, beta_q, m_min, dm_min):
+        """``p(q | m1)`` of the baseline pairing (models with q not in the GP).
+
+        Under the default quadrature, the 200-node uniform trapezoid of
+        :meth:`_baseline_pairing`, which cannot follow the q-support just above
+        m_min (a sliver of width (m1 - m_min)/m1 with the m2 taper as a boundary
+        layer at q = 1): there p(q | m1) integrates to well below one (0.07 at
+        m1 = m_min + 0.1 dm_min for m_min = 5, dm_min = 0.1, beta_q = 2.5), an
+        m1-dependent factor that reshapes p(m1) near m_min.  Under the resolved
+        quadrature, the same q**beta_q * S(q m1) kernel normalised by
+        PowerLawPairing's own rule (the support-relative Gauss-Legendre panels,
+        or the per-point normaliser, whichever ``pairing_norm`` selects).
+        """
+        if _norm_quadrature() != "resolved":
+            return self._baseline_pairing(m1, q, beta_q, m_min, dm_min)
+        return _baseline_powerlaw_pairing()(m1, q, m_min, dm_min, jnp.reshape(beta_q, (1,)))
 
     # -- baseline parametric factors --------------------------------------
 
@@ -833,9 +1199,10 @@ class AdditiveGPPopulation:
             mesh = jnp.meshgrid(*node_axes, indexing="ij")
             Z = jnp.stack([m.ravel() for m in mesh], axis=-1)
             self._term_meta.append({"axes": t, "fam": [c.family for c in cfgs],
-                                    "Z": Z, "M": int(Z.shape[0])})
+                                    "Z": Z, "M": int(Z.shape[0]), "nodes": node_axes})
         self._z_in_gp = any("z" in t for t in self.terms)
         self._jitter = _JITTER_REL
+        self._res = _resolved_counts(self.axes_cfg)
 
     @property
     def param_specs(self):
@@ -890,6 +1257,7 @@ class AdditiveGPPopulation:
         i = 4
         # Build each term's kernel + alpha ONCE (z-independent).
         term_built = []
+        term_axis = []          # (amp^2, per-axis kernels), resolved quadrature only
         for meta in self._term_meta:
             amp = jnp.exp(theta[i]); i += 1
             ls = [jnp.exp(theta[i + j]) for j in range(len(meta["axes"]))]
@@ -898,7 +1266,9 @@ class AdditiveGPPopulation:
             L, kern = _field_factor(meta["Z"], meta["fam"], amp, ls,
                                     self._jitter * amp ** 2 + 1e-9)
             term_built.append((meta, kern, _alpha_from_xi(L, xi)))
+            term_axis.append((amp ** 2, ls))
         gamma = theta[i]
+        resolved = self._z_in_gp and _norm_quadrature() == "resolved"
 
         # Coarse probability grid (m1, q, chi) for centring + normalisation.
         grids = [_coarse_axis_grid("m1"), _coarse_axis_grid("q"), _coarse_axis_grid("chi")]
@@ -922,14 +1292,54 @@ class AdditiveGPPopulation:
             Z = _grid_integrate(pg.reshape([g.shape[0] for g in grids]), grids)
             return Z, jnp.stack(cs)
 
+        if resolved:
+            # Opt-in (see _NORM_QUADRATURE): Z(z) on the resolved lattice of
+            # JointGPPopulation._normalise_resolved, each term contracted axis by
+            # axis.  The centring constants are still the coarse-lattice means
+            # above, so the density (and where its clip acts) is unchanged and
+            # only the quadrature and z interpolation of Z(z) differ.
+            res = self._res
+            m1n = _resolved_m1_nodes(m_min, dm_min, m_max, dm_max, res["m1"])
+            wm = _trapezoid_weights(m1n)
+            q_n, wq = _q_support_lattice(m1n, m_min, res["q"])
+            chi_n, wc = _chi_lattice(res["chi"])
+            lat = dict(m1_c=jnp.log(m1n), q_c=q_n,
+                       chi_c=_to_coord("chi", None, None, chi_n, None))
+            taper_res = self._taper_cut(m1n[:, None, None], q_n[:, :, None],
+                                        m_min, dm_min, m_max, dm_max)
+            term_kerns = [(a2, _axis_kernels(meta["fam"], ls))
+                          for (meta, _, _), (a2, ls) in zip(term_built, term_axis)]
+
+            def _grid_quant_resolved(zval):
+                cs = []
+                F = jnp.zeros((1, 1, 1))
+                for (meta, kern, alpha), (a2, kerns) in zip(term_built, term_kerns):
+                    c = jnp.mean(self._term_eval(meta, kern, alpha, flatg, zval, G))
+                    cs.append(c)
+                    dev = _lattice_dev(meta["axes"], kerns, meta["nodes"], alpha, zval, **lat)
+                    F = F + (a2 * dev - c)
+                pg = jnp.exp(jnp.clip(F, -_FIELD_CLIP, _FIELD_CLIP)) * taper_res
+                Z = jnp.sum(jnp.sum(jnp.sum(pg * wc, axis=-1) * wq, axis=-1) * wm)
+                return Z, jnp.stack(cs)
+
+            quant = _grid_quant_resolved
+        else:
+            quant = _grid_quant
+
         if self._z_in_gp:
-            zg = _znorm_nodes()
+            # The resolved quadrature tabulates on twice as many nodes but keeps
+            # LINEAR interpolation here: the centring constants enter the density
+            # linearly interpolated in z, and with the clip active a cubic step
+            # on log Z mixes their interpolation error in (gp4d_additive at the
+            # ls_z and ls_chi floors, log_amp ceilings: 0.8-0.9% off at z = 0.1
+            # with 145 nodes, linear or cubic, and at most 0.2% with 289, linear).
+            zg = _znorm_nodes(2 * _ZNORM_N - 1 if resolved else _ZNORM_N)
             lzg, lzq = jnp.log1p(zg), jnp.log1p(z)
             # jax.checkpoint is REQUIRED, not cosmetic (see _znorm_interp): a scan
             # keeps its per-iteration residuals for the transpose, so reverse mode
             # would otherwise tape every z node's (G, M) cross-kernel for all six
             # terms.
-            Zg, Cg_terms = jax.lax.map(jax.checkpoint(_grid_quant), zg)
+            Zg, Cg_terms = jax.lax.map(jax.checkpoint(quant), zg)
             c_at = [jnp.interp(lzq, lzg, Cg_terms[:, j]) for j in range(len(term_built))]
             norm = jnp.exp(jnp.interp(lzq, lzg,
                                       jnp.log(jnp.where(Zg > 0, Zg, _LOGSAFE))))
@@ -1251,7 +1661,7 @@ _reg("gp3d_q_chi_z",  _joint(("q", "chi", "z"),  "GP q,chi,z"),  "GP q,chi,z")
 _reg("gp4d", _joint(("m1", "q", "chi", "z"), "GP 4D"), "GP 4D")
 # Separable null: independent 1-D GP per probability axis, no interactions
 # ``mode`` is accepted and ignored: the additive family is zero-mean, so
-# ``@shape``/``@zero`` decorations name the same model.
+# build_gp_model's ``@shape``/``@zero`` suffixes name the same model.
 _reg("gp_separable",
      lambda mode="shape": AdditiveGPPopulation(
          terms=(("m1",), ("q",), ("chi",)), latex="GP sep"),
@@ -1274,11 +1684,23 @@ GP_MODEL_NAMES = tuple(_GP_BUILDERS.keys())
 
 
 def build_gp_model(name: str):
-    """Construct a GP population model by registry name (no tinygp import)."""
-    base, _, suffix = name.partition("@")          # optional "@zero" / "@shape"
+    """Construct a GP population model by registry name (no tinygp import).
+
+    An optional ``"@shape"`` (the default) or ``"@zero"`` suffix selects the
+    joint models' mean mode.  It is accepted here only: through the population
+    registry (``ds.Population``, ``get_model``) an ``@`` suffix is a
+    rate-evolution decoration (``split_rate_decoration``), which GP models do
+    not support, so ``"gp1d_m1@zero"`` is refused there.
+    """
+    base, _, suffix = name.partition("@")
     mode = suffix or "shape"
     if base not in _GP_BUILDERS:
         raise KeyError(f"unknown GP model {name!r}; known: {sorted(_GP_BUILDERS)}")
+    if mode not in GP_MEAN_MODES:
+        raise ValueError(
+            f"unknown GP mean-mode suffix {suffix!r} in {name!r}; expected one of "
+            f"{['@' + m for m in GP_MEAN_MODES]}"
+        )
     return _GP_BUILDERS[base](mode)
 
 

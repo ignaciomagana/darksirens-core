@@ -171,17 +171,36 @@ class InferenceTarget:
     Both are canonicalised like every semantic value (numbers, strings,
     lists, str-keyed mappings, numpy arrays; anything else raises). Core
     never interprets either. Neither enters the dataclass hash.
+
+    ``log_prior_volume_fraction`` (optional, a finite float <= 0) declares a
+    data-independent offset of the target's evidence: the log of the fraction
+    of the sampled prior box on which the likelihood is not identically
+    rejected, e.g. an angular model whose ``log_g`` is ``-inf`` outside its
+    positivity region (``angular_log_prior_volume_correction``).  When set,
+    ``ds.infer`` records it as ``result["log_prior_volume_fraction"]`` and
+    ``result["logZ_corrected"] = logZ - log_prior_volume_fraction`` beside the
+    raw ``logZ``, as it does for an ordinary analysis.  ``None`` (the
+    default) leaves the result as the sampler returned it.
     """
 
     log_likelihood: Callable
     parameters: ParameterPlan
     identity: Any = field(default=None, kw_only=True, hash=False)
     provenance: Any = field(default=None, kw_only=True, hash=False)
+    log_prior_volume_fraction: Any = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         if not callable(self.log_likelihood):
             raise TypeError("log_likelihood must be callable")
         _validate_parameter_plan(self.parameters)
+        if self.log_prior_volume_fraction is not None:
+            fraction = float(self.log_prior_volume_fraction)
+            if not (math.isfinite(fraction) and fraction <= 0.0):
+                raise ValueError(
+                    "InferenceTarget.log_prior_volume_fraction must be a finite "
+                    f"log fraction (<= 0), got {self.log_prior_volume_fraction!r}"
+                )
+            object.__setattr__(self, "log_prior_volume_fraction", fraction)
         from .run_fingerprint import canonical_semantic
 
         # Fail at construction, not at the first checkpoint.

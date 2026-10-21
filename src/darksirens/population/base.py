@@ -191,8 +191,8 @@ class MassComponent(ABC):
     def m1_support_max(self) -> float:
         """Largest primary mass at which this component can have non-zero density.
 
-        Used to size the opt-in pairing normalisation grid so it never clamps
-        inside the model's support (see
+        Used to size the opt-in pairing normalisation grid so its interpolant
+        covers the model's support (see
         :func:`~darksirens.population.utils.size_pairing_grid_to_support`).
         Defaults to the conventional ``M_HI`` ceiling; components whose support
         extends higher (a fixed high-mass edge, or a sampled ``m_max`` prior
@@ -1040,8 +1040,8 @@ class PairingModel(ABC):
         # second difference is inside the ``pairing_edge_tol`` budget and no
         # zero-support node lies within one cell of it; a SAMPLE is trusted when
         # both bracketing nodes are, which interpolating the indicator gives
-        # exactly (jnp.interp's clamp makes out-of-grid m1 inherit the end node's
-        # flag).  The criterion is SCALE INVARIANT -- it flags the same m1 range
+        # exactly (a sample outside the grid's span is untrusted outright, see
+        # in_grid below).  The criterion is SCALE INVARIANT -- it flags the same m1 range
         # at every N_grid, where a fixed cell window does not (measured: a
         # 16-cell window leaves 0.031 nats at N_grid = 2048 but 0.072 at 8192).
         d2      = jnp.abs(log_I_grid[2:] - 2.0 * log_I_grid[1:-1]
@@ -1052,9 +1052,20 @@ class PairingModel(ABC):
                     & jnp.concatenate([true1, has_sup[:-1]])
                     & jnp.concatenate([has_sup[1:], true1]))
         trusted = near_sup & (d2 <= settings.pairing_edge_tol)
-        resolved = jnp.interp(log_m1_q, log_m1_grid,
-                              trusted.astype(log_I_grid.dtype)
-                              ).reshape(jnp.shape(m1)) >= 1.0
+        # A sample OUTSIDE the grid's span is never trusted: jnp.interp would
+        # hand it the end node's normaliser, and that is wrong wherever the
+        # mass model still has support there.  It takes the per-sample rule
+        # below instead, so a grid narrower than the model (a density held from
+        # get_model or pop_model_parser and traced after a narrower model was
+        # resolved, or a grid nobody sized) is never clamped: measured on
+        # gwtc5_fiducial_bpl2peaks with a 200 Msun grid at beta_q = -1.9,
+        # m2_low = 3.05, delta_m2 = 9.5, the clamp put log p_pop 0.09 / 0.21 /
+        # 0.38 nats high at m1 = 220 / 250 / 299.
+        in_grid = ((log_m1_q >= log_m1_grid[0])
+                   & (log_m1_q <= log_m1_grid[-1])).reshape(jnp.shape(m1))
+        resolved = in_grid & (jnp.interp(log_m1_q, log_m1_grid,
+                                         trusted.astype(log_I_grid.dtype)
+                                         ).reshape(jnp.shape(m1)) >= 1.0)
         # UNTRUSTED samples get the normaliser the exact branch DEFINES -- the
         # same support-relative panel split -- but evaluated on the sample's OWN
         # support with ``pairing_edge_nq`` Gauss-Legendre nodes per panel instead

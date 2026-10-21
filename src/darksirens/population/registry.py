@@ -282,9 +282,10 @@ _FIDUCIAL_HINT = (
     "This is the LEGACY curated set, kept reachable for reproducing archived "
     "fixed-population runs. It is not nested in the sampled model: the sampler "
     "can never reach this point, so a fixed-vs-sampled comparison against it is "
-    "not a comparison of the same model family. Pass "
-    "--population_fiducials in_prior_v2 (or fiducials=FIDUCIAL_SET_IN_PRIOR) "
-    "for the corrected, in-prior set."
+    "not a comparison of the same model family. Use "
+    "ds.Population(name, fixed='in_prior_v2') (or "
+    "get_fixed_population_params(..., fiducials=FIDUCIAL_SET_IN_PRIOR)) for the "
+    "corrected, in-prior set."
 )
 
 
@@ -642,6 +643,49 @@ def _sharing_key(
     return bool(shared_beta), bool(shared_spin), bool(shared_gamma)
 
 
+def _require_shared_flags(
+    name: str,
+    shared_beta: bool = True,
+    shared_spin: bool = True,
+    shared_gamma: bool = True,
+) -> None:
+    """Refuse per-component sharing flags for a bespoke registered model.
+
+    A bespoke model (GWTC-5/GWTC-3 fiducials, Golomb, every Gaussian-process
+    model) has one fixed pairing, spin and redshift-rate block: its factory
+    takes no sharing flags, so ``False`` used to be dropped while the recorded
+    label said "Per-component" -- the fit was the shared model.
+    """
+    off = [flag for flag, value in (("shared_beta", shared_beta),
+                                    ("shared_spin", shared_spin),
+                                    ("shared_gamma", shared_gamma)) if not value]
+    if off:
+        raise ValueError(
+            f"{', '.join(f'{flag}=False' for flag in off)} cannot be applied to "
+            f"the bespoke registered population model {name!r}: it has a single "
+            "pairing, spin and redshift-rate block, so there are no components "
+            "to give separate parameters. Leave the sharing flags at their "
+            "default (True), or choose a mixture-grammar model."
+        )
+
+
+def _effective_sharing(model, flags) -> tuple[bool, bool, bool]:
+    """The sharing a built grammar model actually has, for its label.
+
+    A flag only takes effect where the model has more than one component to
+    share between: with one mass component (``powerlaw``, ``peak@md``, ...)
+    per-component and shared are the same model, and the label must not claim
+    otherwise.
+    """
+    mixture = getattr(model, "mixture", None)
+    if mixture is None:
+        return True, True, True
+    shared_rate = getattr(model, "has_additive_rate_split", True)
+    return (bool(flags[0]) or len(mixture.pairing_components) == 1,
+            bool(flags[1]) or len(mixture.spin_components) == 1,
+            bool(flags[2]) or bool(shared_rate))
+
+
 def _sharing_decor(
     *,
     shared_beta: bool = True,
@@ -784,6 +828,7 @@ def get_model(
     resolved_name = name if rate == "powerlaw" else f"{name}@{rate}"
     resolved_key = (resolved_name, *flags)
     if name in _CUSTOM_MODEL_FACTORIES:
+        _require_shared_flags(name, *flags)
         model = _CUSTOM_MODEL_FACTORIES[name]()
         if rate != "powerlaw":
             if not isinstance(model, PopulationModel):
@@ -816,8 +861,8 @@ def population_m1_support_max(model) -> float:
     """Largest primary mass at which ``model`` can have non-zero support.
 
     Sizes the opt-in pairing normalisation grid (see
-    :func:`~darksirens.population.utils.size_pairing_grid_to_support`) so it
-    never clamps inside the model's support.  Handles the three model layouts in
+    :func:`~darksirens.population.utils.size_pairing_grid_to_support`) so its
+    interpolant covers the model's support.  Handles the three model layouts in
     the registry: grammar mixtures (``model.mixture.mass_components``), the
     bespoke single-mass models (``model.mass_component`` -- e.g. the GWTC-5
     fiducial BPL+2peaks, which reaches 300 Msun, and the Golomb models), and any
@@ -845,19 +890,30 @@ def ensure_pairing_grid_covers(
 
     ``DARKSIRENS_GW_PAIRING_M1_GRID`` replaces the exact per-sample pairing
     normaliser with an interpolant on a static log grid ending at
-    ``pairing_m_hi`` (default 200), and ``jnp.interp`` CLAMPS above that end.
-    Three registered models have support to 300 Msun, so with the knob on every
-    200 < m1 <= 300 sample silently reuses the m1 = 200 normaliser: measured 0.41
-    in log density, one-signed across the whole high-mass tail, at a
-    sampler-reachable theta.  The two helpers that prevent it
+    ``pairing_m_hi`` (default 200).  One registered model,
+    ``gwtc5_fiducial_bpl2peaks`` (also reachable under its two legacy alias
+    names), has support to 300 Msun.  Samples above the grid take the
+    per-sample normaliser (``PairingModel.__call__``), so they are never
+    clamped; before 2026-10-20 ``jnp.interp`` clamped every 200 < m1 <= 300
+    sample to the m1 = 200 normaliser (measured 0.41 in log density,
+    one-signed across the whole high-mass tail, at a sampler-reachable theta).
+    The two helpers
     (:func:`~darksirens.population.utils.size_pairing_grid_to_support` and
-    :func:`~darksirens.population.utils.assert_pairing_grid_covers_support`) had
-    no caller in this tree.  This is the one place that resolves a population
-    model by name, so it is where they belong.
+    :func:`~darksirens.population.utils.assert_pairing_grid_covers_support`)
+    size the grid so the interpolant covers the model's support, and run here.
+    This runs wherever a likelihood resolves its population model by name:
+    :func:`~darksirens.runtime_binding.bind_analysis` and
+    :func:`pop_model_parser`, which every hierarchical likelihood primitive
+    calls when it is traced (so a direct call of, e.g.,
+    ``spectral_siren_log_likelihood`` is covered too).
 
-    Idempotent, and a no-op when the grid is disabled (the default).  Call it
-    once per analysis, after the model name is resolved and before the first
-    likelihood evaluation.
+    Idempotent, and a no-op when the grid is disabled (the default).  The
+    sizing starts from the configured grid every time, not from a grid an
+    earlier model grew, so the grid a model gets does not depend on what was
+    resolved before it in the process.  A density held from :func:`get_model`
+    or :func:`pop_model_parser` traces with whatever grid is current when it
+    is traced; a narrower grid than its model's costs it no accuracy (the
+    samples above the grid take the per-sample rule).
     """
     from .utils import (
         assert_pairing_grid_covers_support,
@@ -878,6 +934,17 @@ def ensure_pairing_grid_covers(
     assert_pairing_grid_covers_support(support, model_name=pop_model)
 
 
+def _grammar_component_count(base_name: str) -> int | None:
+    """Mass-component count of a grammar mixture name; None for anything else."""
+    name = LEGACY_NAME_ALIASES.get(base_name, LEGACY_BASE_ALIASES.get(base_name, base_name))
+    if name in _CUSTOM_MODEL_FACTORIES:
+        return None
+    try:
+        return len(parse_model_name(name).slots)
+    except ModelNameError:
+        return None
+
+
 def get_fixed_population_params(
     pop_model: str,
     *,
@@ -891,7 +958,11 @@ def get_fixed_population_params(
 
     ``fiducials`` selects WHICH curated fiducial vector: ``"legacy"`` (the
     default, bit-identical to every archived fixed-population run and to every
-    mock built from it) or ``"in_prior_v2"``, the corrected set that lies
+    mock built from it, with one declared exception: the effective-spin pair
+    ``mu_chi``/``sigma_chi`` of ``gwtc5_fiducial_bpl2peaks`` is 0.04/0.10, a fit
+    made here, where runs and mocks before 2026-10-08 used 0.0633/0.3654; see
+    MIGRATION.md, "GWTC-5 fixed population") or ``"in_prior_v2"``, the
+    corrected set that lies
     inside each model's own declared priors -- required whenever the fixed arm
     is to be read as nested in, or comparable to, the sampled model.  See
     ``_IN_PRIOR_FIDUCIAL_PATCHES``.
@@ -909,7 +980,11 @@ def get_fixed_population_params(
     _validate_fiducial_set(fiducials)
     base_name, rate = split_rate_decoration(pop_model)
     if rate == "md":
-        if not shared_gamma:
+        # Same rule as PopulationModel.__post_init__, which get_model applies:
+        # with ONE mass component, shared and per-component redshift evolution
+        # are the same model (its fiducial ends in the one gamma either way),
+        # so only a multi-component mixture is refused.
+        if not shared_gamma and _grammar_component_count(base_name) != 1:
             raise ValueError(
                 "rate_evolution='md' requires shared_gamma=True."
             )
@@ -950,9 +1025,12 @@ def _fixed_population_params_base(
     name = _resolve_legacy(pop_model)
 
     if name in _CUSTOM_FIDUCIALS:
-        # Bespoke registered models carry a published parameter vector, not a
-        # grammar composition with overridable per-slot priors, so there is
-        # nothing to patch and both fiducial sets are the same numbers.
+        # Bespoke registered models carry their own registered parameter vector
+        # (published values, except where the registration says otherwise: the
+        # GWTC-5 effective-spin pair is a fit made here), not a grammar
+        # composition with overridable per-slot priors, so there is nothing to
+        # patch and both fiducial sets are the same numbers.
+        _require_shared_flags(name, shared_beta, shared_spin, shared_gamma)
         return jnp.array(_CUSTOM_FIDUCIALS[name], dtype=float)
 
     # The in-prior set is validated as an ERROR, not a warning: it exists
@@ -1011,6 +1089,17 @@ def pop_model_parser(
     shared_spin: bool = True,
     shared_gamma: bool = True,
 ):
+    # The likelihood primitives resolve their density here, so the opt-in
+    # pairing m1 grid is sized for THIS model before its log_p_pop is traced
+    # (bind_analysis does the same; a direct primitive call used to skip it,
+    # and the grid then clamped a 300 Msun model at 200).  A no-op when the
+    # grid is off.
+    ensure_pairing_grid_covers(
+        pop_model,
+        shared_beta=shared_beta,
+        shared_spin=shared_spin,
+        shared_gamma=shared_gamma,
+    )
     return get_model(
         pop_model,
         shared_beta=shared_beta,
@@ -1038,9 +1127,12 @@ def pop_model_prior_parser(
     # in the same order.  This is the Option-A channel that lets whitened GP
     # latents declare a standard-normal prior to the sampler.
     kinds = [(s.prior_kind, s.prior_loc, s.prior_scale) for s in model.param_specs]
+    # The label states the sharing the built model has, not the request: a
+    # flag a single-component model cannot act on is not "Per-component".
+    eff = _effective_sharing(model, (shared_beta, shared_spin, shared_gamma))
     return lows, highs, labels, kinds, _latex_name(
         pop_model,
-        shared_beta=shared_beta,
-        shared_spin=shared_spin,
-        shared_gamma=shared_gamma,
+        shared_beta=eff[0],
+        shared_spin=eff[1],
+        shared_gamma=eff[2],
     )
