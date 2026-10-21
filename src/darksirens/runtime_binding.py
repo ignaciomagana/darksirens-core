@@ -935,6 +935,7 @@ def _require_cache(where, cache, count_ratio, z_depth) -> None:
     expected = {
         None: type(None),
         "pooled": PooledCountRatioCache,
+        "pooled_kernel": PooledCountRatioCache,
         "row": ObservedDensityCache,
     }[count_ratio]
     if not isinstance(cache, expected):
@@ -946,7 +947,7 @@ def _require_cache(where, cache, count_ratio, z_depth) -> None:
             "an estimator the plan does not record. Bind the analysis with "
             "bind_analysis"
         )
-    depth = getattr(cache, "depth", None) if count_ratio == "pooled" else None
+    depth = getattr(cache, "depth", None) if count_ratio in _POOLED_COUNT_RATIOS else None
     if depth is not None and depth.z_depth != z_depth:
         raise ValueError(
             f"{where}: the pooled count-ratio cache was built for z_depth="
@@ -1043,14 +1044,17 @@ def _require_bound_operands(bound) -> None:
 def _trace_settings():
     """The settings a trace of the likelihood reads: ``(grids, catalog evaluation)``.
 
-    The normalisation grids (``configure_normalization_grids``) and the
-    catalog evaluation settings (``configure_catalog_evaluation``; of these
-    only ``missing_density`` is read at trace time, the kernel layout and
-    window are fixed in the catalog views at bind).
+    The normalisation grids as configured (``configure_normalization_grids``;
+    before the opt-in pairing m1 grid is sized, which every trace does for
+    its own model from these, so a wider model traced in between changes
+    nothing) and the catalog evaluation settings
+    (``configure_catalog_evaluation``; of these only ``missing_density`` is
+    read at trace time, the kernel layout and window are fixed in the
+    catalog views at bind).
     """
-    from darksirens.population.utils import normalization_grid_settings
+    from darksirens.population.utils import configured_normalization_grid_settings
 
-    return normalization_grid_settings(), catalog_evaluation_settings()
+    return configured_normalization_grid_settings(), catalog_evaluation_settings()
 
 
 def _require_trace_settings(bound) -> None:

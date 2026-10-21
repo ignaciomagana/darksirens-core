@@ -709,6 +709,48 @@ def test_binding_fingerprint_records_its_own_pairing_grid():
     assert core_numerics_semantic(narrow)["normalization_grids"] == before
 
 
+def test_a_binding_traces_after_a_wider_model_grew_the_grid():
+    """A binding refuses a first trace under other settings than it was bound
+    with, and every trace sizes the pairing grid for its own model. The check
+    compared the live, grown grid: after a GWTC-5 binding was traced, the
+    powerlaw+peak binding made before it (and its diagnostics program) raised
+    RuntimeError, though its own trace sizes the grid back to 200 Msun."""
+    import darksirens as ds
+    from darksirens.inference.run_fingerprint import core_numerics_semantic
+    from darksirens.runtime_binding import bind_analysis
+
+    from _catalog_model_fixtures import gw_stores
+
+    events, injections = gw_stores()
+    cosmology = ds.Cosmology(H0=(50.0, 90.0), Om0=0.3075)
+    _set_pairing_grid(1024, m_hi=200.0)
+    narrow = bind_analysis(
+        ds.model(cosmology=cosmology, population=ds.Population("powerlaw+peak", fixed=True)),
+        events=events, injections=injections)
+    before = core_numerics_semantic(narrow)["normalization_grids"]
+    wide = bind_analysis(
+        ds.model(cosmology=cosmology,
+                 population=ds.Population("gwtc5_fiducial_bpl2peaks", fixed=True)),
+        events=events, injections=injections)
+    theta = np.array([70.0])
+    assert np.isfinite(float(wide(theta)))
+    assert normalization_grid_settings().pairing_m_hi == 300.0
+    value = float(narrow(theta))
+    assert np.isfinite(value)
+    assert normalization_grid_settings().pairing_m_hi == 200.0
+    assert np.isfinite(float(wide(theta)))
+    diagnostics = narrow.diagnostics(theta)
+    assert float(diagnostics.log_likelihood) == value
+    assert core_numerics_semantic(narrow)["normalization_grids"] == before
+    # A configuration change is still refused at the first trace.
+    late = bind_analysis(
+        ds.model(cosmology=cosmology, population=ds.Population("powerlaw+peak", fixed=True)),
+        events=events, injections=injections)
+    U.configure_normalization_grids(pairing_edge_tol=2.0e-4)
+    with pytest.raises(RuntimeError, match="changed after this analysis was bound"):
+        late(theta)
+
+
 # ---------------------------------------------------------------------------
 # (7) Trace-safety of the cached grid builders.  The builders compute with jnp
 #     and are lru-cached; if the FIRST eval after a cache clear happens inside a
