@@ -613,9 +613,16 @@ def test_float32_selection_padding_keeps_the_float32_weights():
     # The run fingerprint treats sel_batch_size as layout. The pad used to
     # rebuild the float32 injections in float64 and recompute q there, so a
     # batch size that does not divide the injections moved ln L by ~2e-7
-    # nats on this mock against one that does. (The scanned and the single-pass
-    # float32 programs still round the weights differently, by ~1e-8 nats
-    # here, whatever the batch size: that is XLA's fusion, not the padding.)
+    # nats on this mock against one that does (2.3e-8, 1.8e-7 and 2.3e-8 at
+    # these three points). (The scanned and the single-pass float32 programs
+    # still round the weights differently, by ~1e-8 nats here, whatever the
+    # batch size: that is XLA's fusion, not the padding.) The tolerance is the
+    # float32 rounding level, not bit equality, and still catches the old pad
+    # at each point: without AVX-512 (XLA_FLAGS=--xla_cpu_max_isa=AVX2, and a
+    # CI runner) XLA rounds the float32 weights differently for different
+    # batch lengths, padding or not (batch sizes 8 and 823 both divide the
+    # injections and differ by 6.6e-10 nats; 999 and 823 by up to 3.5e-9),
+    # while with AVX-512 every layout here agrees to 6e-14.
     b = _bind("spectral", compute_dtype="float32")
     n_sel = int(b.gw_selection.dL.shape[0])
     divisor = next(d for d in range(512, n_sel) if n_sel % d == 0)
@@ -625,7 +632,7 @@ def test_float32_selection_padding_keeps_the_float32_weights():
         assert n_sel % size
         padded = _bind("spectral", compute_dtype="float32", sel_batch_size=size)
         for t in thetas:
-            assert float(padded(t)) == pytest.approx(float(reference(t)), rel=0, abs=1e-11), size
+            assert float(padded(t)) == pytest.approx(float(reference(t)), rel=0, abs=1e-8), size
 
 
 def test_diagnostics_are_float64():

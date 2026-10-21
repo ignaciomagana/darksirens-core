@@ -539,18 +539,26 @@ def test_weighted_mu_miss_refuses_a_reference_table_and_unknown_names():
     shared = CenteredHostMarks(("logmstar",), _marks().values, *_reference_table())
     with pytest.raises(ValueError, match="carries\\s+none"):
         _estimator_prior(cat, shared, 0.5, "weighted")
-    # Reaches both seams of the marked likelihood.
+    # Reaches both seams of the marked likelihood.  On _catalog() each galaxy
+    # sits alone in its mu_miss bin, where the two means coincide, and the
+    # catalog is complete at the events' redshift, so the two values differed
+    # by rounding alone (+-1e-15 nat locally, equal on some CPUs).  Here the
+    # base weights correlate with the mark inside each bin, and n0 = 1e-5
+    # leaves missing hosts at the events' redshift: ~0.014 nat apart.
     pe, sel = _events()
-    common = (COSMO, PARAMS, POP, pe, cat, build_observed_density_cache(cat), MODEL)
+    cat, marks = _weight_correlated_catalog()
+    params = PARAMS._replace(n0=1.0e-5)
+    common = (COSMO, params, POP, pe, cat, build_observed_density_cache(cat), MODEL)
     values = {}
     for estimator in ("count", "weighted"):
         values[estimator] = float(marked_dark_siren_log_likelihood(
-            *common, _marks(), jnp.asarray([1.5]), sel, cat,
-            build_observed_density_cache(cat), _marks(), 1, 2, 8.0,
+            *common, marks, jnp.asarray([1.5]), sel, cat,
+            build_observed_density_cache(cat), marks, 1, 2, 8.0,
             pop_model="powerlaw+peak", max_likelihood_variance=1.0e6,
             mu_miss_estimator=estimator,
         ))
-    assert np.isfinite(values["weighted"]) and values["weighted"] != values["count"]
+    assert np.isfinite(values["weighted"]) and np.isfinite(values["count"])
+    assert abs(values["weighted"] - values["count"]) > 1.0e-3, values
 
 
 def test_marks_survive_standard_jax_tree_operations():
