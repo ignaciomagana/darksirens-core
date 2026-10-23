@@ -525,10 +525,14 @@ A target may expose what the guard report reads from a binding:
 looked up without being evaluated; a target missing any of them runs exactly
 as before (same sampler call, same result, no report). With all four,
 `ds.infer(target, guard_report=...)` calls
-`guard_report(target, prior_transform, plan.labels, n_draws=, seed=)`
-unchanged, with the plan's prior transform (the one the sampler then
+`guard_report(target, prior_transform, plan.labels, n_draws=, seed=,
+for_target=True)` with the plan's prior transform (the one the sampler then
 receives), 32 draws for `True` and the sampler `seed`, and records it in
-`result["guard_report"]`. When the target's records carry a leading member
+`result["guard_report"]`. `for_target=True` changes only the advice in the
+warning above 5% guarded draws: a target's `max_likelihood_variance` is set
+when the target is built (`ds.infer` refuses it for a target), so a larger
+cap goes to the target's builder; the report and the ordinary analysis's
+text are unchanged. When the target's records carry a leading member
 axis (`n_eff` is not a scalar: a likelihood averaged over members), core stops
 at the first record and calls the target's own
 `guard_report(prior_transform, labels, *, n_draws, seed)` method and records
@@ -542,12 +546,14 @@ capability marker: a companion that reports at build can skip that report
 when it exists.
 
 A target may record the sampler it was built for as `built_for_sampler`. When
-that differs from the sampler `ds.infer` runs (after the default is
-resolved) and the target states a hard guard (`selection_neff_soft_guard`
+`ds.infer` runs it with NumPyro (after the default is resolved), it was built
+for another sampler and it states a hard guard (`selection_neff_soft_guard`
 false), `ds.infer` emits a `UserWarning` before sampling: it does not
-configure a target's likelihood, so the target keeps the guard its builder
-chose. A target that does not state its guard, and a plan with no free
-parameters, are not checked.
+configure a target's likelihood, so the target keeps the hard `-inf` wall its
+builder chose, which a gradient sampler cannot cross. A target built for one
+nested sampler and run with the other (TinyNS and dynesty) is not warned
+about: the hard guard is right for both. A target that does not state its
+guard, and a plan with no free parameters, are not checked.
 
 ### Parameter decoding
 

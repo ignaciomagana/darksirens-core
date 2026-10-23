@@ -5,8 +5,8 @@ An :class:`~darksirens.InferenceTarget` that exposes a binding's
 ``selection_neff_soft_guard`` gets core's report, called unchanged; a target
 whose records carry a member axis gets its own ``guard_report`` method's
 report, or a warning; a target that exposes none of this runs exactly as
-before. A target that records the sampler it was built for warns when it runs
-under another with the hard guard.
+before. A hard-guard target that records the sampler it was built for warns
+when it runs under NumPyro, built for another sampler.
 """
 
 from __future__ import annotations
@@ -153,6 +153,13 @@ def test_a_target_with_diagnostics_gets_cores_report_unchanged(sampler):
     walled = [w for w in caught if "likelihood guard fired" in str(w.message)]
     assert [w.filename for w in walled] == [__file__]
     assert len(target.calls) == 64
+    # The cap is the builder's (ds.infer refuses it for a target), and the
+    # advice says so instead of naming an argument ds.infer refuses.
+    (advice,) = [str(w.message) for w in walled]
+    assert "pass max_likelihood_variance=<cap> to the target's builder" in advice
+    assert "infer(..., max_likelihood_variance=<cap>)" not in advice
+    with pytest.raises(TypeError, match="max_likelihood_variance"):
+        ds.infer(target, sampler="dynesty", max_likelihood_variance=2.0)
 
     with pytest.warns(UserWarning, match="pe_mc_variance"):
         direct = guard_report(target, _transform(target.parameters), target.parameters.labels,
@@ -383,12 +390,16 @@ def _mismatch_warnings(caught):
 
 @pytest.mark.parametrize("built, run, soft, warned", [
     ("dynesty", "numpyro", False, True),
-    ("tinyns", "dynesty", False, True),
+    ("tinyns", "numpyro", False, True),
+    # between the nested samplers the hard guard is right for both
+    ("tinyns", "dynesty", False, False),
+    ("dynesty", "tinyns", False, False),
     ("dynesty", "dynesty", False, False),
     ("numpyro", "dynesty", True, False),
+    ("dynesty", "numpyro", True, False),
     (None, "numpyro", False, False),
 ])
-def test_a_hard_guard_target_run_under_another_sampler_warns(sampler, built, run, soft, warned):
+def test_a_hard_guard_target_run_under_numpyro_warns(sampler, built, run, soft, warned):
     target = DiagnosedTarget(_log_likelihood, _plan(60.0, 100.0), built_for_sampler=built,
                              selection_neff_soft_guard=soft)
     with warnings.catch_warnings(record=True) as caught:
@@ -401,7 +412,71 @@ def test_a_hard_guard_target_run_under_another_sampler_warns(sampler, built, run
         assert w.category is UserWarning and w.filename == __file__
         message = str(w.message)
         assert f"built for sampler {built!r}" in message and f"runs it with {run!r}" in message
-        assert ("gradient sampler" in message) == (run == "numpyro")
+        assert "gradient sampler" in message
+
+
+def _lazy_target(raising, evaluated, *, diagnosed):
+    """A target whose ``n_events`` and ``max_likelihood_variance`` record each read.
+
+    ``raising`` names the property that raises when read. Without
+    ``selection_neff_soft_guard`` it lacks one of the four attributes, so the
+    report does not run and nothing should read the two properties.
+    """
+
+    def counted(name):
+        def read(self):
+            evaluated.append(name)
+            if name == raising:
+                raise RuntimeError(f"{name} was evaluated")
+            return 4 if name == "n_events" else 1.0
+
+        return property(read)
+
+    @dataclass(frozen=True)
+    class Lazy(InferenceTarget):
+        n_events = counted("n_events")
+        max_likelihood_variance = counted("max_likelihood_variance")
+
+        def diagnostics(self, theta):
+            raise AssertionError("ds.infer must not evaluate this target's diagnostics")
+
+    if diagnosed:
+        @dataclass(frozen=True)
+        class LazyDiagnosed(Lazy):
+            selection_neff_soft_guard: bool = field(default=False, kw_only=True)
+
+            def diagnostics(self, theta):
+                return _record(float(theta[0]))
+
+        return LazyDiagnosed(_log_likelihood, _plan())
+    return Lazy(_log_likelihood, _plan())
+
+
+@pytest.mark.parametrize("raising", ["n_events", "max_likelihood_variance"])
+def test_the_attributes_are_looked_up_without_being_evaluated(sampler, raising):
+    evaluated = []
+    target = _lazy_target(raising, evaluated, diagnosed=False)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = ds.infer(target, sampler="dynesty", guard_report=8)
+    # Asking ran none of the target's code: no crash, no read, no report.
+    assert evaluated == []
+    assert "guard_report" not in result
+    assert len(sampler.calls) == 1
+    assert public._exposes_guard_diagnostics(target) is False
+    assert evaluated == []
+
+    # With all four, only the report reads them, and its failure is advisory.
+    evaluated = []
+    target = _lazy_target(raising, evaluated, diagnosed=True)
+    assert public._exposes_guard_diagnostics(target) is True
+    assert evaluated == []
+    with pytest.warns(RuntimeWarning, match=f"guard report skipped .RuntimeError: {raising}"):
+        result = ds.infer(target, sampler="dynesty", guard_report=8)
+    assert evaluated[-1] == raising
+    assert "guard_report" not in result
+    assert len(sampler.calls) == 2
 
 
 def test_the_sampler_check_needs_the_hard_guard_stated(sampler):

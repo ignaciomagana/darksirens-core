@@ -104,6 +104,50 @@ def test_report_records_the_guard_and_the_range_where_it_fired():
     assert again == report
 
 
+# The warning of the test above as main (1022429) words it, byte for byte.
+_ORDINARY_WARNING = (
+    "The likelihood guard fired on 34/64 prior draws (53%): selection_neff on 11 "
+    "draws (H0 in [121.4, 139.5]): the injection effective sample size N_eff is too "
+    "small even with no PE variance (N_eff <= max(5 N_obs, N_obs^2 / "
+    "max_likelihood_variance)); more detected injections move it; pe_mc_variance on "
+    "23 draws (H0 in [21.12, 49.4]): the summed per-event PE Monte-Carlo variance "
+    "uses up the max_likelihood_variance budget the selection term needs; more PE "
+    "samples per event move it. The likelihood is -inf there, so the sampler leaves "
+    "that part of the prior out of the posterior. result['guard_report'] records it. "
+    "infer(..., max_likelihood_variance=<cap>) accepts a larger Monte-Carlo "
+    "variance; infer(..., guard_report=False) skips this check."
+)
+
+
+def test_the_advice_on_the_cap_names_where_the_cap_is_set():
+    """``infer`` takes the cap of an ordinary analysis; a target's builder sets its own."""
+
+    def warned(**kwargs):
+        with pytest.warns(UserWarning) as record:
+            report = guard_report(_FakeBound(), _uniform(20.0, 140.0), ("H0",),
+                                  n_draws=64, seed=5, **kwargs)
+        (w,) = record
+        return str(w.message), report
+
+    ordinary, report = warned()
+    assert ordinary == _ORDINARY_WARNING
+    assert warned(for_target=False) == (ordinary, report)
+
+    # ds.infer refuses max_likelihood_variance for an InferenceTarget, so the
+    # target's advice sends the cap to its builder; nothing else changes.
+    target, target_report = warned(for_target=True)
+    assert target_report == report
+    shared = "result['guard_report'] records it. "
+    assert target.split(shared)[0] == ordinary.split(shared)[0]
+    assert target.split(shared)[1] == (
+        "An InferenceTarget's max_likelihood_variance is set when the target is "
+        "built (infer refuses it for a target): pass max_likelihood_variance=<cap> "
+        "to the target's builder to accept a larger Monte-Carlo variance; "
+        "infer(..., guard_report=False) skips this check."
+    )
+    assert "infer(..., max_likelihood_variance=<cap>)" not in target
+
+
 def test_report_is_quiet_when_nothing_is_guarded():
     with warnings.catch_warnings():
         warnings.simplefilter("error")

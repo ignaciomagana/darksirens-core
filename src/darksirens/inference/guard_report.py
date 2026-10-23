@@ -116,6 +116,7 @@ def guard_report(
     n_draws: int = GUARD_REPORT_DRAWS,
     seed: int = 0,
     warn_fraction: float = GUARD_WARN_FRACTION,
+    for_target: bool = False,
 ):
     """Evaluate ``bound``'s guards at ``n_draws`` prior draws and report them.
 
@@ -136,7 +137,13 @@ def guard_report(
     - ``probed_ranges``: ``{label: [min, max]}`` over every draw.
 
     Warns once (``UserWarning``) when more than ``warn_fraction`` of the
-    draws is guarded, naming the guard and where it fired.
+    draws is guarded, naming the guard and where it fired. The warning says
+    how to accept a larger Monte-Carlo variance: through
+    ``infer(..., max_likelihood_variance=<cap>)`` for an ordinary analysis,
+    or, with ``for_target=True`` (``ds.infer`` passes it for an
+    :class:`~darksirens.InferenceTarget`, which refuses that argument),
+    through the target's builder, which sets the cap when it builds the
+    target. ``for_target`` changes only that sentence, never the report.
     """
     import jax.numpy as jnp
 
@@ -192,13 +199,26 @@ def guard_report(
         details = "; ".join(
             f"{_describe(name, entry)}: {_GUARD_MEANING[name]}" for name, entry in fired.items()
         )
+        if for_target:
+            # ds.infer refuses max_likelihood_variance for an InferenceTarget.
+            cap_advice = (
+                "An InferenceTarget's max_likelihood_variance is set when the "
+                "target is built (infer refuses it for a target): pass "
+                "max_likelihood_variance=<cap> to the target's builder to accept "
+                "a larger Monte-Carlo variance; "
+            )
+        else:
+            cap_advice = (
+                "infer(..., max_likelihood_variance=<cap>) accepts a larger "
+                "Monte-Carlo variance; "
+            )
         warnings.warn(
             f"The likelihood guard fired on {guarded}/{n_draws} prior draws "
             f"({100.0 * guarded / n_draws:.0f}%): {details}. The likelihood is "
             f"{effect} there, so the sampler leaves that part of the prior out "
             "of the posterior. result['guard_report'] records it. "
-            "infer(..., max_likelihood_variance=<cap>) accepts a larger "
-            "Monte-Carlo variance; infer(..., guard_report=False) skips this check.",
+            + cap_advice
+            + "infer(..., guard_report=False) skips this check.",
             UserWarning,
             stacklevel=4,
         )

@@ -1304,11 +1304,16 @@ target that exposes what the report reads from a binding.
   They are looked up without being evaluated (`inspect.getattr_static`).
 - **What runs.** With all four, before sampling,
   `darksirens.inference.guard_report.guard_report(target, prior_transform,
-  plan.labels, n_draws=, seed=)` is called unchanged, with the plan's prior
-  transform (the same object the sampler then receives), 32 draws for `True`
-  or the integer given, and the sampler `seed` (0 when unset). The report goes
-  in `result["guard_report"]`, as for an ordinary analysis, and its
-  `UserWarning` above 5% guarded draws is the same.
+  plan.labels, n_draws=, seed=, for_target=True)` is called with the plan's
+  prior transform (the same object the sampler then receives), 32 draws for
+  `True` or the integer given, and the sampler `seed` (0 when unset). The
+  report goes in `result["guard_report"]`, as for an ordinary analysis. Its
+  `UserWarning` above 5% guarded draws is the same except for the advice on
+  the cap: `ds.infer` refuses `max_likelihood_variance` for a target, so the
+  warning says the cap is set when the target is built and a larger one goes
+  to the target's builder. `for_target` (keyword-only, default `False`)
+  changes only that sentence; an ordinary analysis's warning is unchanged,
+  byte for byte.
 - **Targets averaged over members.** When the first diagnostics record has a
   leading member axis (`n_eff` is not a scalar), core's per-draw
   classification does not apply: core stops there and calls the target's
@@ -1317,12 +1322,13 @@ target that exposes what the report reads from a binding.
   with a `RuntimeWarning` naming the member count. The one record core read
   is the only extra cost.
 - **Built for another sampler.** A target may record the sampler it was
-  built for as `built_for_sampler`. When it differs from the sampler run and
-  the target states a hard guard (`selection_neff_soft_guard` false),
-  `ds.infer` warns (`UserWarning`): a target built for dynesty and run with
-  NumPyro keeps the hard `-inf` wall, which a gradient sampler cannot cross.
-  The warning also fires between the nested samplers (built for tinyns, run
-  with dynesty), where the hard guard is right for both.
+  built for as `built_for_sampler`. When `ds.infer` runs it with NumPyro, it
+  was built for another sampler and it states a hard guard
+  (`selection_neff_soft_guard` false), `ds.infer` warns (`UserWarning`): a
+  target built for dynesty and run with NumPyro keeps the hard `-inf` wall,
+  which a gradient sampler cannot cross. Between the nested samplers (built
+  for tinyns, run with dynesty, or the reverse) the hard guard is right for
+  both, and there is no warning.
 - **Advisory.** An error in the report, or in a target's method, or a method
   that returns something other than a mapping, warns (`RuntimeWarning`) and
   the run continues without `result["guard_report"]`. A plan with no free
@@ -1343,7 +1349,11 @@ target that exposes what the report reads from a binding.
   the candidate outputs of the inference and catalog-mixture parity probes are
   byte-identical to main's.
 - **Tests.** `tests/test_target_guard_report.py`: the report equals a direct
-  call of `guard_report`; targets without the attributes call the sampler
-  with the same arguments as the previous path; the member-axis method, the
-  note without it and the failures; the sampler check; and, when
-  darksirens-lss is importable, a real lss `fixed_table_target`.
+  call of `guard_report`, and its warning names the target's builder for the
+  cap; targets without the attributes call the sampler with the same
+  arguments as the previous path; the attributes are looked up without being
+  evaluated (a target whose `n_events` or `max_likelihood_variance` property
+  raises runs as before); the member-axis method, the note without it and the
+  failures; the sampler check (NumPyro only); and, when darksirens-lss is
+  importable, a real lss `fixed_table_target`.
+  `tests/test_guard_report.py` pins the ordinary analysis's advice text.

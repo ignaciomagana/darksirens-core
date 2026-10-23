@@ -210,36 +210,32 @@ def _member_guard_report(target, prior_transform, labels, *, n_draws, seed, n_me
 
 
 def _warn_built_for_another_sampler(target, sampler):
-    """Warn when a hard-guard target runs under a sampler it was not built for.
+    """Warn when a hard-guard target built for another sampler runs under NumPyro.
 
     A target may record the sampler its builder resolved its options for
     (``built_for_sampler``). Core does not configure a target's likelihood,
-    so a target built for one sampler keeps that guard under another.
+    so a target built for one sampler keeps that guard under another. The
+    hard ``-inf`` wall is right for the nested samplers (dynesty, TinyNS),
+    whichever of them the target was built for; only NumPyro, a gradient
+    sampler, cannot cross it, so only a hard-guard target run under NumPyro
+    warns.
     """
+    if sampler != "numpyro":
+        return
     built = _optional_target_value(target, "built_for_sampler")
     if built is None or built == sampler:
         return
     soft = _optional_target_value(target, "selection_neff_soft_guard")
     if soft is None or bool(soft):
         return
-    if sampler == "numpyro":
-        consequence = (
-            "NumPyro is a gradient sampler and cannot cross that -inf wall (its "
-            "cotangent is zero). Rebuild the target with sampler='numpyro' (the "
-            "soft guard), or run it with the sampler it was built for."
-        )
-    else:
-        consequence = (
-            f"The hard guard is also what 'auto' resolves to for {sampler!r}; "
-            f"rebuild the target with sampler={sampler!r}, or run it with the "
-            "sampler it was built for, so that the two agree."
-        )
     warnings.warn(
         f"this InferenceTarget was built for sampler {built!r} and ds.infer runs "
         f"it with {sampler!r}. ds.infer does not configure a target's "
         "likelihood, so the target keeps the hard selection N_eff guard its "
         "builder chose (-inf where the Monte-Carlo estimate of the likelihood is "
-        f"too noisy). {consequence}",
+        "too noisy). NumPyro is a gradient sampler and cannot cross that -inf "
+        "wall (its cotangent is zero). Rebuild the target with sampler='numpyro' "
+        "(the soft guard), or run it with the sampler it was built for.",
         UserWarning,
         stacklevel=4,  # the caller of ds.infer
     )
@@ -526,8 +522,11 @@ def infer(
     (:data:`~darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`:
     a ``diagnostics(theta)`` method returning the likelihood's diagnostics
     record, ``n_events``, ``max_likelihood_variance`` and
-    ``selection_neff_soft_guard``); the report is then core's, called
-    unchanged with the plan's prior transform and labels. When the target's
+    ``selection_neff_soft_guard``); the report is then core's, called with
+    the plan's prior transform and labels. Its warning above 5% guarded
+    draws says that a target's ``max_likelihood_variance`` is set when the
+    target is built (``infer`` refuses it here) and that a larger cap goes
+    to the target's builder. When the target's
     records carry a leading member axis (a likelihood averaged over
     members), core calls the target's own ``guard_report(prior_transform,
     labels, *, n_draws, seed)`` method instead and records the mapping it
@@ -536,10 +535,13 @@ def infer(
     exactly as before.
 
     A target may record the sampler it was built for (``built_for_sampler``).
-    When that differs from the sampler run here and the target states a hard
-    selection guard (``selection_neff_soft_guard`` false), ``infer`` warns
-    (``UserWarning``): it does not configure a target's likelihood, so the
-    target keeps the guard its builder chose.
+    When ``infer`` runs it with NumPyro, it was built for another sampler and
+    it states a hard selection guard (``selection_neff_soft_guard`` false),
+    ``infer`` warns (``UserWarning``): it does not configure a target's
+    likelihood, so the target keeps the hard ``-inf`` wall its builder chose,
+    which a gradient sampler cannot cross. Between the nested samplers
+    (dynesty, TinyNS) the hard guard is right for both, so there is no
+    warning.
 
     A target run that writes or resumes a dynesty or TinyNS checkpoint is
     fingerprinted (:func:`~darksirens.inference.run_fingerprint.inference_target_semantic`:
@@ -610,6 +612,8 @@ def infer(
                     plan.labels,
                     n_draws=n_draws,
                     seed=seed,
+                    # the cap is the builder's: infer refuses it for a target
+                    for_target=True,
                 )
             except _MemberAxis as axis:
                 report = _member_guard_report(
