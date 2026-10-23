@@ -368,8 +368,9 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   parameters, after the argument checks and before anything is bound. It
   never falls back to another backend. A plan with no free parameters needs
   no sampler and is never refused.
-- `infer(..., guard_report=True|False|n)` (ordinary analyses; ignored for an
-  `InferenceTarget`) evaluates the bound likelihood's diagnostics
+- `infer(..., guard_report=True|False|n)` (ordinary analyses, and an
+  `InferenceTarget` that exposes what the report reads; see the
+  `InferenceTarget` seam) evaluates the bound likelihood's diagnostics
   (`return_diagnostics=True`, in a separately jitted program) at `n` prior
   draws (32 for `True`) from an RNG of its own seeded from the sampler
   `seed`, before sampling. `result["guard_report"]` records `n_draws`,
@@ -515,6 +516,38 @@ interprets neither; the callable runs only when a fingerprint is built. A
 checkpointing target that sets neither warns, because its fingerprint cannot
 tell its likelihood from another target's with the same plan. Ordinary
 analyses are not fingerprinted by `ds.infer`.
+
+A target may expose what the guard report reads from a binding:
+`darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`, a
+`diagnostics(theta)` method returning the likelihood's diagnostics record
+(`log_likelihood`, `event_mc_variance`, `n_eff`, ...) and the attributes
+`n_events`, `max_likelihood_variance` and `selection_neff_soft_guard`. They are
+looked up without being evaluated; a target missing any of them runs exactly
+as before (same sampler call, same result, no report). With all four,
+`ds.infer(target, guard_report=...)` calls
+`guard_report(target, prior_transform, plan.labels, n_draws=, seed=)`
+unchanged, with the plan's prior transform (the one the sampler then
+receives), 32 draws for `True` and the sampler `seed`, and records it in
+`result["guard_report"]`. When the target's records carry a leading member
+axis (`n_eff` is not a scalar: a likelihood averaged over members), core stops
+at the first record and calls the target's own
+`guard_report(prior_transform, labels, *, n_draws, seed)` method and records
+the mapping it returns; without that method, the report is skipped with a
+`RuntimeWarning` naming the member count. The report is advisory: an error in
+it, or in the target's method, warns (`RuntimeWarning`) and the run continues
+without `result["guard_report"]`. It never changes the target's likelihood,
+the sampler's RNG streams or the run fingerprint. A plan with no free
+parameters gets no report. The name `TARGET_GUARD_REPORT_ATTRIBUTES` is the
+capability marker: a companion that reports at build can skip that report
+when it exists.
+
+A target may record the sampler it was built for as `built_for_sampler`. When
+that differs from the sampler `ds.infer` runs (after the default is
+resolved) and the target states a hard guard (`selection_neff_soft_guard`
+false), `ds.infer` emits a `UserWarning` before sampling: it does not
+configure a target's likelihood, so the target keeps the guard its builder
+chose. A target that does not state its guard, and a plan with no free
+parameters, are not checked.
 
 ### Parameter decoding
 

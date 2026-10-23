@@ -372,7 +372,11 @@ user typed them rather than as a silent `-inf`:
   budget) and the range of each sampled parameter where it fired. It warns
   once when more than 5% of the draws are guarded. The likelihood itself is
   unchanged; `guard_report=False` skips the check and an integer sets the
-  number of draws.
+  number of draws. An `InferenceTarget` that exposes the binding's
+  `diagnostics(theta)`, `n_events`, `max_likelihood_variance` and
+  `selection_neff_soft_guard` gets the same report (a target averaged over
+  members may supply its own `guard_report` method); any other target runs as
+  before.
 - `ds.infer(..., compute_dtype="float32")` (or `bind_analysis(...,
   compute_dtype="float32")`) is an opt-in speed option: the per-sample PE and
   selection weights are evaluated in float32, while every reduction

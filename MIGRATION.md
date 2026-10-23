@@ -1288,3 +1288,62 @@ legacy per-row estimator stays available, unchanged, as `count_ratio="row"`.
   `test_count_ratio_pooled` pins the default (pooled, window 0.02, bit for
   bit the explicit setting), its inert resolution without a count-ratio
   catalog, and that `"row"` keeps the previous record.
+
+### Guard report for an `InferenceTarget` (additive result key for targets that expose diagnostics; no likelihood change)
+
+`ds.infer(..., guard_report=True)` ran the selection-guard report for an
+ordinary analysis only; for an `InferenceTarget` the argument was accepted
+and ignored. A companion target (darksirens-lss) therefore ran its own copy
+of the report when it was built. `ds.infer` now runs core's report for a
+target that exposes what the report reads from a binding.
+
+- **What a target exposes.**
+  `darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`: a
+  `diagnostics(theta)` method returning the likelihood's diagnostics record,
+  and `n_events`, `max_likelihood_variance` and `selection_neff_soft_guard`.
+  They are looked up without being evaluated (`inspect.getattr_static`).
+- **What runs.** With all four, before sampling,
+  `darksirens.inference.guard_report.guard_report(target, prior_transform,
+  plan.labels, n_draws=, seed=)` is called unchanged, with the plan's prior
+  transform (the same object the sampler then receives), 32 draws for `True`
+  or the integer given, and the sampler `seed` (0 when unset). The report goes
+  in `result["guard_report"]`, as for an ordinary analysis, and its
+  `UserWarning` above 5% guarded draws is the same.
+- **Targets averaged over members.** When the first diagnostics record has a
+  leading member axis (`n_eff` is not a scalar), core's per-draw
+  classification does not apply: core stops there and calls the target's
+  `guard_report(prior_transform, labels, *, n_draws, seed)` method, and
+  records the mapping it returns. Without the method the report is skipped
+  with a `RuntimeWarning` naming the member count. The one record core read
+  is the only extra cost.
+- **Built for another sampler.** A target may record the sampler it was
+  built for as `built_for_sampler`. When it differs from the sampler run and
+  the target states a hard guard (`selection_neff_soft_guard` false),
+  `ds.infer` warns (`UserWarning`): a target built for dynesty and run with
+  NumPyro keeps the hard `-inf` wall, which a gradient sampler cannot cross.
+  The warning also fires between the nested samplers (built for tinyns, run
+  with dynesty), where the hard guard is right for both.
+- **Advisory.** An error in the report, or in a target's method, or a method
+  that returns something other than a mapping, warns (`RuntimeWarning`) and
+  the run continues without `result["guard_report"]`. A plan with no free
+  parameters gets no report and no sampler check.
+- **Capability marker.** The name `TARGET_GUARD_REPORT_ATTRIBUTES` exists
+  from this change on; a companion that reports at build can skip its own
+  report when it does (`hasattr(darksirens.inference.guard_report,
+  "TARGET_GUARD_REPORT_ATTRIBUTES")`).
+- **Unchanged.** A target that exposes none of this (every target core builds,
+  `make_catalog_mixture_target` and the host-density seam, and any plain
+  `ds.InferenceTarget(log_likelihood, plan)`) calls the sampler exactly as
+  before: the same arguments, the same result, no new key, no warning. The
+  report never changes a likelihood value, the sampler's RNG streams (it draws
+  from an RNG of its own), the sampler options or the run fingerprint.
+  Ordinary analyses are untouched. Real dynesty runs of a plain and of a
+  diagnosed target (2 parameters, `nlive=60`, `seed=7`) give byte-identical
+  samples, dead points and evidence on main (1022429) and on this change, and
+  the candidate outputs of the inference and catalog-mixture parity probes are
+  byte-identical to main's.
+- **Tests.** `tests/test_target_guard_report.py`: the report equals a direct
+  call of `guard_report`; targets without the attributes call the sampler
+  with the same arguments as the previous path; the member-axis method, the
+  note without it and the failures; the sampler check; and, when
+  darksirens-lss is importable, a real lss `fixed_table_target`.

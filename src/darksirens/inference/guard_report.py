@@ -11,6 +11,11 @@ each, and records the range of the sampled parameters where it fired.
 The report reads the likelihood's own diagnostics record and repeats the
 guard's arithmetic in NumPy; it never changes the likelihood, the sampler's
 RNG streams or NumPy's global RNG state.
+
+``ds.infer`` runs it for an ordinary analysis and, since
+:data:`TARGET_GUARD_REPORT_ATTRIBUTES` exists, for an
+:class:`~darksirens.InferenceTarget` that exposes what it reads from a
+binding (see :func:`darksirens.inference.public.infer`).
 """
 
 from __future__ import annotations
@@ -25,6 +30,20 @@ import numpy as np
 GUARD_REPORT_DRAWS = 32
 # One warning when more than this fraction of the draws is guarded.
 GUARD_WARN_FRACTION = 0.05
+
+#: Capability marker: ``ds.infer`` runs :func:`guard_report` for an
+#: :class:`~darksirens.InferenceTarget` that exposes these attributes, the ones
+#: the report reads from a binding (a ``diagnostics(theta)`` method returning
+#: the likelihood's diagnostics record, ``n_events``,
+#: ``max_likelihood_variance`` and ``selection_neff_soft_guard``), and records
+#: it in ``result["guard_report"]``. A companion that runs its own report when
+#: it builds a target can skip that report when this name exists.
+TARGET_GUARD_REPORT_ATTRIBUTES = (
+    "diagnostics",
+    "n_events",
+    "max_likelihood_variance",
+    "selection_neff_soft_guard",
+)
 
 # The guards a report names, in the order it lists them.
 GUARD_NAMES = ("selection_neff", "pe_mc_variance")
@@ -190,6 +209,7 @@ __all__ = [
     "GUARD_NAMES",
     "GUARD_REPORT_DRAWS",
     "GUARD_WARN_FRACTION",
+    "TARGET_GUARD_REPORT_ATTRIBUTES",
     "classify_guard",
     "guard_report",
 ]

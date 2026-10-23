@@ -99,6 +99,152 @@ def _guard_report_draws(guard_report):
     )
 
 
+_MISSING = object()
+
+
+def _exposes_guard_diagnostics(target):
+    """Whether ``target`` exposes what the guard report reads from a binding.
+
+    The attributes are looked up without evaluating them
+    (``inspect.getattr_static``), so asking runs none of the target's code.
+    A target missing any of them runs exactly as before.
+    """
+    import inspect
+
+    from darksirens.inference.guard_report import TARGET_GUARD_REPORT_ATTRIBUTES
+
+    found = {
+        name: inspect.getattr_static(target, name, _MISSING)
+        for name in TARGET_GUARD_REPORT_ATTRIBUTES
+    }
+    return (
+        all(value is not _MISSING for value in found.values())
+        and callable(found["diagnostics"])
+    )
+
+
+def _optional_target_value(target, name):
+    """``target.<name>``, or ``None`` when it is absent or cannot be read."""
+    try:
+        return getattr(target, name, None)
+    except Exception:
+        return None
+
+
+class _MemberAxis(Exception):
+    """A target's diagnostics record carries a leading member axis."""
+
+
+class _OneRecordPerDraw:
+    """A target as :func:`~darksirens.inference.guard_report.guard_report` reads a binding.
+
+    Every attribute is the target's own, read when the report reads it. A
+    diagnostics record whose ``n_eff`` has a leading member axis (a
+    likelihood averaged over members) raises ``_MemberAxis`` instead of
+    reaching ``classify_guard``, which classifies one record per draw.
+    """
+
+    def __init__(self, target):
+        self._target = target
+
+    @property
+    def n_events(self):
+        return self._target.n_events
+
+    @property
+    def max_likelihood_variance(self):
+        return self._target.max_likelihood_variance
+
+    @property
+    def selection_neff_soft_guard(self):
+        return self._target.selection_neff_soft_guard
+
+    def diagnostics(self, theta):
+        import numpy as np
+
+        record = self._target.diagnostics(theta)
+        shape = np.shape(record.n_eff)
+        if shape:
+            raise _MemberAxis(int(shape[0]))
+        return record
+
+
+def _member_guard_report(target, prior_transform, labels, *, n_draws, seed, n_members):
+    """The report of a target whose diagnostics carry a member axis, or ``None``.
+
+    Calls the target's own ``guard_report(prior_transform, labels, *,
+    n_draws, seed)`` method; without one, or when it fails or returns
+    something other than a mapping, warns and returns ``None``. Never raises:
+    the report is advisory.
+    """
+    from collections.abc import Mapping
+
+    method = _optional_target_value(target, "guard_report")
+    if not callable(method):
+        warnings.warn(
+            "guard report skipped: this target's diagnostics records carry a "
+            f"leading member axis ({n_members} members), which core's report "
+            "does not classify, and the target supplies no "
+            "guard_report(prior_transform, labels, *, n_draws, seed) method; "
+            "the run continues without result['guard_report'].",
+            RuntimeWarning,
+            stacklevel=4,  # the caller of ds.infer
+        )
+        return None
+    try:
+        report = method(prior_transform, labels, n_draws=n_draws, seed=seed)
+        if report is not None and not isinstance(report, Mapping):
+            raise TypeError(
+                "the target's guard_report method returned a "
+                f"{type(report).__name__}, not a mapping"
+            )
+    except Exception as exc:
+        warnings.warn(
+            f"guard report skipped ({type(exc).__name__}: {exc}); the run "
+            "continues without result['guard_report'].",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+        return None
+    return report
+
+
+def _warn_built_for_another_sampler(target, sampler):
+    """Warn when a hard-guard target runs under a sampler it was not built for.
+
+    A target may record the sampler its builder resolved its options for
+    (``built_for_sampler``). Core does not configure a target's likelihood,
+    so a target built for one sampler keeps that guard under another.
+    """
+    built = _optional_target_value(target, "built_for_sampler")
+    if built is None or built == sampler:
+        return
+    soft = _optional_target_value(target, "selection_neff_soft_guard")
+    if soft is None or bool(soft):
+        return
+    if sampler == "numpyro":
+        consequence = (
+            "NumPyro is a gradient sampler and cannot cross that -inf wall (its "
+            "cotangent is zero). Rebuild the target with sampler='numpyro' (the "
+            "soft guard), or run it with the sampler it was built for."
+        )
+    else:
+        consequence = (
+            f"The hard guard is also what 'auto' resolves to for {sampler!r}; "
+            f"rebuild the target with sampler={sampler!r}, or run it with the "
+            "sampler it was built for, so that the two agree."
+        )
+    warnings.warn(
+        f"this InferenceTarget was built for sampler {built!r} and ds.infer runs "
+        f"it with {sampler!r}. ds.infer does not configure a target's "
+        "likelihood, so the target keeps the hard selection N_eff guard its "
+        "builder chose (-inf where the Monte-Carlo estimate of the likelihood is "
+        f"too noisy). {consequence}",
+        UserWarning,
+        stacklevel=4,  # the caller of ds.infer
+    )
+
+
 def _is_float32(compute_dtype):
     """Whether ``compute_dtype`` names float32 (the binder validates every value)."""
     import numpy as np
@@ -366,15 +512,34 @@ def infer(
     sampler reports a finite ``logZ``, ``logZ_corrected``. The raw ``logZ``
     stays exactly as the sampler reported it.
 
-    ``guard_report`` (default ``True``) evaluates an ordinary analysis's
-    likelihood diagnostics at 32 prior draws before sampling (an integer sets
-    the number of draws, ``False`` skips it) and records in
-    ``result["guard_report"]`` which likelihood guard fired and the range of
-    the sampled parameters where it did
-    (:func:`darksirens.inference.guard_report.guard_report`). It warns once
-    when more than 5% of the draws are guarded. It never changes the
-    likelihood or the sampler's random streams. It is ignored for an
-    :class:`InferenceTarget`, whose likelihood core cannot inspect.
+    ``guard_report`` (default ``True``) evaluates the likelihood diagnostics
+    at 32 prior draws before sampling (an integer sets the number of draws,
+    ``False`` skips it) and records in ``result["guard_report"]`` which
+    likelihood guard fired and the range of the sampled parameters where it
+    did (:func:`darksirens.inference.guard_report.guard_report`). It warns
+    once when more than 5% of the draws are guarded. It never changes the
+    likelihood or the sampler's random streams, and it is advisory: an error
+    in it warns (``RuntimeWarning``) and the run continues without it.
+
+    It runs for an ordinary analysis and for an :class:`InferenceTarget`
+    that exposes what the report reads from a binding
+    (:data:`~darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`:
+    a ``diagnostics(theta)`` method returning the likelihood's diagnostics
+    record, ``n_events``, ``max_likelihood_variance`` and
+    ``selection_neff_soft_guard``); the report is then core's, called
+    unchanged with the plan's prior transform and labels. When the target's
+    records carry a leading member axis (a likelihood averaged over
+    members), core calls the target's own ``guard_report(prior_transform,
+    labels, *, n_draws, seed)`` method instead and records the mapping it
+    returns; a target without that method is run without a report, with a
+    ``RuntimeWarning`` saying so. A target that exposes none of this runs
+    exactly as before.
+
+    A target may record the sampler it was built for (``built_for_sampler``).
+    When that differs from the sampler run here and the target states a hard
+    selection guard (``selection_neff_soft_guard`` false), ``infer`` warns
+    (``UserWarning``): it does not configure a target's likelihood, so the
+    target keeps the guard its builder chose.
 
     A target run that writes or resumes a dynesty or TinyNS checkpoint is
     fingerprinted (:func:`~darksirens.inference.run_fingerprint.inference_target_semantic`:
@@ -419,13 +584,62 @@ def infer(
                 "InferenceTarget; build the target's likelihood with them instead"
             )
         sampler = _resolve_sampler(sampler, plan)
-        return _execute_target(
+        if len(plan.labels):
+            _warn_built_for_another_sampler(analysis, sampler)
+
+        prior_transform = None
+        report = None
+        # Only a target that exposes what the report reads from a binding;
+        # any other target runs exactly as before.
+        if (
+            n_guard_draws != 0
+            and len(plan.labels)
+            and _exposes_guard_diagnostics(analysis)
+        ):
+            from darksirens.inference.guard_report import GUARD_REPORT_DRAWS
+            from darksirens.inference.guard_report import guard_report as _guard_report
+
+            prior_transform = _prior_transform(plan)
+            n_draws = GUARD_REPORT_DRAWS if n_guard_draws is None else n_guard_draws
+            seed = sampler_options.get("seed", _SAMPLER_DEFAULTS["seed"])
+            try:
+                seed = 0 if seed is None else int(seed)
+                report = _guard_report(
+                    _OneRecordPerDraw(analysis),
+                    prior_transform,
+                    plan.labels,
+                    n_draws=n_draws,
+                    seed=seed,
+                )
+            except _MemberAxis as axis:
+                report = _member_guard_report(
+                    analysis,
+                    prior_transform,
+                    plan.labels,
+                    n_draws=n_draws,
+                    seed=seed,
+                    n_members=axis.args[0],
+                )
+            except Exception as exc:
+                # The report is advisory: it never stops a run the sampler can make.
+                warnings.warn(
+                    f"guard report skipped ({type(exc).__name__}: {exc}); the run "
+                    "continues without result['guard_report'].",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+
+        result = _execute_target(
             analysis.log_likelihood,
             analysis.parameters,
             sampler=sampler,
             sampler_options=sampler_options,
             target=analysis,
+            prior_transform=prior_transform,
         )
+        if report is not None:
+            result["guard_report"] = report
+        return result
 
     if events is None or injections is None:
         raise TypeError(
