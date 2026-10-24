@@ -99,6 +99,31 @@ def test_inadmissible_map_warns_and_keeps_rejection(
     assert got == []
 
 
+@pytest.mark.parametrize(
+    "kind,lower,upper,changes_density",
+    [
+        ("ordered_le", [0.0, 0.1], [1.0, 1.0], False),
+        ("simplex", [0.0, 0.0], [1.0, 2.0], False),
+        # Rejection leaves the uniform triangle, not x_a ~ U(lo, x_b).
+        ("conditional_upper", [0.0, 0.0], [1.0, 0.9], True),
+    ],
+)
+def test_fallback_warning_says_when_rejection_changes_the_prior_density(
+    monkeypatch, kind, lower, upper, changes_density
+):
+    """Rejection restricts the support only. For conditional_upper the warning
+    used to call that a logZ offset alone; the posterior changes too."""
+    _install(monkeypatch, ((kind, ("a", "b")),))
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        joint.resolve_joint_prior_constraints(
+            "fake", ["a", "b"], lower, upper, [("uniform", None, None)] * 2
+        )
+    (message,) = [str(item.message) for item in seen]
+    assert message.startswith(f"joint prior constraint {kind}('a', 'b') cannot be")
+    assert ("prior density changes as well" in message) is changes_density
+
+
 def test_model_lookup_failure_returns_no_maps(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("missing model")

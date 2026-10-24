@@ -288,9 +288,10 @@ What each gate now checks:
   mass-ratio range, for the fiducial and a narrow taper; the registry golden
   file holds only parametric models and does not cover this change.
 
-Known gaps kept on purpose: `real-backends.yml` still pipes pytest into `tee`
-without `pipefail`, so a failing test there does not by itself fail that job; only the names of the package-root API are frozen, not their
-signatures; the example checks are smoke checks, not numerical anchors.
+Known gaps kept on purpose: only the names of the package-root API are
+frozen, not their signatures; the example checks are smoke checks, not
+numerical anchors. (`real-backends.yml` pipes pytest into `tee` under
+`set -o pipefail`, so a failing test there fails the job.)
 
 Local measurement on the final code tree of the stack (`519100d`, the head of
 #22), with the same optional backends as above: 759 passed, 1 skipped (the
@@ -418,6 +419,38 @@ With no pin, the lowered StableHLO of a field target (the consumer's own
 P12.4 target module and a field-style target, depth 0.3 and none, blocks
 single and 131072/32, likelihood and diagnostics) is byte-identical to the
 previous release's, each lowered in a fresh process.
+
+### Review fixes (2026-10-20)
+
+The twelve review-fix packages (MIGRATION.md, "Review fixes (2026-10-20)")
+were merged on `fix/review-2026-10-20` and measured there locally (CPU,
+`JAX_PLATFORMS=cpu`, the validated stack, the CI job environment), not by
+GitHub Actions:
+
+- **Full suite**, one pytest process per test file (the slowest file split
+  in two, every process under 9 minutes): 1970 tests, 1968 passed, 1 skipped
+  (the golden-regeneration guard), 1 expected failure, 0 failed. The expected
+  failure is the photometric null under the default pooled count ratio, a
+  known defect that the test measures (MIGRATION.md, "Completeness and the
+  selection budget"). The `slow` marker's 81 tests pass (`pytest -m slow`,
+  the slow-tests job; its two largest files run in chunks).
+- **CI parity probes.** Every workflow step that runs a `tools/` script, an
+  inline parity comparison or a lint was run against the frozen reference
+  (28 jobs): 28 pass. The samplers package changed three items on purpose:
+  NumPyro's chained-constraint error text, the lognormal NUTS site's bounded
+  transform, and the `conditional_upper` rejection-fallback warning. The
+  phase6q, phase6s and phase7c1 probes declare them (MIGRATION.md, "Samplers
+  and prior transforms"): each arm checks its declared form and reports the
+  reference's, so those gates compare everything else exactly. Run on
+  `main`'s source, the candidate arms of the three probes stop with the
+  declaration's error, so a gate still fails if the declared change goes
+  missing. The three jobs' focused test files pass (12, 4 and 11 tests).
+- **Against `main` (1022429).** The same probes on `main` pass 28 of 28, and
+  85 of their 88 output files are byte-identical to this tree's; the three
+  that differ are the field-mixture probe's two records (a new
+  `soft_guard_cap` key) and the nested-sampler startup check's remedy text.
+  The taper shoulder fix (MIGRATION.md, "Populations") changes no probe
+  output.
 
 ## Permanent firewall
 

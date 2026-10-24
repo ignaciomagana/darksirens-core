@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from darksirens.inference.nested_output import termination_record
+from darksirens.inference.numpyro_static import joint_constraints_hold
 
 
 def _numpyro_diagnostics(extra, max_tree_depth: int, target_accept: float):
@@ -55,6 +56,7 @@ def run_numpyro(
     upper = plan.upper
     conditional_pairs = tuple(plan.conditional_pairs)
     conditioned = set(plan.conditioned)
+    rejected = tuple(plan.rejected_constraints)
 
     def _site(i, name):
         kind, kloc, kscale = ("uniform", None, None)
@@ -75,17 +77,27 @@ def run_numpyro(
         if kind == "lognormal":
             loc = 0.0 if kloc is None else float(kloc)
             sc = 1.0 if kscale is None else float(kscale)
+            # The nested transform's floor, so both backends draw one prior.
+            log_lo = jnp.log(jnp.clip(lower[i], 1e-300, None))
+            log_hi = jnp.log(jnp.clip(upper[i], 1e-300, None))
             base = dist.TruncatedNormal(
                 loc=loc,
                 scale=sc,
-                low=jnp.log(lower[i]),
-                high=jnp.log(upper[i]),
+                low=log_lo,
+                high=log_hi,
             )
+            # The truncation must also be the site's support: with
+            # ExpTransform's default real domain the support is (0, inf),
+            # NUTS maps it with exp, and the truncated base keeps a finite
+            # log_prob outside [log_lo, log_hi] (no validate_args), so the
+            # chain left [lower, upper] on the untruncated density.
             return numpyro.sample(
                 name,
                 dist.TransformedDistribution(
                     base,
-                    dist.transforms.ExpTransform(),
+                    dist.transforms.ExpTransform(
+                        domain=dist.constraints.interval(log_lo, log_hi)
+                    ),
                 ),
             )
         if kind == "beta":
@@ -116,6 +128,13 @@ def run_numpyro(
         theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
         log_l = likelihood(theta)
         numpyro.factor("likelihood", log_l)
+        if rejected:
+            # The rejection the static plan announces. An ordinary analysis's
+            # likelihood already rejects there (population and angular valid
+            # masks), so this adds exactly 0.0 or repeats its -inf; an
+            # InferenceTarget's likelihood is the companion's own and may not.
+            valid = joint_constraints_hold(rejected, theta)
+            numpyro.factor("joint_prior", jnp.where(valid, 0.0, -jnp.inf))
 
     init_values = dict(initialization.init_values)
     kernel = NUTS(

@@ -21,6 +21,7 @@ from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.selection.catalog import (
     GaussianMagnitudeSelection,
     SchechterMagnitudeSelection,
+    TabulatedSelection,
     selection_budget_audit,
 )
 
@@ -180,3 +181,76 @@ def test_audit_rejects_an_invalid_selection_model():
     with pytest.raises(ValueError, match="sigma_M"):
         selection_budget_audit(cosmo, params, _catalog(),
                                GaussianMagnitudeSelection(21.0, -20.4, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# budget="likelihood": the count the likelihood implies (depth, row fraction)
+
+
+def _depth_case():
+    cosmo = CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0)
+    params = CatalogParameters(n0=1.0e-2, delta=0.0, sigma_kde=0.0, z_depth=0.25)
+    return cosmo, params, GaussianMagnitudeSelection(22.0, -20.2, 1.0)
+
+
+def _implied(cosmo, params, model, fraction=None):
+    """``sum_p (N_exp - N_miss,p)`` of the likelihood's own curves."""
+    from darksirens.catalog.completeness import build_completion_state
+    from darksirens.selection.footprint import selection_missing_host_curves
+
+    cat = _catalog()
+    curves = selection_missing_host_curves(cosmo, params, cat, model, fraction, gather=False)
+    dN_exp = np.asarray(build_completion_state(cosmo, params, cat).dN_exp)
+    N_exp = float(np.trapezoid(dN_exp, np.asarray(zgrid)) if hasattr(np, "trapezoid")
+                  else np.trapz(dN_exp, np.asarray(zgrid)))
+    rows = np.asarray(cat.ngals) > 0 if fraction is None else slice(None)
+    return float(np.sum(N_exp - np.asarray(curves.N_miss)[rows]))
+
+
+def test_the_likelihood_budget_is_the_count_the_likelihood_implies():
+    """With ``z_depth = 0.25`` the likelihood's completeness is 0 above the
+    depth: the frozen budget, which integrates the magnitude curve over the
+    whole grid, is 18.6 times its prediction for a self-consistent budget;
+    ``budget="likelihood"`` is that prediction, and a table of the same curve
+    gives the same."""
+    cosmo, params, model = _depth_case()
+    implied = _implied(cosmo, params, model)
+    frozen = selection_budget_audit(cosmo, params, _catalog(), model)
+    got = selection_budget_audit(cosmo, params, _catalog(), model, budget="likelihood")
+    assert frozen["model_N_obs"] / implied == pytest.approx(18.6, rel=0.01)
+    assert got["model_N_obs"] == pytest.approx(implied, rel=1e-12)
+    assert got["model_N_obs_sky"] == pytest.approx(48 / 3 * implied, rel=1e-12)
+    from darksirens.selection.catalog import selection_curve
+
+    z = np.asarray(zgrid)
+    curve = np.clip(np.asarray(selection_curve(zgrid, cosmo, model)), 0.0, 1.0)
+    table = TabulatedSelection(tuple(z[z <= 0.25]), tuple(curve[z <= 0.25]))
+    twin = selection_budget_audit(cosmo, params, _catalog(), table, budget="likelihood")
+    assert twin["model_N_obs"] == pytest.approx(implied, rel=1e-6)
+
+
+def test_the_likelihood_budget_takes_the_row_fraction_and_the_depth_mass():
+    """The footprint is the summed row fraction, and the default observed
+    count is each row's galaxy count times its kernel mass below the depth
+    (galaxies at 0.31 and 0.4 lie above 0.25)."""
+    from darksirens.catalog.redshift import build_catalog_kernel_state
+
+    cosmo, params, model = _depth_case()
+    fraction = np.asarray([1.0, 0.5, 0.2, 0.1])
+    got = selection_budget_audit(
+        cosmo, params, _catalog(), model, budget="likelihood", row_fraction=fraction
+    )
+    assert got["model_N_obs"] == pytest.approx(_implied(cosmo, params, model, fraction), rel=1e-12)
+    mass = np.exp(np.asarray(build_catalog_kernel_state(cosmo, params, _catalog()).log_depth_mass))
+    want = float(np.sum(np.asarray(_catalog().ngals) * mass))
+    assert got["N_obs_total"] == pytest.approx(want, rel=1e-14)
+    assert 3.0 < got["N_obs_total"] < 6.0
+    # Without a depth the likelihood budget is the frozen one.
+    plain = params._replace(z_depth=None)
+    a = selection_budget_audit(cosmo, plain, _catalog(), model)
+    b = selection_budget_audit(cosmo, plain, _catalog(), model, budget="likelihood")
+    assert a == b
+    with pytest.raises(ValueError, match="row_fraction applies only to budget='likelihood'"):
+        selection_budget_audit(cosmo, params, _catalog(), model, row_fraction=fraction)
+    with pytest.raises(ValueError, match="budget must be"):
+        selection_budget_audit(cosmo, params, _catalog(), model, budget="legacy")

@@ -18,8 +18,17 @@ without one). A K-catalog mixture with weights ``w_k`` is the host density
 with ``p_k`` the sample's row in catalog k's own pixelization. With one
 catalog ``Z`` is common to every PE and selection sample at fixed parameters
 and cancels between the event evidences and ``N log mu``, so it is not
-evaluated; with ``K >= 2`` the ratios ``w_k / Z_k`` are the catalogs' host
-fractions and must be evaluated on every proposal.
+evaluated (except under the soft Neff guard, whose wall does not cancel it:
+:mod:`darksirens.likelihood.mixture`); with ``K >= 2`` the ratios
+``w_k / Z_k`` must be evaluated on every proposal. ``n_k / Z_k`` is the host
+probability of the sample's row of catalog k, a mass per pixel: when every
+catalog has the same nside the pixel area is common to every branch and
+cancels, and the ``w_k`` are the catalogs' host fractions. When the nsides
+differ, branch k carries a factor of its pixel area ``A_k`` and the weights
+act as ``w_k A_k / sum_j w_j A_j``;
+``ds.model(..., mixture_density="steradian")`` (opt-in) multiplies each
+branch by ``A_min / A_k`` (``A_min`` the smallest pixel area, a common
+scale), so the ``w_k`` are host fractions whatever the nsides.
 
 ``Z_k`` is computed in one of two forms (:data:`FIELD_NORMALIZERS`):
 
@@ -27,7 +36,9 @@ fractions and must be evaluated on every proposal.
     The full-sky row sums themselves: the completion curves of every row of
     the catalog's full sky, with the same arithmetic as the numerator's rows.
     Exact for every completeness; it is the only exact form for the per-row
-    count-ratio completeness, whose clip at 1 does not factor.
+    count-ratio completeness (``count_ratio="row"``), whose clip at 1 does not
+    factor, and the only one implemented for the pooled count ratio (the
+    default), which factors as ``C_p = f_p clip(R)``.
 ``"moments"``
     For ``completeness="selection"`` only. With ``C_p(z) = f_p Cbar(z)`` and
     ``dN_exp`` the same in every row, ``sum_p dN_miss,p(z) = dN_exp(z) [N_pix -
@@ -101,9 +112,12 @@ def normalized_state(state, log_Z) -> IncompleteCatalogPriorState:
     returns ``numerator - log_Z[row]``; with every row's ``log_Z`` replaced by
     the catalog's survey-global ``log Z`` it returns ``n_k(z | p) / Z_k``.
     ``state`` is a :class:`~darksirens.catalog.field.FieldIncompleteCatalogPriorState`.
+    The NaN that a failed pin probe, galaxy list or kernel window puts on the
+    state's row masses is added to ``log_Z`` (:func:`poison_of`), so the
+    evaluator returns NaN rather than a value from a stale kernel.
     """
 
-    log_Z = jnp.asarray(log_Z, dtype=state.log_row_mass.dtype)
+    log_Z = jnp.asarray(log_Z, dtype=state.log_row_mass.dtype) + poison_of(state.log_row_mass)
     return IncompleteCatalogPriorState(
         kernels=state.kernels,
         log_Nobs=state.log_Nobs,
@@ -195,9 +209,16 @@ class MissingHostContext(NamedTuple):
     count density per row on the redshift grid, ``depth_mask`` the grid nodes
     at or below the survey depth (``None`` without one), ``selection_curve``
     the clipped radial ``Cbar(z)`` of ``completeness="selection"`` (``None``
-    for the count ratio), ``row_fraction`` the coverage fraction of this
-    view's rows (``None`` without one) and ``observed_total`` the full-sky
-    ``sum_p N_obs,p m_p`` (``None`` for the compact view).
+    for the count ratio), ``row_fraction`` the coverage fraction ``f_p`` of
+    this view's rows (``None`` without one; for the pooled count ratio the
+    pooled cache's, 1 in every row without a ``row_fraction``) and
+    ``observed_total`` the full-sky ``sum_p N_obs,p m_p`` (``None`` for the
+    compact view). ``completeness_curve`` is the clipped radial curve
+    ``Cbar(z)`` of a completeness that factors as ``C_p(z) = f_p Cbar(z)``:
+    the selection curve of ``completeness="selection"`` or the pooled ratio
+    of the pooled count ratio (the ``ds.model`` default), so that ``sum_p
+    N_miss,p = int dN_exp [N_pix - S1 Cbar] dz`` below the depth with ``S1 =
+    sum_p f_p``; ``None`` for the per-row count ratio, which does not factor.
     """
 
     catalog_index: int
@@ -213,6 +234,7 @@ class MissingHostContext(NamedTuple):
     selection_curve: Any
     row_fraction: Any
     observed_total: Any
+    completeness_curve: Any = None
 
 
 class MissingHostExtension(Protocol):
@@ -240,17 +262,22 @@ class MissingHostExtension(Protocol):
         ``context.data``.
     ``missing_density(context, dN_miss)``
         The modulated ``(N_rows, N_z)`` missing-host density of the view's
-        rows (for example ``Q_k(p, z) * dN_miss``). Core recomputes each
+        rows (for example ``Q_k(p, z) * dN_miss``). Core clips it at 0 (a
+        host density is not negative; for example ``Q = 1 + b delta_g``
+        below 0 in a void gives no missing hosts there) and recomputes each
         row's ``N_miss`` from it by the trapezoid on the redshift grid, for
         the numerator's row masses and for ``Z_k`` alike. Return ``dN_miss``
         unchanged for no modulation.
     ``missing_total(context)``
         ``None``, or ``sum_p N_miss,p`` of the modulated full-sky density
-        (a scalar), when the extension can compute it more cheaply than the
-        full-sky curves (for example from precomputed moments). ``None`` makes
+        (the clipped one), when the extension can compute it more cheaply
+        than the full-sky curves (for example from precomputed moments). It
+        is a 0-d scalar (any other shape is refused), and a non-finite or
+        negative value makes the likelihood ``-inf``. ``None`` makes
         core build the full-sky curves, modulate them with
         ``missing_density`` and sum them (the direct form). Called with the
-        ``"full"`` context only, and only for ``K >= 2``.
+        ``"full"`` context only, and only where ``Z_k`` is evaluated
+        (``K >= 2``, or one catalog under the soft Neff guard).
     ``provenance()`` (optional)
         A JSON-like mapping (table hashes, realization ids, its mode) for the
         run fingerprint.
@@ -267,7 +294,14 @@ class MissingHostExtension(Protocol):
 
 
 def modulated_curves(curves, dN_miss):
-    """``curves`` with ``dN_miss`` replaced and each row's ``N_miss`` recomputed."""
+    """``curves`` with ``dN_miss`` replaced and each row's ``N_miss`` recomputed.
+
+    A negative modulated density is clipped at 0 before the trapezoid: the
+    per-sample numerator reads no missing hosts where the density is not
+    positive, so the row masses and ``Z_k`` must integrate the same clipped
+    density (the frozen reference's ``max(1 + b delta_g, 0)`` modulation).
+    A NaN stays NaN and poisons the likelihood.
+    """
 
     if isinstance(curves, GatheredCompletionCurves):
         raise TypeError(
@@ -280,6 +314,7 @@ def modulated_curves(curves, dN_miss):
             "missing_density must return the shape it was given, "
             f"{tuple(curves.dN_miss.shape)}, got {tuple(dN_miss.shape)}"
         )
+    dN_miss = jnp.maximum(dN_miss, 0.0)
     return curves._replace(dN_miss=dN_miss, N_miss=jnp.trapezoid(dN_miss, zgrid, axis=-1))
 
 

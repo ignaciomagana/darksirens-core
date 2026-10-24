@@ -46,6 +46,7 @@ from darksirens.catalog.types import (
     CatalogMixtureParameters,
     CatalogParameters,
     GalaxyCatalog,
+    check_survey_depth,
     physical_n0,
 )
 from darksirens.cosmology.distances import threads_distance_table
@@ -124,7 +125,23 @@ def _sky_vectors(columns):
     return cos_dec * np.cos(ra), cos_dec * np.sin(ra), np.sin(dec)
 
 
-def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
+def _pixel_ids(unique_pixels, nside: int | None = None):
+    """Global HEALPix ids as int32, or as int64 where an id may not fit.
+
+    A RING id reaches ``12 nside^2 - 1``, above the int32 range from
+    ``nside = 13378``: such ids (or, given ``nside``, any id of that sky) are
+    kept in int64, so the bright sky gate compares the real id with the
+    counterpart's. Every smaller sky keeps the int32 ids, and its program.
+    """
+    ids = np.asarray(unique_pixels, dtype=np.int64)
+    limit = np.iinfo(np.int32).max
+    wide = (nside is not None and 12 * int(nside) ** 2 - 1 > limit) or (
+        ids.size > 0 and int(ids.max()) > limit
+    )
+    return jnp.asarray(ids, dtype=jnp.int64 if wide else jnp.int32)
+
+
+def _jax_catalog(catalog: GalaxyCatalog, *, nside: int | None = None) -> GalaxyCatalog:
     return GalaxyCatalog(
         apix=jnp.asarray(catalog.apix),
         zgals=jnp.asarray(catalog.zgals),
@@ -134,7 +151,7 @@ def _jax_catalog(catalog: GalaxyCatalog) -> GalaxyCatalog:
         unique_pixels=(
             None
             if catalog.unique_pixels is None
-            else jnp.asarray(catalog.unique_pixels, dtype=jnp.int32)
+            else _pixel_ids(catalog.unique_pixels, nside)
         ),
         galaxy_index=(
             None
@@ -167,7 +184,9 @@ def _bright_pixel_view(nside: int, global_pe):
         ngals=np.zeros(n_rows, dtype=np.int32),
         unique_pixels=unique_pixels,
     )
-    return _jax_catalog(catalog), np.asarray(sample_to_row, dtype=np.int32)
+    # The counterpart's own pixel may be above the int32 range even when no
+    # PE sample's is, so the id width follows the sky's.
+    return _jax_catalog(catalog, nside=nside), np.asarray(sample_to_row, dtype=np.int32)
 
 
 def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
@@ -209,8 +228,8 @@ class DecodedParameters(NamedTuple):
         (``10**log10n0``, times ``(H0 / 100)**3`` under
         ``model(..., n0_units="h_scaled")``; ``1.0`` for
         ``completeness="complete"``, which has no ``log10n0``), a parameter
-        fixed with ``model(..., fixed_survey={...})`` enters as a 0-d array of
-        ``theta``'s dtype, and ``z_depth`` is the catalog's survey depth (a
+        fixed with ``model(..., fixed_survey={...})`` enters as a 0-d float64
+        array, and ``z_depth`` is the catalog's survey depth (a
         Python float or ``None``, never traced). ``selection`` is ``None``,
         or for ``completeness="selection"`` the analysis's runtime selection
         model with every nuisance sampled through ``survey_priors`` replaced
@@ -238,10 +257,29 @@ class DecodedParameters(NamedTuple):
     angular: Any
 
 
+def _float64_theta(theta):
+    """``theta`` as a float64 array; a complex or boolean ``theta`` raises ``TypeError``.
+
+    The fixed values of the plan enter as 0-d arrays of ``theta``'s dtype, so
+    an integer ``theta`` (an H0 grid from ``np.arange``) would truncate them
+    and a float32 one round them, which under a kernel pin makes every call
+    ``-inf``. A float64 ``theta`` is returned as it is, so its program is
+    unchanged.
+    """
+    theta = jnp.asarray(theta)
+    if theta.dtype == jnp.bool_ or not (
+        jnp.issubdtype(theta.dtype, jnp.floating) or jnp.issubdtype(theta.dtype, jnp.integer)
+    ):
+        raise TypeError(f"theta must hold real numbers, got dtype {theta.dtype}")
+    if theta.dtype != jnp.float64:
+        theta = theta.astype(jnp.float64)
+    return theta
+
+
 def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> DecodedParameters:
     """The one decoder: the bound likelihood and :func:`decode_parameters` both call it."""
     plan = analysis.parameters
-    theta = jnp.asarray(theta)
+    theta = _float64_theta(theta)
     if theta.ndim != 1 or int(theta.shape[0]) != len(plan.labels):
         raise ValueError(
             f"theta must have shape ({len(plan.labels)},), got {tuple(theta.shape)}"
@@ -258,8 +296,9 @@ def _decode_theta(analysis: Analysis, theta, *, z_depth: float | None) -> Decode
 
     # Fixed values are Python floats of the plan: inside the bound jit they
     # are trace-time constants, never sampled coordinates. Each enters as a
-    # 0-d array of theta's dtype, the type a sampled coordinate has, so the
-    # decoded values and every later operation match the all-sampled decode.
+    # 0-d array of theta's dtype (float64, above), the type a sampled
+    # coordinate has, so the decoded values and every later operation match
+    # the all-sampled decode.
     start = plan.n_cosmology
     if plan.fixed_population is not None:
         population = jnp.asarray(plan.fixed_population)
@@ -429,7 +468,10 @@ def decode_parameters(analysis, theta, *, z_depth=BINDING_DEPTH) -> DecodedParam
     eager, a jitted and a vmapped call can differ in the last bit or two
     (below 1e-15 relative). Inside one program it is the bound likelihood's
     value. A ``theta`` that is not one-dimensional with one entry per label
-    raises ``ValueError``.
+    raises ``ValueError``. A ``theta`` of integers or of another float dtype
+    (float32) is converted to float64 before it is decoded, here and in the
+    bound likelihood, so it decodes (and evaluates) as the float64 coordinate
+    of the same values; a complex or boolean ``theta`` raises ``TypeError``.
     """
     if isinstance(analysis, BoundAnalysis):
         if z_depth is not BINDING_DEPTH:
@@ -496,10 +538,19 @@ class BoundAnalysis:
     # every other binding, whose call and program are then unchanged.
     model_operands: Any = None
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
+    # The settings a trace of the likelihood reads, as they were when the
+    # binding was made (see _require_trace_settings).
+    _trace_settings: Any = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        object.__setattr__(
+            self,
+            "selection_neff_soft_guard",
+            _soft_guard_flag(self.selection_neff_soft_guard),
+        )
         if isinstance(self.analysis.redshift, FieldCatalogMixtureRedshift):
             _require_admissible_mixture_pins(self.analysis, self.model_operands)
+        _require_bound_operands(self)
         if self.kernel_pin is not None:
             _require_admissible_kernel_pin(
                 self.analysis, self.catalog, self.kernel_pin, self.z_depth
@@ -514,12 +565,14 @@ class BoundAnalysis:
                     spin_block=self.gw_pe.spin is not None,
                 ),
             )
+        _require_column_dtype(self)
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python
         # closures, and eager ``lax.scan`` traces per body-function object, so
         # an explicit ``sel_batch_size`` or ``pe_event_block`` re-traced and
         # re-compiled the scans on every call and JAX's primitive-dispatch
         # cache kept every new executable. Under one jit they trace once.
+        object.__setattr__(self, "_trace_settings", _trace_settings())
         object.__setattr__(self, "_log_likelihood", _jit_log_likelihood(self))
 
     @property
@@ -540,6 +593,8 @@ class BoundAnalysis:
         state = dict(self.__dict__)
         state.pop("_log_likelihood", None)
         state.pop("_diagnostics", None)
+        # Taken again on unpickling, in the process that traces the programs.
+        state.pop("_trace_settings", None)
         return state
 
     def __setstate__(self, state):
@@ -574,7 +629,25 @@ class BoundAnalysis:
         ``event_log_evidence``, ``event_mc_variance``, ``log_mu``, ``n_eff``,
         ``selection_log_correction``): the same likelihood function evaluated
         with ``return_diagnostics=True``, in its own jitted program, built on
-        the first call. :meth:`__call__` and its program are untouched.
+        the first call. :meth:`__call__` and its program are untouched. Both
+        programs are traced under the settings the binding was made with: a
+        first trace after ``configure_normalization_grids`` or the
+        ``missing_density`` of ``configure_catalog_evaluation`` changed them
+        raises ``RuntimeError`` (rebind, or restore them).
+        For a one-catalog field analysis (``catalog_sky_weighting="field"``)
+        under the hard guard, ``log_mu`` and every ``event_log_evidence`` are
+        unnormalised, each offset by ``+log Z_1``, which cancels from the
+        likelihood; under the soft guard (``selection_neff_soft_guard=True``)
+        the density is ``n_1 / Z_1`` and they are normalised (the frozen
+        reference normalises them under either guard).
+        """
+        return self._diagnostics_at(theta, self.gw_selection)
+
+    def _diagnostics_at(self, theta, gw_selection):
+        """:meth:`diagnostics` with another selection operand of the same shapes.
+
+        The same compiled program (the guard report's injection-coverage
+        check passes the injections with some marked invalid).
         """
         fn = self.__dict__.get("_diagnostics")
         if fn is None:
@@ -583,7 +656,7 @@ class BoundAnalysis:
         operands = (
             jnp.asarray(theta),
             self.gw_pe,
-            self.gw_selection,
+            gw_selection,
             self.catalog,
             self.observed_density_cache,
         )
@@ -655,6 +728,8 @@ class BoundAnalysis:
         likelihood's diagnostics record instead of its value; the default
         call passes the likelihood exactly the keywords it always did.
         """
+        # Runs when a program is traced, never per compiled call.
+        _require_trace_settings(self)
         cosmology, population, catalog_params, angular = _decode_theta(
             self.analysis, theta, z_depth=self.z_depth
         )
@@ -677,8 +752,9 @@ class BoundAnalysis:
             angular_params=angular,
         )
         if self.compute_dtype is not None:
-            # Only spectral and incomplete-catalog bindings carry one (checked
-            # in __post_init__); the default call is left exactly as it was.
+            # Only spectral, incomplete-catalog and field-weighted bindings
+            # without a complete catalog carry one (checked in
+            # __post_init__); the default call is left exactly as it was.
             ordinary_common["compute_dtype"] = self.compute_dtype
         if return_diagnostics:
             bright_common["return_diagnostics"] = True
@@ -726,6 +802,7 @@ class BoundAnalysis:
                 completeness=self.analysis.redshift.completeness,
                 normalizer=self.analysis.redshift.normalizer,
                 host_mass=self.analysis.redshift.host_mass,
+                mixture_density=getattr(self.analysis.redshift, "mixture_density", "pixel"),
                 **ordinary_common,
             )
 
@@ -770,6 +847,47 @@ class BoundAnalysis:
             )
 
         raise TypeError(f"unsupported analysis redshift type {type(self.analysis.redshift)!r}")
+
+
+def _require_column_dtype(bound: BoundAnalysis) -> None:
+    """Keep a binding's per-sample columns in the dtype its program reads.
+
+    ``bind_analysis(..., compute_dtype="float32")`` rounds the columns once,
+    refusing a value below the float32 normal range
+    (:func:`~darksirens.likelihood.mixed_precision.cast_event`). A binding
+    rebuilt with ``dataclasses.replace(bound, compute_dtype="float32")`` is
+    rounded and checked here the same way (a no-op for a float32 binding):
+    otherwise the weight would round the float64 columns itself and drop a
+    flushed sample silently. The default program on float32 columns
+    (``replace(bound32, compute_dtype=None)``) is refused: its values are the
+    rounded data's, under the float64 run fingerprint.
+    """
+    if bound.compute_dtype is not None:
+        from darksirens.likelihood.mixed_precision import cast_event
+
+        for name in ("gw_pe", "gw_selection"):
+            object.__setattr__(bound, name, cast_event(getattr(bound, name), bound.compute_dtype))
+        return
+    bits = jnp.finfo(jnp.result_type(float)).bits
+    for name in ("gw_pe", "gw_selection"):
+        event = getattr(bound, name)
+        dtypes = {
+            column: jnp.result_type(value)
+            for column, value in zip(event._fields, event)
+            if value is not None
+        }
+        narrow = [
+            column
+            for column, dtype in dtypes.items()
+            if jnp.issubdtype(dtype, jnp.floating) and jnp.finfo(dtype).bits < bits
+        ]
+        if narrow:
+            raise ValueError(
+                f"compute_dtype=None runs the default float64 program, but {name} "
+                f"columns {narrow} are {dtypes[narrow[0]]} (rounded by a "
+                "compute_dtype='float32' binding); bind again with "
+                "bind_analysis(..., compute_dtype=None) for the default program"
+            )
 
 
 def _jit_log_likelihood(bound: BoundAnalysis):
@@ -825,6 +943,179 @@ def _jit_log_likelihood_diagnostics(bound: BoundAnalysis):
         )
 
     return log_likelihood_diagnostics
+
+
+def _soft_guard_flag(value) -> bool:
+    """``selection_neff_soft_guard`` as a bool; anything but a bool raises ``TypeError``.
+
+    The resolved guard, as ``likelihood_options_semantic`` records it: a mode
+    string (``"hard"``, ``"off"``) is truthy, so coercing it switched the soft
+    penalty on. ``ds.infer`` and ``ds.log_likelihood`` take the mode as
+    ``selection_neff_guard``.
+    """
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(
+            "selection_neff_soft_guard must be a bool (the resolved guard: True "
+            f"for the soft penalty), got {type(value).__name__} {value!r}; "
+            "ds.infer and ds.log_likelihood take the mode as "
+            "selection_neff_guard='auto'|'hard'|'soft'"
+        )
+    return bool(value)
+
+
+def _cache_kind(cache) -> str:
+    return "no cache" if cache is None else type(cache).__name__
+
+
+def _require_cache(where, cache, count_ratio, z_depth) -> None:
+    """Refuse a count-ratio cache that is not the one ``count_ratio`` and ``z_depth`` call for.
+
+    ``count_ratio`` is ``None`` where no cache is read.
+    """
+    from darksirens.catalog.completeness import ObservedDensityCache, PooledCountRatioCache
+
+    expected = {
+        None: type(None),
+        "pooled": PooledCountRatioCache,
+        "pooled_kernel": PooledCountRatioCache,
+        "row": ObservedDensityCache,
+    }[count_ratio]
+    if not isinstance(cache, expected):
+        want = "no cache" if count_ratio is None else expected.__name__
+        raise ValueError(
+            f"{where} needs {want} (count_ratio={count_ratio!r}), but this "
+            f"BoundAnalysis carries {_cache_kind(cache)}: the likelihood picks the "
+            "count-ratio estimator by the cache it is given, so it would evaluate "
+            "an estimator the plan does not record. Bind the analysis with "
+            "bind_analysis"
+        )
+    depth = getattr(cache, "depth", None) if count_ratio in _POOLED_COUNT_RATIOS else None
+    if depth is not None and depth.z_depth != z_depth:
+        raise ValueError(
+            f"{where}: the pooled count-ratio cache was built for z_depth="
+            f"{depth.z_depth!r}, but the binding evaluates z_depth={z_depth!r}. "
+            "Bind the analysis with bind_analysis"
+        )
+
+
+def _require_bound_operands(bound) -> None:
+    """Refuse a binding whose analysis-derived operands its analysis does not describe.
+
+    The likelihood picks the count-ratio estimator by the type of the cache it
+    is given and reads a row fraction whenever the operands carry one, so a
+    binding rebuilt with ``dataclasses.replace`` under another analysis (or
+    with another cache, operands or depth) would evaluate a likelihood that
+    the plan, and a run fingerprint built from it, does not record. Every
+    binding :func:`bind_analysis` makes passes: it builds these operands from
+    the analysis. The per-sample columns' dtype is checked by
+    :func:`_require_column_dtype`.
+    """
+    from collections.abc import Mapping
+
+    redshift = bound.analysis.redshift
+    cache = bound.observed_density_cache
+    if isinstance(redshift, FieldCatalogMixtureRedshift):
+        _require_cache("a field-weighted analysis", cache, None, None)
+        for k, (component, store_component, completeness) in enumerate(
+            zip(
+                bound.model_operands.components,
+                redshift.components,
+                redshift.catalog_completeness,
+            )
+        ):
+            count_ratio = redshift.count_ratio if completeness == "incomplete" else None
+            where = f"catalog {k + 1} (completeness={completeness!r})"
+            depth = store_component.catalog.z_depth
+            _require_cache(f"{where}, compact view", component.compact_cache, count_ratio, depth)
+            _require_cache(
+                f"{where}, full view",
+                component.full_cache,
+                None if component.full is None else count_ratio,
+                depth,
+            )
+            wants = store_component.row_fraction is not None and completeness == "selection"
+            if wants != (component.compact_row_fraction is not None):
+                raise ValueError(
+                    f"{where}: the analysis {'has' if wants else 'has no'} "
+                    "completeness='selection' row fraction, but this BoundAnalysis "
+                    f"{'does not carry' if wants else 'carries'} one; bind the "
+                    "analysis with bind_analysis"
+                )
+    else:
+        count_ratio = None
+        if isinstance(redshift, IncompleteCatalogRedshift) and redshift.selection is None:
+            count_ratio = redshift.count_ratio
+        _require_cache(
+            f"a {type(redshift).__name__} analysis", cache, count_ratio, bound.z_depth
+        )
+        wants = (
+            isinstance(redshift, IncompleteCatalogRedshift)
+            and redshift.selection is not None
+            and redshift.row_fraction is not None
+        )
+        operands = bound.model_operands
+        has = isinstance(operands, Mapping) and set(operands) == {"row_fraction"}
+        if (operands is not None and not has) or wants != has:
+            raise ValueError(
+                "the analysis "
+                + (
+                    "has a completeness='selection' row fraction"
+                    if wants
+                    else "reads no model operands"
+                )
+                + ", but this BoundAnalysis carries "
+                + ("none" if operands is None else f"{type(operands).__name__} operands")
+                + "; bind the analysis with bind_analysis"
+            )
+
+
+def _trace_settings():
+    """The settings a trace of the likelihood reads: ``(grids, catalog evaluation)``.
+
+    The normalisation grids as configured (``configure_normalization_grids``;
+    before the opt-in pairing m1 grid is sized, which every trace does for
+    its own model from these, so a wider model traced in between changes
+    nothing) and the catalog evaluation settings
+    (``configure_catalog_evaluation``; of these only ``missing_density`` is
+    read at trace time, the kernel layout and window are fixed in the
+    catalog views at bind).
+    """
+    from darksirens.population.utils import configured_normalization_grid_settings
+
+    return configured_normalization_grid_settings(), catalog_evaluation_settings()
+
+
+def _require_trace_settings(bound) -> None:
+    """Refuse to trace a binding's likelihood under other settings than it was bound with.
+
+    The binding's programs are traced at their first call, the diagnostics
+    one (guard report) possibly much later; a trace after the settings
+    changed would evaluate another likelihood than the one already compiled
+    (and than ``core_numerics_semantic(bound)`` records).
+    """
+    from dataclasses import asdict
+
+    grids, evaluation = bound._trace_settings
+    live_grids, live_evaluation = _trace_settings()
+    live = asdict(live_grids)
+    changed = [
+        f"{name} {value!r} -> {live[name]!r}"
+        for name, value in asdict(grids).items()
+        if live[name] != value
+    ]
+    if live_evaluation.missing_density != evaluation.missing_density:
+        changed.append(
+            f"missing_density {evaluation.missing_density!r} -> "
+            f"{live_evaluation.missing_density!r}"
+        )
+    if changed:
+        raise RuntimeError(
+            "the settings read when the likelihood is traced changed after this "
+            f"analysis was bound ({'; '.join(changed)}), so a program traced now "
+            "would evaluate another likelihood than the one the binding stands for. "
+            "Restore them (configure_normalization_grids, configure_catalog_evaluation) "
+            "or bind the analysis again"
+        )
 
 
 def _require_admissible_kernel_pin(
@@ -1066,22 +1357,38 @@ def _row_weight_sums(catalog) -> np.ndarray:
     return sums
 
 
+#: The ``count_ratio`` settings bound to a :class:`PooledCountRatioCache`.
+_POOLED_COUNT_RATIOS = ("pooled", "pooled_kernel")
+
+
 def _pooled_count_ratio_cache(redshift, component):
-    """The pooled count-ratio cache of one catalog store (``count_ratio="pooled"``)."""
+    """The pooled count-ratio cache of one catalog store (``count_ratio="pooled"``
+    or ``"pooled_kernel"``, which counts each galaxy through its redshift kernel).
+
+    A record built directly with a pooled ``count_ratio`` and no window takes
+    the default window, as ``ds.model`` does.
+    """
+    from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
+
     store = component.catalog
+    window = redshift.count_ratio_window
     return build_pooled_count_ratio_cache(
         store.catalog,
-        window=redshift.count_ratio_window,
+        window=POOLED_WINDOW_DEFAULT if window is None else window,
         z_depth=store.z_depth,
         row_fraction=component.row_fraction,
+        redshift_errors=redshift.count_ratio == "pooled_kernel",
     )
 
 
-def _bind_mixture(analysis, events, injections):
+def _bind_mixture(analysis, events, injections, normalise_single=False):
     """Per-catalog compact and full-sky views, caches, pins and row fractions.
 
     Returns the PE and selection sample rows (``(N,)`` for one catalog,
     ``(N, K)`` otherwise) and the :class:`~darksirens.likelihood.mixture.CatalogMixtureOperands`.
+    The full-sky views feed the normalisers ``Z_k``: with two or more
+    catalogs, and with one when ``normalise_single`` (the soft Neff guard,
+    whose wall reads the selection integral normalised by ``Z_1``).
     """
     from darksirens.catalog.completeness import ObservedDensityCache
     from darksirens.catalog.field import build_pinned_field_kernel
@@ -1097,6 +1404,7 @@ def _bind_mixture(analysis, events, injections):
     )
     galaxy_list = catalog_evaluation_settings().kernel_layout == "galaxy_list"
     weighted = redshift.host_mass == "weight"
+    full_views = n >= 2 or bool(normalise_single)
     pe_rows, sel_rows, components = [], [], []
     for k, (component, completeness, normalizer) in enumerate(
         zip(redshift.components, redshift.catalog_completeness, redshift.catalog_normalizers)
@@ -1104,6 +1412,10 @@ def _bind_mixture(analysis, events, injections):
         count_ratio = completeness == "incomplete"
         complete = completeness == "complete"
         store = component.catalog
+        try:
+            check_survey_depth(store.z_depth, z_max=_ZMAX)
+        except ValueError as exc:
+            raise ValueError(f"catalog {k + 1} ({store.path}): {exc}") from None
         global_pe = ang2pix_ring(store.nside, events.columns["ra"], events.columns["dec"])
         global_sel = ang2pix_ring(
             store.nside, injections.columns["ra"], injections.columns["dec"]
@@ -1118,7 +1430,7 @@ def _bind_mixture(analysis, events, injections):
             # host_mass="weight": the rows' weight sums, from the stored weights
             # before the full view below drops them. With two or more catalogs
             # the compact rows read the full sky's sums (one pass).
-            if n >= 2:
+            if full_views:
                 sums = _row_weight_sums(store.catalog)
                 full_weight = jnp.asarray(sums)
                 compact_weight = jnp.asarray(
@@ -1128,7 +1440,7 @@ def _bind_mixture(analysis, events, injections):
                 compact_weight = jnp.asarray(_row_weight_sums(views.catalog))
         full = None
         light = False
-        if n >= 2:
+        if full_views:
             # The normaliser Z_k reads every row of the catalog's sky; row r of
             # the full view is store row r. The selection completeness in the
             # moments form without a survey depth reads only the row count and
@@ -1156,7 +1468,7 @@ def _bind_mixture(analysis, events, injections):
         # which sums no kernel.
         compact = _with_kernel_window(analysis, compact, k)
         compact_cache = full_cache = None
-        if count_ratio and redshift.count_ratio == "pooled":
+        if count_ratio and redshift.count_ratio in _POOLED_COUNT_RATIOS:
             # Pooled (the default): one pooled curve from every row of the store, and each
             # view's row coverage.
             pooled = _pooled_count_ratio_cache(redshift, component)
@@ -1287,10 +1599,15 @@ def bind_analysis(
     reduction (log-sum-exp, Monte-Carlo variances, ``N_eff``, soft guard,
     final sum) stays float64; per-proposal grids are computed in float64. The
     float32 likelihood is value-only (for gradient-free samplers): taking its
-    gradient raises ``TypeError``. It is available for spectral and
-    incomplete-catalog analyses with an isotropic angular model and a chi_eff,
-    non-Gaussian-process population; anything else raises ``ValueError``. See
-    :mod:`darksirens.likelihood.mixed_precision`.
+    gradient raises ``TypeError``. It is available for spectral,
+    incomplete-catalog and field-weighted (``catalog_sky_weighting="field"``,
+    no catalog with ``completeness="complete"``) analyses with an isotropic
+    angular model and a chi_eff, non-Gaussian-process population; anything
+    else raises ``ValueError``. See :mod:`darksirens.likelihood.mixed_precision`.
+
+    ``selection_neff_soft_guard`` is the resolved guard, a bool (``True``: the
+    soft penalty); anything else raises ``TypeError``. ``ds.infer`` and
+    ``ds.log_likelihood`` take the mode, ``selection_neff_guard``.
     """
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
@@ -1300,6 +1617,7 @@ def bind_analysis(
         raise TypeError(
             "injections must be the SelectionStore returned by ds.load_injections"
         )
+    selection_neff_soft_guard = _soft_guard_flag(selection_neff_soft_guard)
 
     required = required_fit_columns(analysis)
     if compute_dtype is not None:
@@ -1334,6 +1652,13 @@ def bind_analysis(
         raise ValueError("events store must contain at least one event and sample")
     if injections.ndraw <= 0:
         raise ValueError("selection store ndraw must be positive")
+    n_live = int(np.count_nonzero(np.asarray(injections.prior_wt) > 0.0))
+    if injections.ndraw < n_live:
+        raise ValueError(
+            f"selection store ndraw={injections.ndraw} is smaller than its {n_live} "
+            "detected injections; ndraw counts every generated injection, so the "
+            "detected set and the draw count come from different campaigns"
+        )
 
     if isinstance(analysis.redshift, SpectralRedshift):
         pe_pixels = np.zeros_like(np.asarray(events.columns["dL"]), dtype=np.int32)
@@ -1362,12 +1687,16 @@ def bind_analysis(
         cache = None
         z_depth = None
     elif isinstance(analysis.redshift, FieldCatalogMixtureRedshift):
-        pe_pixels, sel_pixels, model_operands = _bind_mixture(analysis, events, injections)
+        pe_pixels, sel_pixels, model_operands = _bind_mixture(
+            analysis, events, injections, normalise_single=selection_neff_soft_guard
+        )
         catalog = None
         cache = None
         z_depth = None
     else:
         catalog_store = analysis.catalog
+        # A survey depth outside (0, grid end] is refused for every completeness.
+        check_survey_depth(catalog_store.z_depth, z_max=_ZMAX)
         global_pe = ang2pix_ring(
             catalog_store.nside, events.columns["ra"], events.columns["dec"]
         )
@@ -1410,7 +1739,7 @@ def bind_analysis(
             and analysis.redshift.count_ratio == "row"
             else None
         )
-        if getattr(analysis.redshift, "count_ratio", "row") == "pooled":
+        if getattr(analysis.redshift, "count_ratio", "row") in _POOLED_COUNT_RATIOS:
             # Pooled (the default): one pooled curve from every row of the store, and the
             # compact rows' coverage.
             pooled = _pooled_count_ratio_cache(analysis.redshift, analysis.redshift)
@@ -1455,7 +1784,7 @@ def bind_analysis(
         catalog=catalog,
         observed_density_cache=cache,
         z_depth=z_depth,
-        selection_neff_soft_guard=bool(selection_neff_soft_guard),
+        selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=float(max_likelihood_variance),
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,

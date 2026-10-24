@@ -97,7 +97,8 @@ def _dynesty_termination(sampler, running_logz, ncall_before, dlogz, maxcall):
     kept in ``running_logz``), so it is bitwise the number dynesty compared.
     When dlogz and a cap hold at the same check, the run counts as converged.
     For a checkpoint whose run had already finished, ``run_nested`` samples
-    nothing and ``running_logz`` holds the recomputed evidence instead.
+    nothing, ``running_logz`` holds the recomputed evidence instead, and the
+    caller passes the counter the finished run's loop started from.
 
     Every field is ``None`` when the sampler exposes no such state.
     """
@@ -253,6 +254,7 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
         return make_batched_pool(likelihood, prior_transform, dynesty_ptform, ndims, batch)
 
     plan = plan_from_opts(opts, "dynesty")
+    finished = False
     if plan.resuming:
         print(
             f"[*] Restoring dynesty sampler from checkpoint {plan.resume_from}",
@@ -261,6 +263,10 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
         sampler = restore_dynesty_sampler(
             plan.resume_from, dynesty_loglike, dynesty_ptform
         )
+        # run_nested saves once more after adding the final live points, so
+        # the checkpoint of a run that stopped (on dlogz or on its call cap)
+        # holds a finished run, which run_nested(resume=True) returns at once.
+        finished = bool(getattr(sampler, "added_live", False))
         if int(getattr(sampler, "ndim", ndims)) != ndims:
             raise RuntimeError(
                 f"Checkpoint {plan.resume_from} has ndim={sampler.ndim} "
@@ -292,6 +298,15 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
             f"({getattr(sampler, 'ncall', 0)} likelihood calls already spent).",
             flush=True,
         )
+        if finished:
+            print(
+                "  [!] this checkpoint was saved at the end of a finished run "
+                "(its final live points are already added): dynesty samples "
+                "nothing on resume, so the result is that run's, whatever "
+                "dlogz or max_samples this run sets. Start a fresh run to "
+                "sample further.",
+                flush=True,
+            )
     else:
         print(
             f"[*] Asking Dynesty to find {opts.nlive} initial live points. "
@@ -356,6 +371,11 @@ def run_dynesty(likelihood, prior_transform, labels, opts):
 
     running_logz = _dynesty_running_logz(sampler)
     ncall_before = getattr(sampler, "ncall", None)
+    if finished:
+        # Nothing is sampled here, so the cap test counts the finished run's
+        # loop calls (dynesty starts its counter at nlive, for the initial
+        # live points): a capped run reads back as "maxcall", not "unknown".
+        ncall_before = int(getattr(sampler, "nlive", opts.nlive))
     try:
         sampler.run_nested(
             dlogz=opts.dlogz,

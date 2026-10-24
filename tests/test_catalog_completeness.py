@@ -1,9 +1,12 @@
+import warnings
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from darksirens.catalog.completeness import (
     ObservedDensityCache,
@@ -167,3 +170,73 @@ def test_smoothing_operator_columns_integrate_to_one():
     np.testing.assert_allclose(
         s @ (0.23 * np.ones_like(z)), 0.23 * out, rtol=2e-15, atol=0.0
     )
+
+
+# ---------------------------------------------------------------------------
+# The per-row observed-density cache: negative redshifts, sparse rows, memory
+
+
+def _rows(n_rows=4, n_gal=200, seed=3, lo=0.01, hi=0.2):
+    rng = np.random.default_rng(seed)
+    z = np.sort(rng.uniform(lo, hi, (n_rows, n_gal)), axis=1)
+    return GalaxyCatalog(
+        apix=4.0 * np.pi / n_rows, zgals=z, dzgals=np.full(z.shape, 0.01),
+        wgals=np.ones(z.shape), ngals=np.full(n_rows, n_gal, dtype=np.int32),
+    )
+
+
+def test_a_galaxy_far_below_zero_is_refused_by_the_row_cache():
+    """At z = -0.5 the 0.05 kernel's mass inside the grid rounds to 0, its
+    1e-300 floor made the row's observed density about 1e279 and the row
+    complete out to z ~ 1.3; the bind-time guard in kernel widths accepted it
+    (dz = 0.2). Refused below 7 widths; z = -0.3 is accepted and finite."""
+    cat = _rows()
+    z = np.asarray(cat.zgals).copy()
+    z[0, 0] = -0.5
+    with pytest.raises(ValueError, match=r"1 real galaxies lie more than 7 widths"):
+        build_observed_density_cache(cat._replace(zgals=z, dzgals=np.full(z.shape, 0.2)))
+    z[0, 0] = -0.3
+    cache = build_observed_density_cache(cat._replace(zgals=z))
+    assert np.all(np.isfinite(np.asarray(cache.dN_obs_kde)))
+    assert float(np.max(np.asarray(cache.dN_obs_kde))) < 1.0e6
+    # Padding slots may hold anything.
+    padded = np.concatenate([np.asarray(cat.zgals), np.full((4, 2), -5.0)], axis=1)
+    build_observed_density_cache(cat._replace(
+        zgals=padded, dzgals=np.ones(padded.shape), wgals=np.ones(padded.shape)
+    ))
+
+
+def test_sparse_rows_warn_that_the_row_clip_biases_the_completeness():
+    """The clip at 1 of each row's noisy ratio lowers its mean: with about 13
+    galaxies per row a complete catalog reads 0.6 at z = 0.02. Rows that hold
+    few galaxies under the 0.05 kernel warn; dense rows do not."""
+    with pytest.warns(UserWarning, match=r"count_ratio='row': the per-row count ratio's 0.05 kernel"):
+        build_observed_density_cache(_rows(n_gal=13))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        build_observed_density_cache(_rows(n_gal=6000))
+
+
+def test_the_row_cache_batch_is_sized_from_the_memory_budget(monkeypatch):
+    """Each batch forms a ``(rows, N_z, N_max)`` float64 kernel: the fixed 512
+    rows needed 512 * 1000 * N_max * 8 bytes whatever the catalog (13 GB at
+    N_max 3448). Without a batch size the rows per batch now keep it within
+    2**30 bytes, with the same values as the legacy batch of 512."""
+    from darksirens.catalog import completeness as module
+
+    cat = _rows(n_rows=512, n_gal=300, hi=0.4)
+    shapes = []
+    batched = module._batched_observed_density
+
+    def spy(rows, catalog):
+        shapes.append(int(rows.shape[0]))
+        return batched(rows, catalog)
+
+    monkeypatch.setattr(module, "_batched_observed_density", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        auto = np.asarray(build_observed_density_cache(cat).dN_obs_kde)
+        auto_rows = list(shapes)
+        legacy = np.asarray(build_observed_density_cache(cat, batch_size=512).dN_obs_kde)
+    assert max(auto_rows) * int(zgrid.size) * 300 * 8 <= 2**30, auto_rows
+    np.testing.assert_array_equal(auto, legacy)

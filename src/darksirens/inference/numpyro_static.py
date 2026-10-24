@@ -37,6 +37,29 @@ class NumPyroStaticPlan:
     chain_method: str
 
 
+def joint_constraints_hold(constraints, theta):
+    """Whether ``theta`` satisfies every rejected joint constraint.
+
+    The constraints' meaning in parameter space (the models' own valid masks):
+    ``ordered_le`` is ``x_i <= x_j``, ``simplex`` ``x_i + x_j <= 1`` and
+    ``ball3`` ``|x|^2 <= 1``. Works on NumPy and JAX arrays alike.
+    """
+    valid = True
+    for kind, idx in constraints:
+        if kind == "ordered_le":
+            holds = theta[idx[0]] <= theta[idx[1]]
+        elif kind == "simplex":
+            holds = theta[idx[0]] + theta[idx[1]] <= 1.0
+        elif kind == "ball3":
+            holds = sum(theta[i] * theta[i] for i in idx) <= 1.0
+        else:
+            raise ValueError(
+                f"joint prior constraint {kind!r} has no NUTS rejection rule"
+            )
+        valid = valid & holds
+    return valid
+
+
 def prepare_numpyro_static_plan(
     labels,
     lower_bound,
@@ -90,7 +113,8 @@ def prepare_numpyro_static_plan(
             "NumPyro sampler: chained conditional_upper constraints "
             f"{chained} are not supported (a conditioning parameter is "
             "itself conditioned). Use --sampler dynesty/tinyns, whose "
-            "cube map composes them, or declare the chain differently."
+            "cube map composes them when each conditioning parameter's own "
+            "pair is declared first, or declare the chain differently."
         )
 
     rejected = tuple(

@@ -19,6 +19,9 @@ missing-host extension).
 
 from __future__ import annotations
 
+import dataclasses
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,7 +32,11 @@ import darksirens as ds
 from darksirens import Population
 from darksirens.analysis import FieldCatalogMixtureRedshift, ParameterPlan, per_catalog_population_label
 from darksirens.catalog.compact import compact_pe_selection_catalog
-from darksirens.catalog.completeness import build_observed_density_cache, completion_curves
+from darksirens.catalog.completeness import (
+    build_observed_density_cache,
+    build_pooled_count_ratio_cache,
+    completion_curves,
+)
 from darksirens.catalog.field import (
     build_field_incomplete_catalog_prior_state_from_curves,
     eval_field_incomplete_catalog_prior_state_vmap,
@@ -202,7 +209,7 @@ def test_explicit_per_catalog_normalisers():
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["moments", "auto"]),
          "catalog 1 runs completeness='incomplete'"),
         (dict(completeness=["complete", "complete"], field_normalizer="moments"),
-         "exact only for completeness='selection'"),
+         "implemented only for completeness='selection' \\(a complete catalog's"),
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["auto"]),
          "field_normalizer has 1 entries for 2 catalogs"),
         (dict(**{k: v for k, v in MIXED.items() if k != "catalog"}, field_normalizer=["auto", "sum"]),
@@ -274,10 +281,26 @@ class _Reference:
         self.modes = self.redshift.catalog_completeness
         self.compact = [_jax_catalog(s.catalog, np.asarray(v.catalog.unique_pixels)) for s, v in zip(stores, views)]
         self.full = [_jax_catalog(s.catalog) for s in stores]
-        self.cache_c = [build_observed_density_cache(c) if m == "incomplete" else None
-                        for c, m in zip(self.compact, self.modes)]
-        self.cache_f = [build_observed_density_cache(c) if m == "incomplete" else None
-                        for c, m in zip(self.full, self.modes)]
+        if self.redshift.count_ratio == "pooled":
+            # Built here from each store: every row's galaxies, the store's
+            # depth and row coverage; the compact rows read their own coverage.
+            self.cache_f = [
+                build_pooled_count_ratio_cache(
+                    s.catalog, window=self.redshift.count_ratio_window, z_depth=s.z_depth,
+                    row_fraction=comp.row_fraction,
+                ) if m == "incomplete" else None
+                for s, comp, m in zip(stores, self.redshift.components, self.modes)
+            ]
+            self.cache_c = [
+                None if f is None else f._replace(row_fraction=jnp.asarray(
+                    np.asarray(f.row_fraction)[np.asarray(c.unique_pixels)]))
+                for f, c in zip(self.cache_f, self.compact)
+            ]
+        else:
+            self.cache_c = [build_observed_density_cache(c) if m == "incomplete" else None
+                            for c, m in zip(self.compact, self.modes)]
+            self.cache_f = [build_observed_density_cache(c) if m == "incomplete" else None
+                            for c, m in zip(self.full, self.modes)]
         self.Q = Q
 
     def parameter_spec(self):
@@ -457,6 +480,158 @@ def test_weight_limits_give_each_catalog_alone_with_its_own_completeness(pair):
             _close(bound(t), alone(sub(theta)), 1e-12, f"{pair} fcat_2={f}")
 
 
+# ---------------------------------------------------------------------------
+# The pooled count ratio (the ds.model default) in a two-catalog mixture
+
+# Dense enough for the default pooled window (0.02). The catalogs' density is
+# far below the log10n0 prior, so log10n0 is fixed outside it, where the
+# pooled completeness is of order 1. The pooled catalog is the nside-4 one,
+# whose compact view misses a few rows.
+POOLED_B = catalog_store(23, nside=4, n_max=120, z_hi=0.40, empty=(5, 40), z_depth=0.3)
+DENSE_A = dataclasses.replace(catalog_store(41, n_max=400, z_hi=0.45, empty=(3,)), z_depth=0.25)
+_FRACTIONS = np.random.default_rng(7)
+POOLED_FRACTION_A = _FRACTIONS.uniform(0.3, 1.0, 48)
+POOLED_FRACTION_A[[0, 3, 7, 11, 20, 33, 40]] = 0.0
+POOLED_FRACTION_B = _FRACTIONS.uniform(0.2, 1.0, 192)
+# A zero coverage only in the empty rows 5 and 40: the pooled count ratio
+# refuses a fraction of 0 on rows that hold galaxies; the others get a low one.
+POOLED_FRACTION_B[[5, 40]] = 0.0
+POOLED_FRACTION_B[[1, 9, 50, 51, 100, 150]] = 0.05
+POOLED_KERNEL = {"delta": 0.0, "sigma_kde": 0.01, "delta_c2": 0.0, "sigma_kde_c2": 0.01}
+
+
+def _pooled_mixture(pinned):
+    """The default pooled count ratio (with a survey depth and a row fraction
+    with zeros) and a selection catalog (with its own depth and row fraction);
+    ``pinned`` fixes both kernels, so both are pinned."""
+    # At log10n0 = -5.4 the pooled ratio falls from 1 (clipped) at z < 0.15
+    # to about 0.35 at the depth, so its depth and coverage both matter.
+    fixed = {"log10n0": -5.4, "log10n0_c2": -6.0, **(POOLED_KERNEL if pinned else {})}
+    with warnings.catch_warnings():
+        # log10n0 fixed outside its prior; the catalogs' nside 4 and 2.
+        warnings.simplefilter("ignore")
+        analysis = ds.model(
+            cosmology=COSMOLOGY, population=POPULATION, catalog=[POOLED_B, DENSE_A],
+            catalog_sky_weighting="field", completeness=["incomplete", "selection"],
+            selection=[None, SEL_A], row_fraction=[POOLED_FRACTION_B, POOLED_FRACTION_A],
+            fixed_survey=fixed, n0_units="h_scaled", allow_out_of_prior=True,
+        )
+    assert analysis.redshift.count_ratio == "pooled"
+    assert analysis.parameters.kernel_pin_active == pinned
+    return analysis
+
+
+def _pooled_thetas(analysis):
+    return [theta_of(analysis, {"H0": h, "fcat_2": 0.4}) for h in (55.0, 67.7, 80.0)]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("pinned", (True, False), ids=("pinned", "unpinned"))
+def test_the_pooled_default_is_the_definition_under_every_layout(pinned):
+    """The bound likelihood of the default pooled count ratio against the
+    definition, whose pooled cache is built here from the store (every row's
+    galaxies, the store's depth and row coverage; the compact rows read their
+    own coverage), with and without the kernel pins, under the historical
+    layout, the galaxy list with the gathered missing density, and the
+    defaults (which window the kernel at 1e-10)."""
+    analysis = _pooled_mixture(pinned)
+    thetas = _pooled_thetas(analysis)
+    with catalog_settings(**HISTORICAL_CATALOG):
+        target = _reference(analysis)
+        want = [float(target(jnp.asarray(theta))) for theta in thetas]
+    arms = (
+        (HISTORICAL_CATALOG, 1e-12),
+        (dict(kernel_layout="galaxy_list", missing_density="gather", kernel_window="off"), 1e-12),
+        ({}, 1e-9),
+    )
+    for settings, rtol in arms:
+        with catalog_settings(**settings):
+            bound = _bind(analysis)
+            pins = [c.compact_pin is not None and c.full_pin is not None
+                    for c in bound.model_operands.components]
+            assert pins == [pinned, pinned]
+            for theta, value in zip(thetas, want):
+                _close(bound(theta), value, rtol, settings)
+
+
+def _dense_z(z_depths, m=8):
+    """The redshift grid refined ``m`` times, with each depth and the node just above it."""
+    z = np.asarray(zgrid)
+    t = np.linspace(0.0, 1.0, m + 1)[:-1]
+    dense = (z[:-1, None] + t[None, :] * np.diff(z)[:, None]).reshape(-1)
+    extra = [x for d in z_depths if d is not None for x in (d, np.nextafter(d, 1.0))]
+    return jnp.asarray(np.unique(np.concatenate([dense, z[-1:], np.asarray(extra, dtype=float)])))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("pinned", (True, False), ids=("pinned", "unpinned"))
+def test_each_pooled_mixture_branch_integrates_to_one(pinned):
+    """sum_p int n_k(z | p) dz / Z_k = 1 for both catalogs of the pooled
+    mixture: the code's Z_k (observed total plus missing total) is the sum of
+    the full-sky row masses of a state built here from the store, and the
+    compact rows' numerator, as the likelihood evaluates it, integrates over
+    z to its row's share of Z_k."""
+    from darksirens.catalog.models import (
+        assemble_incomplete_catalog_prior_state,
+        eval_incomplete_catalog_prior_state_vmap,
+    )
+    from darksirens.catalog.settings import catalog_evaluation_settings
+    from darksirens.likelihood import mixture as M
+
+    analysis = _pooled_mixture(pinned)
+    redshift = analysis.redshift
+    bound = _bind(analysis)
+    decoded = ds.decode_parameters(analysis, _pooled_thetas(analysis)[1])
+    cosmo = decoded.cosmology
+    gather = catalog_evaluation_settings().gathers_missing_density(applicable=True)
+    for k, (comp, component) in enumerate(zip(redshift.components, bound.model_operands.components)):
+        params = decoded.catalog.components[k]
+        mode = redshift.catalog_completeness[k]
+        store = comp.catalog
+        full = _jax_catalog(store.catalog)
+        if mode == "incomplete":
+            cache = build_pooled_count_ratio_cache(
+                store.catalog, window=redshift.count_ratio_window, z_depth=store.z_depth,
+                row_fraction=comp.row_fraction,
+            )
+            curves = completion_curves(cosmo, params, full, cache)
+        else:
+            curves = selection_completion_curves_with_row_fraction(
+                cosmo, params, full, params.selection, jnp.asarray(comp.row_fraction))
+        state = build_field_incomplete_catalog_prior_state_from_curves(cosmo, params, full, curves)
+        masses = np.exp(np.asarray(state.log_row_mass))
+        observed, poison = M._observed(cosmo, params, component)
+        Z = float(observed + M._missing_total(
+            k, cosmo, params, component, mode, redshift.catalog_normalizers[k],
+            None, None, None, None, observed,
+        )) + float(poison)
+        assert abs(masses.sum() / Z - 1.0) <= 1e-12, (k, masses.sum(), Z)
+
+        kernels, pin_ok = M._kernels(cosmo, params, component.compact, component.compact_pin)
+        compact_state = assemble_incomplete_catalog_prior_state(
+            kernels, pin_ok, component.compact,
+            M._compact_curves(cosmo, params, component, mode, gather),
+        )
+        view = M._view(compact_state, np.log(Z))
+        z = _dense_z([store.z_depth])
+
+        def integral(row, view=view, compact=component.compact, z=z):
+            values = eval_incomplete_catalog_prior_state_vmap(
+                z, jnp.full(z.shape, row, dtype=jnp.int32), view, compact)
+            return jnp.trapezoid(jnp.exp(values), z)
+
+        rows = np.asarray(component.compact.unique_pixels)
+        if mode == "incomplete":
+            # The full-view cache's coverage reaches rows no sample touches.
+            assert rows.size < masses.size
+        got = np.asarray(jax.jit(lambda r, f=integral: jax.lax.map(f, r))(
+            jnp.arange(rows.size, dtype=jnp.int32)))
+        # Trapezoid on the refined grid: about 1e-5 at the kernels' depth cut.
+        np.testing.assert_allclose(got, masses[rows] / Z, rtol=1e-4, atol=0.0)
+        rest = np.setdiff1d(np.arange(masses.size), rows)
+        assert abs(got.sum() + masses[rest].sum() / Z - 1.0) <= 1e-4, k
+
+
 @pytest.mark.slow
 def test_auto_picks_the_exact_normaliser_per_catalog():
     """Mixed count + selection: "auto" is direct for the count ratio (the only
@@ -540,9 +715,12 @@ def test_memory_layouts_give_the_default_likelihood(layout):
     analysis = _model([A_DEPTH, B, C], completeness=["selection", "incomplete", "complete"],
                       selection=[SEL_A, None, None], row_fraction=[FRACTION_A, None, None])
     # The reference is the historical program; each arm turns on one layout.
+    # A binding is traced under the settings it was bound with (it refuses a
+    # first trace under others), so the reference is evaluated inside them.
+    thetas = _points(analysis)
     with catalog_settings(**HISTORICAL_CATALOG):
         ref = _bind(analysis)
-    thetas = _points(analysis)
+        want = [float(ref(t)) for t in thetas]
     arm = dict(HISTORICAL_CATALOG)
     arm.update(missing_density="gather" if layout == "missing_density" else "grid",
                kernel_layout="galaxy_list" if layout == "kernel_layout" else "padded")
@@ -552,8 +730,8 @@ def test_memory_layouts_give_the_default_likelihood(layout):
             assert alt.model_operands.components[2].compact.galaxy_index is None
             assert alt.model_operands.components[1].compact.galaxy_index is not None
         got = [float(alt(t)) for t in thetas]
-    for g, t in zip(got, thetas):
-        _close(g, ref(t), 1e-12, layout)
+    for g, w in zip(got, want):
+        _close(g, w, 1e-12, layout)
 
 
 @pytest.mark.slow

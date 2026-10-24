@@ -29,9 +29,22 @@ incomplete catalogs).
 
 Legacy stores the count-ratio normaliser's observed density in float32
 (``field_dN_obs_s``); core keeps it in float64. ``--legacy-f64-obs`` (legacy
-arm) replaces legacy's table by the float64 one, which isolates that storage
-difference: the comparison of the count-ratio cells is at rounding level
-with it and ~1e-8 relative without it.
+arm) replaces legacy's table by the float64 one. On this fixture the flag
+changes nothing: the legacy arm with and without it agrees exactly in every
+cell (measured 2026-10-20), and legacy against the candidate holds to
+2.8e-14 without it, as the CI gate (``--rtol 1e-12``, no flag) runs it. A
+row holds at most 5 galaxies against an expected count of order 1e6 per unit
+redshift at ``log10n0 = -2``, so the count-ratio completeness is about 0 and
+the observed density barely enters the cells. The flag would isolate the
+float32 storage only on a fixture whose completeness is of order 1.
+
+``--soft-guard CAP`` (both arms) evaluates every cell under the soft Neff
+guard (``selection_neff_soft_guard=True``) with ``max_likelihood_variance=CAP``
+instead of the hard guard at ``MAX_VARIANCE``. The soft wall reads ``log mu``,
+so it checks the normalisation of each branch, ``Z_1`` of a one-catalog cell
+included (the reference divides its one-catalog field density by ``Z_1``). At
+``CAP = 0.08`` the wall is active in every cell (log-likelihoods of order
+-4e4) and the arms agree to a relative 3.7e-14 (measured 2026-10-20).
 
 ``--compare LEGACY CANDIDATE --rtol R`` checks two outputs.
 """
@@ -201,7 +214,14 @@ def _population(get_fixed_population_params):
     return theta
 
 
-def _candidate():
+def _guard(soft_cap):
+    """The guard keywords of both arms: hard at MAX_VARIANCE, or soft at a cap."""
+    if soft_cap is None:
+        return dict(max_likelihood_variance=MAX_VARIANCE)
+    return dict(max_likelihood_variance=soft_cap, selection_neff_soft_guard=True)
+
+
+def _candidate(soft_cap=None):
     import jax
 
     jax.config.update("jax_enable_x64", True)
@@ -287,7 +307,7 @@ def _candidate():
         if fixed_kernel is not None:
             assert analysis.parameters.kernel_pin_active
         bound = bind_analysis(analysis, events=events, injections=injections,
-                              max_likelihood_variance=MAX_VARIANCE)
+                              **_guard(soft_cap))
         values = []
         for per_catalog, (H0, *sticks) in _cell_points(cell):
             theta = [H0]
@@ -301,7 +321,7 @@ def _candidate():
     return rows, population
 
 
-def _legacy(f64_obs):
+def _legacy(f64_obs, soft_cap=None):
     import healpy as hp
     import jax
     import jax.numpy as jnp
@@ -417,7 +437,7 @@ def _legacy(f64_obs):
             values.append(float(darksiren_log_likelihood(
                 cosmo, surveys[0], jnp.asarray(population), gw_pe, em[0], gw_sel, em[0],
                 N_EVENTS, NSAMP, N_DRAW, POP_MODEL, universe_model,
-                max_likelihood_variance=MAX_VARIANCE,
+                **_guard(soft_cap),
                 catalog_sky_weighting="field",
                 **mix,
             )))
@@ -429,6 +449,7 @@ def _compare(legacy_path, candidate_path, rtol, only=None):
     legacy = json.loads(Path(legacy_path).read_text())
     candidate = json.loads(Path(candidate_path).read_text())
     assert legacy["population"] == candidate["population"], "population vectors differ"
+    assert legacy.get("soft_guard_cap") == candidate.get("soft_guard_cap"), "guards differ"
     worst = 0.0
     for name, values in legacy["results"].items():
         if only and not any(name.startswith(prefix) for prefix in only):
@@ -450,6 +471,8 @@ def main():
     parser.add_argument("--implementation", choices=("legacy", "candidate"))
     parser.add_argument("--out")
     parser.add_argument("--legacy-f64-obs", action="store_true")
+    parser.add_argument("--soft-guard", type=float, default=None, metavar="CAP",
+                        help="evaluate under the soft Neff guard at this variance cap")
     parser.add_argument("--compare", nargs=2, metavar=("LEGACY", "CANDIDATE"))
     parser.add_argument("--only", nargs="*", default=None,
                         help="compare only the cells whose names start with these")
@@ -459,15 +482,16 @@ def main():
         _compare(*args.compare, args.rtol, args.only)
         return
     if args.implementation == "legacy":
-        rows, population = _legacy(args.legacy_f64_obs)
+        rows, population = _legacy(args.legacy_f64_obs, args.soft_guard)
     else:
-        rows, population = _candidate()
+        rows, population = _candidate(args.soft_guard)
     payload = {
         "implementation": args.implementation,
         "reference_sha": REFERENCE_SHA,
         "pop_model": POP_MODEL,
         "gamma": GAMMA,
         "legacy_f64_obs": bool(args.legacy_f64_obs),
+        "soft_guard_cap": args.soft_guard,
         "population": [float(x) for x in population],
         "results": rows,
     }

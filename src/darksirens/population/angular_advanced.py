@@ -25,6 +25,34 @@ else:
     _ZNORM_HI = max(3.0, float(_ZMAX_GRID))
 _ZNORM_N = max(24, int(round(8.0 * _ZNORM_HI)))
 
+# Opt-in density of the sphere x z models' per-redshift normaliser table, in
+# intervals per sky_log_ls_z floor in zeta = log1p(z) (env
+# DARKSIRENS_SKY_ZNORM_PER_LS, latched at import).  3 is the frozen reference's
+# rule.  The table is linearly interpolated in zeta, so the field stops being
+# mean-one on the sky between its nodes and the error moves with z -- it does
+# not cancel against the selection term the way a constant normaliser does:
+# measured at log_amp = its ceiling, both length scales at their floors,
+# xi ~ N(0, 1), seeds 0-3, the interpolated log normaliser between nodes (z < 2)
+# is off by up to 0.035 / 0.078 / 0.056 / 0.103 at 3 against at most 0.007 at
+# 12, on the model's own sphere quadrature; the sky mean of g on an independent
+# sphere was off by up to 0.125 at 3 and 0.023 at 12, of which up to 0.016 is
+# that quadrature at the nodes themselves.
+_ZNORM_PER_LS = float(os.environ.get("DARKSIRENS_SKY_ZNORM_PER_LS", 3.0))
+# Opt-in top of the z inducing nodes of the sphere x z models (env
+# DARKSIRENS_SKY_Z_NODE_HI, latched at import).  3.0 is the frozen reference's
+# value; the field is the RKHS conditional mean, so above the last node it
+# decays to its zero mean -- the sky turns isotropic above z ~ 3 whatever the
+# latents say (prior std of the z part 0.08 of amp at z = 4 for ls_z = 0.1),
+# while the normaliser and the likelihood run to zMax.  Setting it to zMax
+# keeps the node COUNT, so the node spacing in zeta widens (0.277 -> 0.358 at
+# zMax = 5).
+_Z_NODE_HI = float(os.environ.get("DARKSIRENS_SKY_Z_NODE_HI", 3.0))
+if not (_ZNORM_PER_LS > 0.0 and _Z_NODE_HI > 0.0):
+    raise ValueError(
+        "DARKSIRENS_SKY_ZNORM_PER_LS and DARKSIRENS_SKY_Z_NODE_HI must be > 0, got "
+        f"{_ZNORM_PER_LS!r} and {_Z_NODE_HI!r}"
+    )
+
 
 def _sphere_rbf(A, B, amp, ls):
     cos = A @ B.T
@@ -124,7 +152,7 @@ class _SphereZGPAngularBase:
         n_inducing_sphere: int = 32,
         n_inducing_z: int = 6,
         n_quad: int = _SPHERE_NQ,
-        z_node_hi: float = 3.0,
+        z_node_hi: float | None = None,
         log_amp_bounds: tuple[float, float] = (
             float(jnp.log(0.1)),
             float(jnp.log(3.0)),
@@ -137,7 +165,12 @@ class _SphereZGPAngularBase:
             float(jnp.log(0.05)),
             float(jnp.log(2.0)),
         ),
+        znorm_per_ls: float | None = None,
     ):
+        # None: the import-latched defaults (_Z_NODE_HI, _ZNORM_PER_LS), which
+        # are the frozen reference's 3.0 and 3 unless opted in.
+        z_node_hi = _Z_NODE_HI if z_node_hi is None else float(z_node_hi)
+        znorm_per_ls = _ZNORM_PER_LS if znorm_per_ls is None else float(znorm_per_ls)
         self._M_sph = int(n_inducing_sphere)
         self._M_z = int(n_inducing_z)
         self._M = self._M_sph * self._M_z
@@ -150,7 +183,7 @@ class _SphereZGPAngularBase:
         zeta_hi = math.log1p(_ZNORM_HI)
         n_zg = max(
             _ZNORM_N,
-            int(math.ceil(3.0 * zeta_hi / float(np.exp(log_ls_z_bounds[0])))) + 1,
+            int(math.ceil(znorm_per_ls * zeta_hi / float(np.exp(log_ls_z_bounds[0])))) + 1,
         )
         self._zeta_g = jnp.linspace(0.0, zeta_hi, n_zg)
         self._zg = jnp.expm1(self._zeta_g)
