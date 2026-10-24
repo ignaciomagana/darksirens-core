@@ -118,9 +118,15 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
 ### Public option contract
 
 - `Cosmology` accepts `Om0`, `w0` and `wa` only inside the tabulated
-  distance-grid support (`Om0` [0.1575, 0.4575], `w0` [-2.25, 0.25], `wa`
-  [-2.5, 2.5], closed intervals); `H0` is unrestricted. Out-of-grid values or
-  bounds raise at construction.
+  distance-grid support, closed intervals with float64 endpoints: `w0`
+  [-2.25, 0.25], `wa` [-2.5, 2.5] and `Om0` [0.15749999999999997,
+  0.45749999999999996] (`0.3075 -/+ 0.15` as computed; the literal 0.1575 is
+  inside and 0.4575 is outside, where the table is NaN). `H0` rescales the
+  table analytically and has no grid bound, but must be positive: a fixed
+  `H0` and the lower bound of an `H0` prior must be > 0. Values and bounds
+  must be real numbers (NumPy scalars and 0-d arrays included; booleans and
+  strings raise `TypeError`). Out-of-grid values or bounds raise at
+  construction.
 - `Population(name, fixed={parameter: value, ...})` fixes only the named
   population parameters, at the given values, and samples the rest. A key is
   the model's label (`analysis.parameters.population_labels`) or its ASCII name
@@ -153,9 +159,13 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   quadrature, and its bound program is unchanged. `ParameterPlan.kernel_pin`
   and `ParameterPlan.kernel_pin_active` record the setting and whether it
   applies, and `parameter_plan_semantic(plan)` puts both in a run fingerprint.
-  The setting has no effect on spectral, bright-siren or complete-catalog
-  analyses. Each call re-derives eight catalog rows from the live parameters
-  and returns `-inf` if they disagree with the pin by more than 1e-9. A
+  The setting has no effect on spectral and bright-siren analyses, nor on a
+  conditional complete catalog (`catalog_sky_weighting="conditional"`); under
+  `catalog_sky_weighting="field"` it applies to every catalog, complete ones
+  included. Each call re-derives eight catalog rows from the live parameters
+  and returns `-inf` if they disagree with the pin by more than
+  `max(1e-9, 64 eps |value|)` (`KERNEL_PIN_TOL`, `KERNEL_PIN_TOL_EPS`; 1e-9
+  wherever `|value| < ~7e4`). A
   `BoundAnalysis` refuses a pin its plan does not admit, or one built for
   another catalog shape (for example after `dataclasses.replace`). The pin
   belongs to the catalog it was built from, and the eight-row check need not
@@ -228,7 +238,8 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `selection_record`) in place of the arrays, so two tables give two run
   fingerprints. The records of the other families are unchanged. The frozen
   reference has no such family.
-- `model(..., count_ratio=None|"pooled"|"row", count_ratio_window=None)`: the
+- `model(..., count_ratio=None|"pooled"|"pooled_kernel"|"row",
+  count_ratio_window=None)`: the
   estimator of the count-ratio completeness (`completeness="incomplete"`,
   either sky weighting, one value for every catalog of a mixture that runs
   it). The default `None` resolves to `"pooled"` with the window 0.02
@@ -240,16 +251,34 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   reference's) is unchanged: the
   per-row `clip[S dN_obs / S dN_exp, 0, 1]` with the fixed width
   `SIGMA_SMOOTH = 0.05`; it is biased low where the completeness falls (to
-  first order `C + w^2 (C' dlnE/dz + C''/2)`, `E = dN_exp/dz`). `"pooled"`
+  first order `C + w^2 (C' dlnE/dz + C''/2)`, `E = dN_exp/dz`), and also
+  wherever rows are sparse (fine `nside`, low redshift), even at constant or
+  unit completeness: the clip at 1 of each row's noisy ratio pulls it low
+  (binding warns below 1000 effective galaxies per row at the catalog's
+  median redshift). `"pooled"`
   (the default, no reference counterpart) is
   `C_p(z) = f_p clip[R(z), 0, 1]` with
   `R(z) = sum_i G_w(z - z_i) / dN_exp(z_i) / [kappa(z) sum_p f_p]` over the
   real galaxies of every row of the catalog store with `0 < z_i <= z_top`
   (`z_top` the store's `z_depth`, or the end of the grid), `kappa` the kernel
   mass inside `(0, z_top]`, `w = count_ratio_window` (default 0.02) and
-  `f_p` the `row_fraction` (accepted with `"pooled"`, otherwise only with
-  `"selection"`; 1 for every row without one). Its expectation is the kernel
-  mean of `C`. It is built at bind
+  `f_p` the `row_fraction` (accepted with the pooled ratios, otherwise only
+  with `"selection"`; 1 for every row without one). Its expectation is the
+  kernel mean of `C` for redshifts without errors. Where redshift errors are
+  comparable to `z` near `z = 0`, the ratio exceeds 1 there and the clip
+  removes the missing hosts (binding warns where it exceeds the
+  `"pooled_kernel"` ratio by more than the factor 1.5).
+  `"pooled_kernel"` (opt-in) counts each galaxy through its redshift kernel
+  (width `max(dz_i, 1e-4)`; `sigma_kde` is not included) instead of its
+  point redshift (`build_pooled_count_ratio_cache(..., redshift_errors=True)`);
+  its expectation is the kernel mean of the catalog's own host density over
+  `dN_exp`, so for a catalog that carries no host information the observed
+  and the missing hosts add up to `dN_exp`. A row whose `row_fraction` is 0
+  must hold no galaxy: refused for the pooled ratios, warned for
+  `completeness="selection"` (whose values are the reference's). The cache
+  records its depth (`PooledCountRatioCache.z_top` and `depth`), and the
+  completion curves refuse it, or are NaN, at another
+  `CatalogParameters.z_depth`. It is built at bind
   (`catalog.completeness.build_pooled_count_ratio_cache`) as one `(N_z, N_z)`
   operator, linear in `z^2 / dN_exp` at the proposal (galaxies binned in
   `1e-4` in redshift, `1/dN_exp` interpolated linearly between grid nodes),
@@ -260,11 +289,12 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   direct form. Binding refuses fewer than 100 effective galaxies (Kish) under
   the kernel at the catalog's median redshift, and warns below 1000, for
   galaxies at `z <= 0`, and for more than 10% galaxy-free rows without a
-  `row_fraction`. `count_ratio_window` with `"row"`, and `"pooled"` without a
-  count-ratio catalog, are refused. `ParameterPlan.catalog_model` records
-  `count_ratio`, `count_ratio_window` and the row fraction's sha256 only
-  when `"pooled"`: a default count-ratio plan records them, and an explicit
-  `"row"` gives the plan and fingerprint of the default before 2026-10-10.
+  `row_fraction`. `count_ratio_window` with `"row"`, and a pooled ratio
+  without a count-ratio catalog, are refused; the window is a real number
+  of at least the histogram bin width 1e-4. `ParameterPlan.catalog_model`
+  records `count_ratio`, `count_ratio_window` and the row fraction's sha256
+  only for a pooled ratio: a default count-ratio plan records them, and an
+  explicit `"row"` gives the plan and fingerprint of the default before 2026-10-10.
   The low-level functions (`completion_curves`, `build_completion_state`,
   `build_observed_density_cache`, the likelihoods given no cache or an
   `ObservedDensityCache`) keep the per-row estimator; they select the pooled
@@ -279,10 +309,20 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `nside` are allowed): a GW sample's host density is
   `sum_k w_k n_k(z | p_k) / Z_k` with `n_k` the field numerator at its row
   `p_k` of catalog k, for PE samples and injections alike. With one catalog
-  `Z_1` cancels and is not evaluated (the value is the field host-density
-  seam's, to rounding). `completeness` is one value for every catalog or a
-  list with one entry per catalog: `"incomplete"` (the count ratio),
-  `"selection"` or `"complete"` (`n_k = N_obs,p p_cat(z | p)`, no missing
+  `Z_1` cancels from the likelihood and is evaluated only under the soft
+  Neff guard, whose wall reads the selection integral normalised by `Z_1`
+  (the binding then holds the catalog's full sky); the value is the field
+  host-density seam's, to rounding. `mixture_density="pixel"|"steradian"`
+  (two or more catalogs; default `"pixel"`, the reference's convention)
+  says what each branch `n_k / Z_k` is per: `"pixel"` the host probability
+  of the sample's row, so with different `nside` the weights act as
+  `w_k A_k / sum_j w_j A_j` (`A_k` the pixel area) and `ds.model` warns
+  unless `mixture_density` is given; `"steradian"` (opt-in) multiplies
+  branch k by `A_min / A_k`, so the weights are host fractions whatever the
+  `nside`. With equal `nside` the two are the same bit for bit;
+  `ParameterPlan.catalog_model` records `"steradian"` only. `completeness`
+  is one value for every catalog or a list with one entry per catalog:
+  `"incomplete"` (the count ratio), `"selection"` or `"complete"` (`n_k = N_obs,p p_cat(z | p)`, no missing
   hosts and no survey depth, `Z_k = sum_p N_obs,p`: the reference's field
   convention of `universe_model="dark_sirens_complete"`); a list of equal
   entries is the one value (same plan and fingerprint). `selection` and
@@ -385,7 +425,12 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None,
   compute_dtype=None)` are likelihood options, never sampler options. `auto`
   resolves to `soft` for NumPyro and `hard` otherwise. They are refused for an
-  `InferenceTarget`.
+  `InferenceTarget`. Every other keyword must be a sampler option some core
+  backend reads (`_SAMPLER_DEFAULTS`, the backend options and TinyNS's
+  `tinyns_<setting>`); anything else, `bind_analysis`'s
+  `selection_neff_soft_guard` and the command-line names `resume` and
+  `checkpoint_interval` included, raises `TypeError` before anything is
+  bound, naming `infer`'s spelling or the closest match.
 - `bind_analysis` refuses a catalog whose real galaxies (the first `ngals`
   slots of a row; padding is never read) cannot be represented by the
   redshift kernel. A real redshift above the top of the redshift grid
@@ -422,8 +467,17 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `darksirens.inference.run_fingerprint`) adds a `"likelihood_options"`
   entry with a non-default `compute_dtype`, `max_likelihood_variance` and
   `selection_neff_soft_guard=True`, and no entry for a default binding, so
-  `core_numerics_semantic(bound)` then equals `core_numerics_semantic()` and
-  every existing digest is unchanged. `sel_batch_size` and `pe_event_block`
+  every existing digest is unchanged. A binding of a one-catalog field
+  analysis under the soft guard also records
+  `"one_catalog_field_density": "normalised"` (its density is `n_1 / Z_1`
+  there since 2026-10-20). For a binding without a catalog view
+  `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
+  catalog binding always records the kernel window it was bound with (the
+  tolerance, or no entry when `"auto"` attached none) in place of the
+  setting `"auto"`, so for it the two blocks differ even under the
+  defaults: fingerprint and check a resume with the same one. A binding
+  also reports the normalisation-grid and catalog evaluation settings it was
+  bound with, not the live ones. `sel_batch_size` and `pe_event_block`
   are never recorded: they split the same log-sum-exp sums into blocks
   (padding rows carry `-inf` weight and `Ndraw` is unchanged) and move the
   value by floating-point reassociation only (within the pinned 1e-12
@@ -439,9 +493,16 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   when `"auto"` attached no window). The historical values
   (`"per_sample"`, `"padded"`, `"grid"`, `"off"`) are left out, so a
   fingerprint made before the change matches when they are set explicitly,
-  and they reproduce the pre-change program bit for bit. Resuming a
-  pre-change checkpoint under the new defaults is refused as a settings
-  change, and the message names those settings.
+  and they reproduce the pre-change program bit for bit. A run made before
+  2026-10-01 also needs `pairing_scale="node_max"`
+  (`DARKSIRENS_GW_PAIRING_SCALE`; the default `"analytic"` since then equals
+  it to rounding, `|dlogL| <= 2.2e-11` on the real 259-event likelihood).
+  A fingerprinted resume of a pre-change checkpoint under the new defaults
+  (an `InferenceTarget` run, or a fingerprint the caller gates with
+  `gate_and_stamp_checkpoint_fingerprint`) is refused as a settings change,
+  and the message names those settings. An ordinary `infer` resume is not
+  fingerprinted: it warns, when no `run_fingerprint.json` lies beside the
+  checkpoint, that nothing checked its settings, and goes ahead.
 - `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
   `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
   raises when none has a finite likelihood (and warns when very few do);
@@ -449,7 +510,14 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   keywords, not command-line flags.
 - Ordinary `infer` results carry `log_prior_volume_fraction` and, for a finite
   `logZ`, `logZ_corrected = logZ - log_prior_volume_fraction`. The raw `logZ`
-  is exactly the sampler's number.
+  is exactly the sampler's number. The fraction is the angular model's
+  (one whose `log_g` rejects part of the box) plus
+  `ParameterPlan.fixed_constraint_log_fraction`, the log fraction a
+  partially fixed joint prior pair keeps when its sampled member is uniform
+  (0 when a member of the pair has a per-catalog copy, which the warning
+  says). An `InferenceTarget` may declare `log_prior_volume_fraction` (a
+  finite number <= 0), and its result then carries both keys; the targets
+  core builds from an analysis declare their analysis's.
 - Every `infer` result carries the sampler-termination fields `dlogz_final`,
   `stop_reason`, `ncall` and `niter`
   (`darksirens.inference.nested_output.TERMINATION_FIELDS`); a backend that
@@ -628,8 +696,13 @@ member-independent work (kernels, base curves, observed totals) done once.
 The `MissingHostContext` gives the catalog index, the view and its global
 rows, the member, the extension's parameters and `data` (a jit operand, never
 a constant), the proposal's cosmology and catalog parameters, `dN_exp`, the
-depth mask, the selection curve `Cbar(z)`, the view's row fraction and the
-full-sky observed total. An explicit `missing_density="gather"` is refused
+depth mask, the selection curve `Cbar(z)`, `completeness_curve` (the clipped
+radial curve of the selection completeness or of the pooled count ratio,
+`None` for the per-row count ratio), the view's row fraction (for the pooled
+count ratio, its cache's coverage) and the full-sky observed total.
+`missing_total` must return a 0-d scalar; a non-finite or negative total,
+and a NaN in any branch's density, make the likelihood `-inf`. A negative
+modulated density is clipped at 0 before `Z_k`. An explicit `missing_density="gather"` is refused
 with an extension; the `"auto"` default keeps the grid there. The target's fingerprint provenance records the analysis plan's
 semantic, the non-default likelihood options and the extension's
 `provenance()`.
@@ -642,6 +715,12 @@ There is no model-name discovery, entry-point registration or callback registry.
 import JAX, h5py, TinyNS, Dynesty, NumPyro, tinygp, gwcat or companion packages.
 Scientific work configures/imports those modules lazily when the corresponding
 public function is called.
+
+Importing a scientific submodule changes process-wide JAX state: it sets
+`jax_enable_x64` for the whole process; `darksirens.cosmology.distances` also
+sets the `"highest"` default matmul precision, and `darksirens.gw.samples`
+sets defaults for `XLA_PYTHON_CLIENT_PREALLOCATE` and
+`XLA_PYTHON_CLIENT_ALLOCATOR` (only where they are not already set).
 
 ## Numerical invariants
 
@@ -667,7 +746,13 @@ public function is called.
   the mass-ratio normaliser at fixed primary mass integrates on nodes spanning
   the allowed mass-ratio range and tabulates the normaliser divided by the
   low-mass taper, so the conditional density integrates to one inside the prior
-  box, including just above `m_min`;
+  box, including just above `m_min`, to the accuracy of the frozen lattice
+  rule: that rule is coarse at the prior corner (amplitude at its ceiling,
+  length scales at their floors), where `gp3d_m1_chi_z`'s z-conditional
+  density integrates to 0.98 to 1.61 and the q-free models' baseline pairing
+  to 0.02 to 0.46 just above `m_min`; the opt-in
+  `DARKSIRENS_GP_NORM_QUADRATURE=resolved` integrates them to one within
+  1e-3 there;
 - `ang2pix_ring` reproduces `healpy.ang2pix(..., nest=False)` exactly,
   including ring-boundary and polar-cap rounding;
 - marked-host PE and selection views share one catalog view and one mark table,

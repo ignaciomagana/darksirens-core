@@ -41,14 +41,18 @@ def nested_sampler_preflight(
     # The remedies name core's public ``infer`` keywords. The frozen legacy
     # text named command-line flags and a diagnostic script core does not
     # ship; the Phase 6G probe maps those strings explicitly before its
-    # otherwise verbatim comparison.
+    # otherwise verbatim comparison. ``infer`` refuses the two likelihood
+    # keywords for an InferenceTarget, whose likelihood is built with them,
+    # so the script's remedy is replaced by that one.
     remedies = (
         'Remedies: infer(..., selection_neff_guard="soft") (finite penalized '
         "wall — the sampler initializes and is pushed toward the region "
         "satisfying the criterion); infer(..., max_likelihood_variance=<cap>) "
         "(accept a larger MC variance — the measured sigma^2 at your best-fit "
-        'point must be below <cap>). infer(..., sampler_preflight="off") skips '
-        "this probe."
+        "point must be below <cap>); for an InferenceTarget, whose likelihood "
+        "options infer refuses, build its likelihood with "
+        "selection_neff_soft_guard=True or max_likelihood_variance=<cap> "
+        'instead. infer(..., sampler_preflight="off") skips this probe.'
     )
     criterion = (
         "the selection variance guard (GWTC-4.0/5.0 total-log-likelihood "

@@ -359,3 +359,259 @@ def test_marked_guards_refuse_traced_tables_instead_of_skipping():
         COSMO, PARAMS, cat, cache, MODEL, marks, eta
     ))(jnp.asarray([1.5]))
     assert np.all(np.isfinite(np.asarray(state.log_Z)))
+
+
+def _nan_mark_fixture():
+    """Three ragged rows of centred marks, as in the 2026-10-20 review."""
+    rng = np.random.default_rng(2)
+    ng = np.array([50, 30, 10], dtype=np.int32)
+    z = np.full((3, 50), 100.0)
+    for r in range(3):
+        z[r, : ng[r]] = np.sort(rng.uniform(0.05, 0.6, ng[r]))
+    cat = GalaxyCatalog(
+        apix=np.pi / (3 * 64 * 64),
+        zgals=jnp.asarray(z),
+        dzgals=jnp.asarray(np.full_like(z, 1.0e-3)),
+        wgals=jnp.asarray(np.ones_like(z)),
+        ngals=jnp.asarray(ng),
+    )
+    real = np.arange(50)[None, :] < ng[:, None]
+    values = np.where(real[..., None], rng.normal(0.0, 0.3, (3, 50, 1)), 0.0)
+    params = CatalogParameters(n0=0.01, delta=0.0, sigma_kde=0.01, z_depth=None)
+    return cat, real, values, params
+
+
+def _state_and_prior(cat, params, values, eta):
+    marks = CenteredHostMarks(("logmstar",), jnp.asarray(values))
+    state = build_marked_incomplete_catalog_prior_state(
+        COSMO, params, cat, build_observed_density_cache(cat), MODEL, marks,
+        jnp.asarray([eta]),
+    )
+    zq = jnp.linspace(0.1, 0.5, 5)
+    out = [
+        np.asarray(eval_incomplete_catalog_prior_state_vmap(
+            zq, jnp.full(5, row, dtype=jnp.int32), state, cat))
+        for row in range(3)
+    ]
+    return state, np.stack(out)
+
+
+def test_nan_padded_marks_give_the_zero_padded_prior():
+    """Padding is ignored whatever it holds: NaN padding used to give log_Z = 0."""
+    cat, real, values, params = _nan_mark_fixture()
+    nan_padded = np.where(real[..., None], values, np.nan)
+    check_centered_marks(MODEL, CenteredHostMarks(("logmstar",), jnp.asarray(nan_padded)), cat)
+    want_state, want = _state_and_prior(cat, params, values, 0.5)
+    got_state, got = _state_and_prior(cat, params, nan_padded, 0.5)
+    assert np.all(np.isfinite(np.asarray(want_state.log_Z)))
+    assert np.all(np.asarray(want_state.log_Z) > 1.0)
+    np.testing.assert_array_equal(np.asarray(got_state.log_Z), np.asarray(want_state.log_Z))
+    np.testing.assert_array_equal(got, want)
+
+    cache = build_observed_density_cache(cat)
+
+    def grad_log_Z(table):
+        marks = CenteredHostMarks(("logmstar",), jnp.asarray(table))
+        return np.asarray(jax.grad(lambda e: jnp.sum(
+            build_marked_incomplete_catalog_prior_state(
+                COSMO, params, cat, cache, MODEL, marks, e).log_Z))(jnp.asarray([0.5])))
+
+    grad_nan, grad_zero = grad_log_Z(nan_padded), grad_log_Z(values)
+    assert np.all(np.isfinite(grad_nan))
+    np.testing.assert_array_equal(grad_nan, grad_zero)
+
+
+def test_non_finite_real_mark_is_refused():
+    """One real galaxy with a NaN mark used to give finite garbage in every row."""
+    cat, real, values, params = _nan_mark_fixture()
+    for bad in (np.nan, np.inf):
+        table = values.copy()
+        table[1, 3, 0] = bad
+        marks = CenteredHostMarks(("logmstar",), jnp.asarray(table))
+        with pytest.raises(ValueError, match=r"non-finite host mark \(first: row 1, slot 3"):
+            check_centered_marks(MODEL, marks, cat)
+        with pytest.raises(ValueError, match="non-finite host mark"):
+            _state_and_prior(cat, params, table, 0.5)
+    # Two equal tables built as separate objects reach the finiteness error,
+    # not a misleading "different views" one.
+    cat_v, marks_v = _view(2, [0, 1], 0.6)
+    table = np.array(marks_v.values)
+    table[0, 1, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite host mark"):
+        _marked_likelihood(
+            cat_v, CenteredHostMarks(("logmstar",), jnp.asarray(table)),
+            cat_v, CenteredHostMarks(("logmstar",), jnp.asarray(table.copy())),
+        )
+
+
+def test_non_finite_reference_row_is_refused():
+    cat, _ = _catalog()
+    ref_z, ref_values = _reference_table()
+    for z_bad, m_bad in ((False, True), (True, False)):
+        z = np.array(ref_z)
+        m = np.array(ref_values)
+        if z_bad:
+            z[4] = np.nan
+        if m_bad:
+            m[4, 0] = np.nan
+        marks = CenteredHostMarks(("logmstar",), _marks().values, jnp.asarray(z), jnp.asarray(m))
+        with pytest.raises(ValueError, match="reference row 4"):
+            check_centered_marks(MODEL, marks, cat)
+
+
+def test_nan_normaliser_poisons_the_marked_row():
+    """A NaN Z (here a NaN eta) must not read as log_Z = 0."""
+    cat, _, values, params = _nan_mark_fixture()
+    state, prior = _state_and_prior(cat, params, values, np.nan)
+    assert np.all(np.isnan(np.asarray(state.log_Z)))
+    assert not np.any(np.isfinite(prior))
+
+
+def test_selection_completeness_is_refused_not_ignored():
+    """The marked prior used to run the count ratio under completeness='selection'."""
+    from darksirens.selection.catalog import GaussianMagnitudeSelection
+
+    cat, params = _catalog()
+    params = params._replace(selection=GaussianMagnitudeSelection(19.5, -20.4, 0.9))
+    with pytest.raises(ValueError, match="count-ratio completeness"):
+        _prior(cat, params, _marks(), eta=0.0)
+    with pytest.raises(ValueError, match="count-ratio completeness"):
+        _marked_likelihood(cat, _marks(), cat, _marks(), params=params)
+
+
+def _weight_correlated_catalog(weight_scale=1.0):
+    """Every row: marks +0.5 / -0.5 with base weights 1 / 4 at z = 0.10 and 0.30.
+
+    The mark carries no redshift structure, but the base weights correlate
+    with it, so ``<h>_w != <h>`` per bin and per row.
+    """
+    z = np.tile(np.array([0.10, 0.10, 0.30, 0.30, 0.0]), (2, 1))
+    w = np.tile(np.array([1.0, 4.0, 1.0, 4.0, 0.0]), (2, 1)) * weight_scale
+    m = np.tile(np.array([0.5, -0.5, 0.5, -0.5, 0.0]), (2, 1))[..., None]
+    cat = GalaxyCatalog(
+        apix=1.0e-2,
+        zgals=jnp.asarray(z),
+        dzgals=jnp.asarray(np.full_like(z, 0.01)),
+        wgals=jnp.asarray(w),
+        ngals=jnp.asarray(np.array([4, 4], dtype=np.int32)),
+    )
+    return cat, CenteredHostMarks(("logmstar",), jnp.asarray(m))
+
+
+def _estimator_prior(cat, marks, eta, estimator):
+    params = CatalogParameters(n0=1.0e-8, delta=0.0, sigma_kde=0.0, z_depth=None)
+    state = build_marked_incomplete_catalog_prior_state(
+        COSMO, params, cat, build_observed_density_cache(cat), MODEL, marks,
+        jnp.asarray([eta]), mu_miss_estimator=estimator,
+    )
+    zq = jnp.linspace(0.02, 0.6, 30)
+    rows = jnp.zeros(zq.shape, dtype=jnp.int32)
+    return np.asarray(eval_incomplete_catalog_prior_state_vmap(zq, rows, state, cat))
+
+
+def test_weighted_mu_miss_keeps_a_redshift_independent_mark_a_shape_null():
+    """Opt-in: with base weights that correlate with the mark, the count mean
+    lets eta move the catalog:missing odds; the base-weight mean cancels."""
+    cat, marks = _weight_correlated_catalog()
+    base_w = _estimator_prior(cat, marks, 0.0, "weighted")
+    base_c = _estimator_prior(cat, marks, 0.0, "count")
+    np.testing.assert_allclose(base_w, base_c, rtol=1e-12, atol=0.0)
+    for eta in (-2.0, 1.5):
+        np.testing.assert_allclose(
+            _estimator_prior(cat, marks, eta, "weighted"), base_w, rtol=1e-12, atol=0.0
+        )
+        # The default stays the legacy count mean, which moves (~0.4 nat here).
+        assert np.max(np.abs(_estimator_prior(cat, marks, eta, "count") - base_c)) > 0.1
+    # Invariant to a global rescaling of the base weights, like the observed
+    # branch, including weights that sum below 1.
+    cat_small, _ = _weight_correlated_catalog(weight_scale=1.0e-6)
+    np.testing.assert_allclose(
+        _estimator_prior(cat_small, marks, 1.5, "weighted"),
+        _estimator_prior(cat, marks, 1.5, "weighted"),
+        rtol=1e-12, atol=0.0,
+    )
+
+
+def test_weighted_mu_miss_refuses_a_reference_table_and_unknown_names():
+    cat, _ = _catalog()
+    with pytest.raises(ValueError, match="mu_miss_estimator must be one of"):
+        _estimator_prior(cat, _marks(), 0.5, "mean")
+    shared = CenteredHostMarks(("logmstar",), _marks().values, *_reference_table())
+    with pytest.raises(ValueError, match="carries\\s+none"):
+        _estimator_prior(cat, shared, 0.5, "weighted")
+    # Reaches both seams of the marked likelihood.  On _catalog() each galaxy
+    # sits alone in its mu_miss bin, where the two means coincide, and the
+    # catalog is complete at the events' redshift, so the two values differed
+    # by rounding alone (+-1e-15 nat locally, equal on some CPUs).  Here the
+    # base weights correlate with the mark inside each bin, and n0 = 1e-5
+    # leaves missing hosts at the events' redshift: ~0.014 nat apart.
+    pe, sel = _events()
+    cat, marks = _weight_correlated_catalog()
+    params = PARAMS._replace(n0=1.0e-5)
+    common = (COSMO, params, POP, pe, cat, build_observed_density_cache(cat), MODEL)
+    values = {}
+    for estimator in ("count", "weighted"):
+        values[estimator] = float(marked_dark_siren_log_likelihood(
+            *common, marks, jnp.asarray([1.5]), sel, cat,
+            build_observed_density_cache(cat), marks, 1, 2, 8.0,
+            pop_model="powerlaw+peak", max_likelihood_variance=1.0e6,
+            mu_miss_estimator=estimator,
+        ))
+    assert np.isfinite(values["weighted"]) and np.isfinite(values["count"])
+    assert abs(values["weighted"] - values["count"]) > 1.0e-3, values
+
+
+def test_marks_survive_standard_jax_tree_operations():
+    """tree_unflatten used to re-run the validating constructor on JAX placeholders."""
+    for marks in (_marks(), CenteredHostMarks(("logmstar",), _marks().values, *_reference_table())):
+        n_leaves = len(jax.tree_util.tree_leaves(marks))
+        assert jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: 0, marks)) == [0] * n_leaves
+        shapes = jax.eval_shape(lambda m: m, marks)
+        assert shapes.names == marks.names
+        assert shapes.values.shape == marks.values.shape
+        moved = jax.device_put(marks)
+        np.testing.assert_array_equal(np.asarray(moved.values), np.asarray(marks.values))
+        doubled = jax.tree_util.tree_map(lambda x: 2.0 * x, marks)
+        assert isinstance(doubled, CenteredHostMarks) and doubled.names == marks.names
+        np.testing.assert_array_equal(np.asarray(doubled.values), 2.0 * np.asarray(marks.values))
+        if marks.reference_values is None:
+            assert doubled.reference_z is None and doubled.reference_values is None
+        else:
+            np.testing.assert_array_equal(
+                np.asarray(doubled.reference_values), 2.0 * np.asarray(marks.reference_values))
+    # A vmap in_axes prefix tree over the marks (row axis of the aligned table).
+    marks = _marks()
+    row_sums = jax.vmap(
+        lambda m: jnp.sum(m.values), in_axes=(jax.tree_util.tree_map(lambda _: 0, marks),)
+    )(marks)
+    np.testing.assert_allclose(
+        np.asarray(row_sums), np.asarray(marks.values).sum(axis=(1, 2)), rtol=1e-14, atol=0.0)
+    # The constructor still validates what users build.
+    with pytest.raises(ValueError, match="N_rows, N_max, N_marks"):
+        CenteredHostMarks(("logmstar",), jnp.zeros(3))
+
+
+def test_non_finite_padded_widths_leave_the_marked_gradients_finite():
+    # As in the unmarked kernel: a NaN padded width is masked out of the
+    # value, but the reverse pass through the masked branch was 0 * NaN.
+    cat, params = _catalog(z_depth=0.25)
+    cache = build_observed_density_cache(cat)
+    pad = np.arange(3)[None, :] >= np.asarray(cat.ngals)[:, None]
+    z = jnp.asarray([0.1, 0.2, 0.22])
+    rows = jnp.asarray([0, 1, 0], dtype=jnp.int32)
+
+    def total(theta, catalog):
+        state = build_marked_incomplete_catalog_prior_state(
+            COSMO._replace(H0=theta[0]), params._replace(sigma_kde=theta[1]),
+            catalog, cache, MODEL, _marks(), jnp.asarray([0.7]),
+        )
+        return jnp.sum(eval_incomplete_catalog_prior_state_vmap(z, rows, state, catalog))
+
+    theta = jnp.asarray([67.74, 0.01])
+    want = jax.value_and_grad(total)(theta, cat)
+    got = jax.value_and_grad(total)(
+        theta, cat._replace(dzgals=jnp.where(jnp.asarray(pad), jnp.nan, cat.dzgals))
+    )
+    assert np.all(np.isfinite(np.asarray(want[1])))
+    assert float(got[0]) == float(want[0])
+    np.testing.assert_allclose(np.asarray(got[1]), np.asarray(want[1]), rtol=1e-12, atol=0.0)

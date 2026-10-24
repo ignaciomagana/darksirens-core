@@ -567,6 +567,39 @@ def test_the_probe_poisons_a_pin_built_under_another_premise(violation):
     assert float(value) == -np.inf
 
 
+def test_the_probe_passes_rows_far_above_the_depth():
+    # Spectroscopic galaxies (dz = 0, sigma_kde = 0: width 1e-4) at z ~ 1
+    # against a 0.3 depth: the depth renormalisation puts log_kw_eff near
+    # 2.5e7 in their rows, where float64 resolves 3.7e-9. The probe and the
+    # shifted pin then differ by 2-3 units of that resolution, several times
+    # the absolute KERNEL_PIN_TOL, which made the pinned likelihood -inf at
+    # 12 of these 25 H0 values while the unpinned one is finite everywhere.
+    store = _galaxies(0.30)
+    zgals, dzgals = np.array(store.catalog.zgals), np.array(store.catalog.dzgals)
+    ngals = np.asarray(store.catalog.ngals)
+    far = [row for row in np.flatnonzero(ngals > 0)[::2]]
+    for row in far:
+        n = ngals[row]
+        zgals[row, :n] = np.sort(np.random.default_rng(int(row)).uniform(0.95, 1.05, n))
+        dzgals[row, :n] = 0.0
+    store = dataclasses.replace(
+        store, catalog=store.catalog._replace(zgals=zgals, dzgals=dzgals)
+    )
+    survey = {"log10n0": -4.0, "delta": 0.0, "sigma_kde": 0.0}
+    auto = model(catalog=store, fixed_survey=survey, **H0_ONLY)
+    off = model(catalog=store, fixed_survey=survey, kernel_pin="off", **H0_ONLY)
+    pinned, unpinned = _bind(auto), _bind(off)
+    assert pinned.kernel_pin is not None
+    probe = np.asarray(pinned.kernel_pin.probe_rows)
+    ref = np.asarray(pinned.kernel_pin.log_kw_eff)[probe]
+    assert ref.max() > 1e7  # the probe reads a row far above the depth
+    for H0 in np.linspace(20.0, 140.0, 25):
+        a, b = float(pinned(_theta(auto, H0))), float(unpinned(_theta(off, H0)))
+        assert np.isfinite(b), (H0, b)
+        assert np.isfinite(a), (H0, a)
+        assert abs(a - b) <= 1e-12 * abs(b), (H0, a, b)
+
+
 def test_probe_rows_are_occupied_and_spread():
     _, bound, _ = _bound_pair("H0")
     rows = np.asarray(bound.kernel_pin.probe_rows)

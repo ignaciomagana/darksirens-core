@@ -91,15 +91,23 @@ def resolve_joint_prior_constraints(
             ok = False
 
         if not ok:
-            warnings.warn(
+            message = (
                 f"joint prior constraint {kind}{tuple(group_labels)} cannot "
                 "be applied as a constraint-preserving cube map with these "
                 "bounds/prior kinds; falling back to rejection (the invalid "
                 "region keeps zero likelihood, proposals there are wasted, "
-                "and logZ carries the log prior-fraction offset).",
-                RuntimeWarning,
-                stacklevel=2,
+                "and logZ carries the log prior-fraction offset)."
             )
+            if kind == "conditional_upper":
+                # Rejection restricts the support only: for the other kinds
+                # that is the declared density, for this one it is not.
+                message += (
+                    " For conditional_upper the prior density changes as well: "
+                    "rejection leaves the uniform density on the region "
+                    "x_i <= x_j, not the declared conditional x_i ~ U(lo, x_j), "
+                    "so the posterior differs, not only logZ."
+                )
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
             continue
 
         resolved.append((str(kind), idx))

@@ -130,7 +130,12 @@ def test_rejected_joint_constraints_preserve_warning(capsys):
 
 
 def test_chained_conditional_upper_is_rejected():
-    with pytest.raises(ValueError, match="chained conditional_upper"):
+    # The advice used to send this very declaration order to the cube map,
+    # which composes a chain only when the conditioning pair comes first.
+    with pytest.raises(
+        ValueError,
+        match=r"(?s)chained conditional_upper.*own pair is declared first",
+    ):
         prepare_numpyro_static_plan(
             ["a", "b", "c"],
             [0.0, 0.0, 0.0],

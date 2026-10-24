@@ -118,6 +118,31 @@ def test_provider_refuses_a_non_divisible_campaign_instead_of_dropping_the_tail(
         )
 
 
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_padding_keeps_each_column_dtype_and_the_event_q(dtype):
+    """A float32 event (compute_dtype="float32") is padded in float32.
+
+    The pad used to rebuild the event through make_gw_event, which recast it
+    to float64 and recomputed q = m2det/m1det there, so batching changed the
+    float32 likelihood although the run fingerprint treats it as layout only.
+    """
+    from darksirens.gw.runtime import pad_gw_event_to_multiple
+    from darksirens.likelihood.mixed_precision import cast_event
+
+    n_sel = 10
+    event = cast_event(_injections(n_sel), dtype)
+    # A q that m2det/m1det does not reproduce bit for bit in either dtype.
+    event = event._replace(q=event.q * jnp.asarray(1.0 + 1e-6, dtype=dtype))
+    padded, pad = pad_gw_event_to_multiple(event, 4)
+    assert pad == 2
+    for name in ("m1det", "m2det", "dL", "chieff", "prior_wt", "q", "nx", "ny", "nz"):
+        assert getattr(padded, name).dtype == dtype, name
+    assert padded.pixels.dtype == jnp.int32 and padded.valid.dtype == jnp.bool_
+    np.testing.assert_array_equal(np.asarray(padded.q[:n_sel]), np.asarray(event.q))
+    assert np.asarray(padded.q[n_sel:]).tolist() == [1.0, 1.0]
+    assert np.asarray(padded.valid).tolist() == [True] * n_sel + [False] * pad
+
+
 def test_padded_selection_entries_use_explicit_valid_mask_not_prior_weight():
     """Padded rows are structural mask entries even if their prior weight is positive."""
     from darksirens.gw.runtime import pad_gw_event_to_multiple

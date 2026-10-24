@@ -20,9 +20,11 @@ at bind time.
 The default (``compute_dtype=None`` or ``"float64"``) never enters this
 module, so its traced program is unchanged bit for bit.
 
-Scope: catalog-free (spectral) and incomplete-catalog (dark) analyses with an
-isotropic angular model, chi_eff populations (no component-spin block) and
-non-Gaussian-process population models. Everything else is refused when the
+Scope: catalog-free (spectral), incomplete-catalog (dark) and field-weighted
+(``catalog_sky_weighting="field"``, no catalog with
+``completeness="complete"``) analyses with an isotropic angular model, chi_eff
+populations (no component-spin block) and non-Gaussian-process population
+models. Everything else (bright sirens, complete catalogs) is refused when the
 analysis is bound. Gaussian-process populations are refused on purpose: their
 covariance algebra is kept in float64 (``population/gp.py`` promotes its
 inputs, and ``cond(K)`` reaches 5e5-2e7), so float32 per-sample weights gain
@@ -43,7 +45,8 @@ The float32 interpolation kernels below mirror the default float64 kernels
 ``cosmology._grid.log_interp_zgrid``,
 ``catalog.models.eval_incomplete_catalog_prior_state``) term for term; the
 ``DARKSIRENS_INTERP_SCAN`` / ``DARKSIRENS_INTERP_SEARCHSORTED`` debugging
-switches do not apply to them.
+switches do not apply to them. The opt-in ``DARKSIRENS_LOW_Z_INTERP=corrected``
+does, through the same helpers as the float64 kernels.
 """
 
 from __future__ import annotations
@@ -185,6 +188,24 @@ def cast_event(event: GWEvent, dtype) -> GWEvent:
     return event._replace(**{name: c(name) for name in event._fields})
 
 
+def refuse_event_underflow(event: GWEvent, dtype) -> None:
+    """:func:`cast_event`'s refusal for an event the low-precision weight rounds itself.
+
+    A likelihood called with ``compute_dtype`` on float64 columns (directly,
+    not through ``bind_analysis``) rounds them inside the weight, where a
+    value below ``dtype``'s normal range flushes to zero and silently drops
+    its sample. The concrete columns are checked here; traced ones (under
+    ``jax.jit``: a binding's own, checked when it was bound) cannot be, and
+    are skipped.
+    """
+    dtype = np.dtype(dtype)
+    for name in event._fields:
+        x = getattr(event, name)
+        if x is None or isinstance(x, jax.core.Tracer):
+            continue
+        _refuse_underflow(name, x, dtype)
+
+
 def _cast_cosmology(cosmology: CosmologyParameters, dtype) -> CosmologyParameters:
     return CosmologyParameters(*(jnp.asarray(v).astype(dtype) for v in cosmology))
 
@@ -203,11 +224,13 @@ def log_jacobian(z, dL, cosmo: CosmologyParameters):
     return jnp.log(ddl) + jnp.log1p(z)
 
 
-def z_of_dL(dL, dL_grid):
+def z_of_dL(dL, dL_grid, H0=None):
     """``cosmology.distances.z_of_dL_precomputed`` with the redshift nodes in dL's dtype."""
     zg = _dist.zgrid.astype(dL.dtype)
     in_grid = (dL >= dL_grid[0]) & (dL <= dL_grid[-1])
     z = _dist._interp_unrolled(dL, dL_grid, zg)
+    if _zgrid_mod.LOW_Z_INTERP == "corrected":
+        z = _dist._corrected_first_distance_cell(z, dL, dL_grid, zg, H0)
     return jnp.where(in_grid, z, jnp.nan)
 
 
@@ -229,6 +252,8 @@ def log_interp_zgrid(z, log_grid):
     i = i - ((i > 1) & (x < zg[i - 1]))
     i = i + ((i < n - 1) & (x >= zg[i]))
     i = jnp.where(x >= zg[-1], n - 1, i)
+    if _zgrid_mod.LOW_Z_INTERP == "corrected":
+        return _zgrid_mod._low_z_corrected_log_interp(z, log_grid, zg, i), i
     fp = log_grid
     df = fp[i] - fp[i - 1]
     dx = zg[i] - zg[i - 1]
@@ -308,7 +333,7 @@ def make_log_weight(
         )
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL(dL_c, dL_grid_c)
+        z = z_of_dL(dL_c, dL_grid_c, cosmo_c.H0)
         m1src = m1det / (1.0 + z)
         ldw = (
             log_p_pop(m1src, q, z, chieff, pop_c, **prep)
@@ -360,7 +385,7 @@ def make_branch_log_weight(
         )
         supported = (dL >= dL_lo) & (dL <= dL_hi)
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL(dL_c, dL_grid_c)
+        z = z_of_dL(dL_c, dL_grid_c, cosmo_c.H0)
         m1src = m1det / (1.0 + z)
         branches = log_prior_branches(z, pix)
         terms = [
@@ -487,6 +512,7 @@ __all__ = [
     "incomplete_catalog_log_prior",
     "is_gaussian_process_population",
     "make_log_weight",
+    "refuse_event_underflow",
     "require_angular_support",
     "require_population_support",
     "resolve_compute_dtype",

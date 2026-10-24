@@ -1,9 +1,25 @@
 """JAX runtime configuration for darksirens.
 
 Importing :mod:`darksirens` does not mutate JAX state. Applications call
-:func:`configure_jax_runtime` before building likelihood state. Scientific
-modules that construct float64 module-level grids enable x64 locally before
-those arrays are created.
+:func:`configure_jax_runtime` before building likelihood state; the public
+entry points (``ds.model``, ``ds.infer``, ``ds.log_likelihood``,
+``ds.load_events``, ``ds.load_injections``, ``ds.Counterpart``) call it.
+
+Importing a scientific submodule changes process-wide settings, for the host
+application's own JAX code too, because those modules build float64
+module-level grids and must enable x64 before the arrays exist:
+
+- ``jax_enable_x64 = True``: :mod:`darksirens.population.utils`,
+  :mod:`darksirens.cosmology._grid`, :mod:`darksirens.cosmology.distances`,
+  :mod:`darksirens.catalog.completeness`, ``.models``, ``.hosts``,
+  ``.redshift``, ``.counterparts``, :mod:`darksirens.selection.catalog` and
+  ``.footprint`` (and every module that imports one of them);
+- ``jax_default_matmul_precision = "highest"``:
+  :mod:`darksirens.cosmology.distances`;
+- the environment defaults ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` and
+  ``XLA_PYTHON_CLIENT_ALLOCATOR=default`` (``os.environ.setdefault``, so an
+  explicit value wins, and child processes inherit them):
+  :mod:`darksirens.gw.samples`.
 """
 
 from __future__ import annotations

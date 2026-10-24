@@ -134,6 +134,46 @@ def test_bright_model_rejects_ambiguous_composition():
         )
 
 
+def test_bright_model_refuses_counterparts_that_make_every_likelihood_minus_inf():
+    # Each of these used to bind and return -inf at every theta, so dynesty
+    # failed with no finite live point and nothing named the counterpart.
+    events, _ = _stores()
+    cp = _counterpart(events)
+
+    def build(*items, nside=1):
+        return ds.model(
+            cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+            population=_fixed_pop(),
+            counterparts=items,
+            counterpart_nside=nside,
+        )
+
+    for field, value, match in (
+        ("dz", 0.0, "dz must be a finite positive"),
+        ("dz", -0.02, "dz must be a finite positive"),
+        ("dz", float("nan"), "dz must be a finite positive"),
+        ("z", float("nan"), "z must be a finite positive"),
+        ("z", 0.0, "z must be a finite positive"),
+        ("z", "0.1", "z must be a real scalar"),
+        ("dz", np.array([0.02, 0.03]), "dz must be a real scalar"),
+        ("pixel", -1, "pixel must be an integer RING pixel id in \\[0, 12\\)"),
+        ("pixel", 12, "pixel must be an integer RING pixel id"),
+        ("pixel", 3.7, "pixel must be an integer RING pixel id"),
+        ("pixel", True, "pixel must be an integer RING pixel id"),
+    ):
+        with pytest.raises(ValueError, match=f"counterpart 1: {match}"):
+            build(cp, cp._replace(**{field: value}))
+    # The pixel frame is the counterpart nside's.
+    build(cp._replace(pixel=47), nside=2)
+    with pytest.raises(ValueError, match="\\[0, 48\\) at counterpart_nside=2"):
+        build(cp._replace(pixel=48), nside=2)
+    # Integral pixel ids of any numeric type are accepted, and a
+    # sky-marginalized counterpart's pixel is never read.
+    for pixel in (np.int64(cp.pixel), float(cp.pixel), np.asarray(cp.pixel)):
+        build(cp._replace(pixel=pixel))
+    build(cp._replace(pixel=-1, sky_marginalized=True))
+
+
 def test_bright_binding_matches_accepted_low_level_likelihood_exactly():
     events, injections = _stores()
     cp = _counterpart(events, sky_marginalized=True)
@@ -177,6 +217,43 @@ def test_bright_binding_matches_accepted_low_level_likelihood_exactly():
     assert np.isfinite(float(actual))
 
 
+def test_bright_likelihood_refuses_a_wrong_sample_count():
+    """A too-small nsamp regrouped the samples across events (event 1 scored on
+    event 0's samples, its own dropped) and returned a finite wrong value
+    instead of raising like the other hierarchies."""
+    events, injections = _stores(n_events=2, nsamp=4)
+    cps = (
+        _counterpart(events, sky_marginalized=True, sample=0),
+        _counterpart(events, sky_marginalized=True, sample=4),
+    )
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=cps,
+        counterpart_nside=1,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+
+    def call(nsamp):
+        return bright_siren_log_likelihood(
+            CosmologyParameters(67.74, 0.3075, -1.0, 0.0),
+            np.asarray(analysis.parameters.fixed_population),
+            bound.gw_pe,
+            bound.catalog,
+            cps,
+            bound.gw_selection,
+            2,
+            nsamp,
+            injections.ndraw,
+            pop_model=analysis.population.model_name,
+        )
+
+    np.testing.assert_array_equal(np.asarray(call(4)), np.asarray(bound(np.array([67.74]))))
+    for nsamp in (2, 3, 5):
+        with pytest.raises(ValueError, match=r"gw_pe has 8 samples, expected n_events\*nsamp"):
+            call(nsamp)
+
+
 def test_bright_binding_requires_one_counterpart_per_event():
     events, injections = _stores(n_events=2, nsamp=2)
     cp = _counterpart(events, sky_marginalized=True)
@@ -188,3 +265,59 @@ def test_bright_binding_requires_one_counterpart_per_event():
     )
     with pytest.raises(ValueError, match="one counterpart per GW event"):
         bind_analysis(analysis, events=events, injections=injections)
+
+
+@pytest.mark.parametrize("pixel_type", [int, np.int64])
+def test_bright_gate_keeps_pixel_ids_above_the_int32_range(pixel_type):
+    """At ``counterpart_nside = 65536`` a southern RING id exceeds 2**31. The
+    ids were stored as int32, so a NumPy int64 counterpart pixel (what
+    ``ang2pix_ring`` returns) never matched and every PE sample was gated to
+    ``-inf``; a Python int matched only by wrapping modulo 2**32."""
+    nside = 65536
+    events, injections = _stores()
+    pixel = ang2pix_ring(nside, events.columns["ra"][0], events.columns["dec"][0])
+    assert int(pixel) > np.iinfo(np.int32).max
+    cp = ds.Counterpart(z=0.105, dz=0.02, pixel=pixel_type(pixel))
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=(cp,),
+        counterpart_nside=nside,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+    ids = np.asarray(bound.catalog.unique_pixels)
+    assert ids.dtype == np.int64
+    np.testing.assert_array_equal(
+        ids[np.asarray(bound.gw_pe.pixels)],
+        ang2pix_ring(nside, events.columns["ra"], events.columns["dec"]),
+    )
+    value = float(bound(np.array([67.74])))
+    assert np.isfinite(value)
+    # The gate still compares: a counterpart in the next pixel, which no PE
+    # sample shares, leaves the event no support.
+    elsewhere = ds.Counterpart(z=0.105, dz=0.02, pixel=pixel_type(pixel) + 1)
+    other = bind_analysis(
+        ds.model(
+            cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+            population=_fixed_pop(),
+            counterparts=(elsewhere,),
+            counterpart_nside=nside,
+        ),
+        events=events,
+        injections=injections,
+    )
+    assert float(other(np.array([67.74]))) == -np.inf
+
+
+def test_bright_gate_keeps_int32_pixel_ids_on_small_skies():
+    events, injections = _stores()
+    nside = 8192
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=(_counterpart(events, nside=nside),),
+        counterpart_nside=nside,
+    )
+    bound = bind_analysis(analysis, events=events, injections=injections)
+    assert np.asarray(bound.catalog.unique_pixels).dtype == np.int32
+    assert np.isfinite(float(bound(np.array([67.74]))))

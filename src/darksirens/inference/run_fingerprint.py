@@ -177,6 +177,14 @@ def fingerprint_from_semantic(semantic, *, advisory=None) -> dict:
     }
 
 
+#: Angular models that declare the same coordinates (labels, bounds, prior
+#: kinds) as another registered model, so a plan's coordinates cannot tell
+#: them apart: :func:`parameter_plan_semantic` records their name
+#: (``ParameterPlan.angular_model``). Every other model is told apart by its
+#: coordinates, and its block carries no name, as before.
+ANGULAR_MODELS_SHARING_COORDINATES = frozenset({"sphere_gp_z", "overdensity_gp"})
+
+
 def parameter_plan_semantic(plan) -> dict:
     """Canonical semantic block of a ParameterPlan, fixed values included.
 
@@ -185,8 +193,11 @@ def parameter_plan_semantic(plan) -> dict:
     ``allow_out_of_prior``, in the catalog kernel pin (``kernel_pin``
     setting, and whether it applies), in ``n0_units`` or in the catalog model
     (``ParameterPlan.catalog_model``: a selection completeness, its selection
-    model and row-fraction digest) or in their per-catalog population blocks
-    (``ParameterPlan.catalog_population``), have different blocks, so a run
+    model and row-fraction digest, a complete catalog's opt-in
+    ``empty_policy``), in their per-catalog population blocks
+    (``ParameterPlan.catalog_population``) or in an angular model that shares
+    its coordinates with another (:data:`ANGULAR_MODELS_SHARING_COORDINATES`),
+    have different blocks, so a run
     fingerprint built from it refuses to resume across them. Fixed values are
     keyed by name, so the order in which they were declared does not matter.
     It belongs in the fingerprint's semantic block, e.g.
@@ -271,6 +282,14 @@ def parameter_plan_semantic(plan) -> dict:
             if getattr(plan, "catalog_population", ())
             else {}
         ),
+        # And the angular model's name, for the models whose coordinates do
+        # not tell them apart; every other plan's block is unchanged.
+        **(
+            {"angular_model": str(plan.angular_model)}
+            if getattr(plan, "angular_model", "isotropic")
+            in ANGULAR_MODELS_SHARING_COORDINATES
+            else {}
+        ),
     })
 
 
@@ -283,7 +302,14 @@ def parameter_plan_semantic(plan) -> dict:
 #     different cap moves where the hard guard returns -inf and the size of
 #     the soft penalty);
 #   * selection_neff_soft_guard=True replaces the hard -inf wall below the
-#     selection N_eff threshold by a smooth penalty.
+#     selection N_eff threshold by a smooth penalty.  For a binding of a
+#     one-catalog field analysis it also records
+#     "one_catalog_field_density": "normalised": since 2026-10-20 that
+#     analysis's density under the soft guard is n_1 / Z_1, as in the frozen
+#     reference (before, n_1 alone, and the soft wall read log mu offset by
+#     +log Z_1), so a checkpoint from before that change is not resumed on the
+#     new likelihood.  The mapping form cannot tell the analysis and records
+#     the guard alone.
 # sel_batch_size and pe_event_block are layout only.  A selection batch is a
 # log-sum-exp over a disjoint slice of the injections, combined by another
 # log-sum-exp (log-sum-exp is additive over disjoint index sets); the padding
@@ -292,7 +318,11 @@ def parameter_plan_semantic(plan) -> dict:
 # the single pass does.  Both therefore compute the same sums and differ only
 # by floating-point reassociation: rtol 1e-12 is the pinned reference contract
 # (tests/test_pe_event_reduction.py), and on the production DESI P12.4 target
-# the single pass and its 131072/32 blocks differ by 4e-16 relative.
+# the single pass and its 131072/32 blocks differ by 4e-16 relative.  With
+# compute_dtype="float32" the scanned and the single-pass programs also round
+# the float32 weights differently (XLA fuses them differently), whatever the
+# batch size: ~1e-8 nats on the 23-event float32 test mock, the float32
+# rounding level that compute_dtype itself records.
 # Recording them would make a requeue with a different memory budget refuse
 # its own checkpoint; the frozen reference's fingerprint excludes both for
 # that reason.
@@ -313,7 +343,11 @@ def likelihood_options_semantic(source) -> dict:
     values (e.g. the options a companion passed to a core likelihood seam).
     Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
     is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
-    the default cap, and ``selection_neff_soft_guard`` when it is ``True``.
+    the default cap, and ``selection_neff_soft_guard`` when it is ``True``;
+    a binding of a one-catalog field analysis under the soft guard also
+    records ``"one_catalog_field_density": "normalised"`` (its density is
+    ``n_1 / Z_1`` there since 2026-10-20; see the note above
+    ``_LIKELIHOOD_LAYOUT_OPTIONS``).
     ``sel_batch_size`` and ``pe_event_block`` never enter: they change the
     memory layout of the same sums, not their value (see the note above
     ``_LIKELIHOOD_LAYOUT_OPTIONS``).  A mapping key that is not a
@@ -364,7 +398,22 @@ def likelihood_options_semantic(source) -> dict:
         )
     if bool(soft):
         out["selection_neff_soft_guard"] = True
+        if not isinstance(source, Mapping) and _is_one_catalog_field(source):
+            out["one_catalog_field_density"] = "normalised"
     return canonical_semantic(out, "semantic.core_numerics.likelihood_options")
+
+
+def _is_one_catalog_field(bound) -> bool:
+    """Whether a binding evaluates a one-catalog field analysis
+    (``ds.model(..., catalog_sky_weighting="field")`` with one catalog)."""
+
+    from darksirens.analysis import FieldCatalogMixtureRedshift
+
+    redshift = getattr(getattr(bound, "analysis", None), "redshift", None)
+    return (
+        isinstance(redshift, FieldCatalogMixtureRedshift)
+        and len(redshift.components) == 1
+    )
 
 
 def _bound_kernel_window(likelihood):
@@ -389,16 +438,45 @@ def _bound_kernel_window(likelihood):
     return (min(tolerances),)
 
 
+def _bound_normalization_grids(likelihood, grids):
+    """The normalisation grids a binding's likelihood traces with, or ``None``.
+
+    The opt-in pairing m1 grid is sized for the binding's own population model
+    (``pop_model_parser`` sizes it whenever the likelihood is traced), so a
+    binding records that grid, not whatever a later binding of a wider model
+    left in the process.  ``grids`` are the settings it is sized from (the
+    binding's own, as it was bound).  ``None`` without a binding or with the
+    grid off.
+    """
+    from darksirens.population import utils
+
+    if grids.pairing_m1_grid is None:
+        return None
+    pop = getattr(getattr(likelihood, "analysis", None), "population", None)
+    if likelihood is None or isinstance(likelihood, Mapping) or pop is None:
+        return None
+    from darksirens.population.registry import get_model, population_m1_support_max
+
+    model = get_model(pop.model_name, shared_beta=pop.shared_beta,
+                      shared_spin=pop.shared_spin, shared_gamma=pop.shared_gamma)
+    return utils.pairing_grid_settings_for_support(
+        population_m1_support_max(model), base=grids
+    )
+
+
 def core_numerics_semantic(likelihood=None) -> dict:
     """Target-setting numerics core resolved in THIS process.
 
     Several of these are latched at import from ``DARKSIRENS_*`` variables
     (``DARKSIRENS_ZMAX``, ``DARKSIRENS_GP_ZNORM_HI``,
-    ``DARKSIRENS_SKY_ZNORM_HI``, ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
-    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*`` and
-    ``DARKSIRENS_CATALOG_*``); the normalisation grids can also be changed at
-    runtime by ``configure_normalization_grids`` and the catalog evaluation
-    layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
+    ``DARKSIRENS_GP_NORM_QUADRATURE``, ``DARKSIRENS_SKY_ZNORM_HI``,
+    ``DARKSIRENS_SKY_ZNORM_PER_LS``, ``DARKSIRENS_SKY_Z_NODE_HI``,
+    ``DARKSIRENS_GPPOP_M_EDGES``/``_Z_EDGES``,
+    ``DARKSIRENS_GW_N_*``, ``DARKSIRENS_GW_PAIRING_*``,
+    ``DARKSIRENS_CATALOG_*`` and ``DARKSIRENS_LOW_Z_INTERP``, which enters
+    only as its opt-in ``"corrected"``); the normalisation grids can also be
+    changed at runtime by ``configure_normalization_grids`` and the catalog
+    evaluation layouts by ``configure_catalog_evaluation``.  A catalog evaluation setting
     (and the pairing settings ``pairing_scale``/``pairing_norm``) enters only
     when it is not its historical value, so a fingerprint made before the
     defaults changed matches when those values are set explicitly; the
@@ -407,7 +485,9 @@ def core_numerics_semantic(likelihood=None) -> dict:
     ``kernel_window="auto"``) are recorded, so a checkpoint written before
     that is not resumed under them (see :mod:`darksirens.catalog.settings`).
     Values are read from the resolved module state, not from ``os.environ``,
-    so they are what the likelihood actually uses.  They change the
+    so they are what the likelihood actually uses; for a binding, the
+    normalisation-grid and catalog evaluation settings are the ones it was
+    bound (and is traced) with.  They change the
     statistical target, so the returned dict belongs in the fingerprint's
     ``semantic`` block, e.g. ``semantic["core_numerics"] =
     core_numerics_semantic(bound)``.  Calling this imports JAX and the
@@ -420,7 +500,10 @@ def core_numerics_semantic(likelihood=None) -> dict:
     options (``compute_dtype``, ``max_likelihood_variance``,
     ``selection_neff_soft_guard``) are added under ``"likelihood_options"``;
     a default binding, or none, adds no key, so the block is then exactly
-    the one ``core_numerics_semantic()`` has always returned.
+    the one ``core_numerics_semantic()`` has always returned.  With the
+    opt-in pairing m1 grid on, a binding's ``normalization_grids`` are the
+    grid sized for its own population model (what its likelihood traces
+    with); without a binding they are the process's current settings.
     """
 
     from darksirens.catalog.settings import catalog_evaluation_settings
@@ -435,7 +518,29 @@ def core_numerics_semantic(likelihood=None) -> dict:
         if options:
             extra["likelihood_options"] = options
 
-    catalog_evaluation = catalog_evaluation_settings().to_dict()
+    gp_normaliser = {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N}
+    if gp._NORM_QUADRATURE != "lattice":
+        # Opt-in (DARKSIRENS_GP_NORM_QUADRATURE); the default enters no key, so
+        # every existing fingerprint is unchanged.
+        gp_normaliser["quadrature"] = gp._NORM_QUADRATURE
+    angular_normaliser = {
+        "z_hi": angular_advanced._ZNORM_HI,
+        "nodes": angular_advanced._ZNORM_N,
+    }
+    # Opt-in sky knobs (DARKSIRENS_SKY_ZNORM_PER_LS, DARKSIRENS_SKY_Z_NODE_HI);
+    # their frozen defaults enter no key.
+    if angular_advanced._ZNORM_PER_LS != 3.0:
+        angular_normaliser["per_ls"] = angular_advanced._ZNORM_PER_LS
+    if angular_advanced._Z_NODE_HI != 3.0:
+        angular_normaliser["z_node_hi"] = angular_advanced._Z_NODE_HI
+    # A binding carries the settings its likelihood is traced under (it
+    # refuses a trace under others); report those, not the live ones.
+    snapshot = getattr(likelihood, "_trace_settings", None)
+    if snapshot is None:
+        grids, evaluation = utils.normalization_grid_settings(), catalog_evaluation_settings()
+    else:
+        grids, evaluation = snapshot
+    catalog_evaluation = evaluation.to_dict()
     bound_window = _bound_kernel_window(likelihood)
     if bound_window is not None:
         # A binding carries the kernel window it was bound with, which is what
@@ -443,23 +548,27 @@ def core_numerics_semantic(likelihood=None) -> dict:
         catalog_evaluation.pop("kernel_window", None)
         if bound_window[0] is not None:
             catalog_evaluation["kernel_window"] = bound_window[0]
+    grids = _bound_normalization_grids(likelihood, grids) or grids
     return canonical_semantic({
         "redshift_grid": {"zmax": _grid.zMax, "nodes": _grid._ZGRID_NODES},
         "distance_table_grid": {
             "zmax": distances.zMax,
             "nodes": distances._ZGRID_NODES,
         },
-        "gp_redshift_normaliser": {"z_hi": gp._ZNORM_HI, "nodes": gp._ZNORM_N},
+        "gp_redshift_normaliser": gp_normaliser,
         "gp_population_edges": {
             "mass": list(gp._GPPOP_M_EDGES),
             "redshift": list(gp._GPPOP_Z_EDGES),
         },
-        "angular_redshift_normaliser": {
-            "z_hi": angular_advanced._ZNORM_HI,
-            "nodes": angular_advanced._ZNORM_N,
-        },
-        "normalization_grids": utils.normalization_grid_settings().to_dict(),
+        "angular_redshift_normaliser": angular_normaliser,
+        "normalization_grids": grids.to_dict(),
         **({"catalog_evaluation": catalog_evaluation} if catalog_evaluation else {}),
+        # Only the opt-in value enters, so every default fingerprint is unchanged.
+        **(
+            {"low_z_interpolation": _grid.LOW_Z_INTERP}
+            if _grid.LOW_Z_INTERP != "legacy"
+            else {}
+        ),
         **extra,
     })
 
@@ -468,15 +577,18 @@ def core_environment_advisory() -> dict:
     """Advisory provenance: versions and every ``DARKSIRENS_*`` variable set.
 
     Belongs in the fingerprint's ``advisory`` block (not hashed); its
-    ``code.darksirens_version`` entry feeds the code-identity drift warning.
-    The target-setting settings themselves are hashed via
+    ``code`` entry (:func:`darksirens._code_identity.code_identity`: the
+    version and, when it can be read, the git commit of darksirens and of
+    TinyNS) feeds the code-identity drift warning, which a resume under
+    another core commit with the same configuration then raises. The
+    target-setting settings themselves are hashed via
     :func:`core_numerics_semantic`.
     """
 
     import platform
     from importlib import metadata
 
-    import darksirens
+    from darksirens._code_identity import code_identity
 
     def _dist_version(name):
         try:
@@ -485,7 +597,7 @@ def core_environment_advisory() -> dict:
             return None
 
     return {
-        "code": {"darksirens_version": str(darksirens.__version__)},
+        "code": code_identity(),
         "numerics_stack": {
             "python": platform.python_version(),
             "numpy": np.__version__,

@@ -249,9 +249,14 @@ def test_load_catalog_warns_on_a_negative_redshift_of_a_real_galaxy(tmp_path):
     z[first, 0], z[last, 0] = -0.01, -0.002
     with pytest.warns(
         UserWarning, match=r"2 real galaxies have a negative redshift \(minimum -0\.01\)"
-    ):
+    ) as caught:
         store = load_catalog(_write_catalog(tmp_path / "c.h5", zgals=z))
     assert store.catalog.zgals.min() == -0.01
+    # It used to say every such galaxy stays a host near z = 0; one many
+    # kernel widths below zero is refused at bind.
+    message = str(caught[0].message)
+    assert "within a few kernel widths of zero stays a host" in message
+    assert "binding refuses one farther below" in message
     # In the padding a negative redshift is only a placeholder.
     z = np.where(_padding(STORE.catalog), -1.0, STORE.catalog.zgals)
     with warnings.catch_warnings():
@@ -386,6 +391,48 @@ def test_event_block_check_skips_what_it_cannot_judge():
     assert errors == [] and len(cautions) == 1
 
 
+def _alike_sorted_events(nobs, nsamp, seed=0):
+    """Events drawn from one posterior, each event's samples sorted by dL."""
+    rng = np.random.default_rng(seed)
+    n = nobs * nsamp
+    columns = {
+        "m1det": 35.0 * np.exp(rng.normal(0.0, 0.05, n)),
+        "dL": 700.0 * np.exp(rng.normal(0.0, 0.12, n)),
+        "ra": rng.uniform(1.0, 1.3, n),
+        "dec": rng.uniform(-0.2, 0.1, n),
+    }
+    order = np.argsort(columns["dL"].reshape(nobs, nsamp), axis=1)
+    return {
+        name: np.take_along_axis(values.reshape(nobs, nsamp), order, axis=1).ravel()
+        for name, values in columns.items()
+    }
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(64, 2048), (32, 32)])
+def test_alike_events_sorted_inside_each_event_only_warn(nobs, nsamp):
+    # Reading rows i, i + nobs, ... picks the same dL ranks out of every
+    # sorted event, which separates beyond chance; the layout is still valid.
+    errors, cautions = event_block_problems(_alike_sorted_events(nobs, nsamp), nobs, nsamp)
+    assert errors == []
+    (message,) = cautions
+    assert f"no column separates the {nobs} declared event blocks" in message
+
+
+@pytest.mark.parametrize("nobs, nsamp", [(8, 64), (64, 2048)])
+def test_sample_major_order_is_an_error_when_nobs_divides_nsamp(nobs, nsamp):
+    # Here every rank of an event lands in one sample-major group, so the
+    # sorted-event comparison is live; distinct events must still be caught.
+    pe, _ = gw_stores(n_events=nobs, nsamp=nsamp)
+    sample_major = np.arange(nobs * nsamp).reshape(nobs, nsamp).T.ravel()
+    errors, _ = event_block_problems(
+        {name: np.asarray(values)[sample_major] for name, values in pe.columns.items()},
+        nobs,
+        nsamp,
+    )
+    (message,) = errors
+    assert "interleaved across events" in message
+
+
 def test_load_events_checks_the_event_blocks(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -429,6 +476,9 @@ def test_fixed_log10n0_of_any_catalog_warns_once():
             catalog=[STORE, other],
             catalog_sky_weighting="field",
             fixed_survey={"log10n0": -2.0, "log10n0_c2": -2.4},
+            # The catalogs' nside differ (2 and 4): state the branch
+            # convention, which silences that warning.
+            mixture_density="pixel",
         )
     assert len(caught) == 1
 
@@ -640,3 +690,185 @@ def test_width_rule_below_zero_reads_real_galaxies_in_every_block(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         check_kernels_below_zero(edge, 0.01, 0.01)
+
+
+# ---------------------------------------------------------------------------
+# A draw count below the number of detected injections: 1/N_eff = S2/S^2 -
+# 1/n_draw went negative, its round-off clamp made N_eff = +inf, and every
+# reliability guard passed (the HDF5 loader refused it; in-memory stores and
+# the likelihood seams did not).
+
+
+def test_bind_refuses_ndraw_below_the_detected_injections():
+    from dataclasses import replace
+
+    analysis = ds.model(cosmology=COSMOLOGY, population=POPULATION)
+    short = replace(INJECTIONS, ndraw=INJECTIONS.n_injections // 4)
+    with pytest.raises(ValueError, match="ndraw=192 is smaller than its 768 detected injections"):
+        bind_analysis(analysis, events=EVENTS, injections=short)
+    # Every injection detected (a no-selection mock) is legal.
+    bind_analysis(analysis, events=EVENTS, injections=replace(INJECTIONS, ndraw=INJECTIONS.n_injections))
+
+
+class _VolumeRedshift:
+    """A host-density extension with no parameters: the comoving-volume prior."""
+
+    def parameter_spec(self):
+        from darksirens.analysis import ParameterPlan
+
+        return ParameterPlan(labels=(), lower=(), upper=(), prior_kinds=(), joint_constraints=())
+
+    def log_density(self, z, pixel, cosmology, parameters, state):
+        from darksirens.cosmology.volume import log_comoving_volume_prior
+
+        return log_comoving_volume_prior(z, cosmology)
+
+    def log_auxiliary_likelihood(self, parameters, state):
+        return 0.0
+
+
+def _spectral_seam(pe, sel, n_draw):
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.likelihood.hierarchical import spectral_siren_log_likelihood
+    from darksirens.population import get_fixed_population_params
+
+    return spectral_siren_log_likelihood(
+        CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0),
+        jnp.asarray(get_fixed_population_params(MODEL)),
+        pe, sel, EVENTS.n_events, EVENTS.nsamp, n_draw,
+        pop_model=MODEL, max_likelihood_variance=1.0e6,
+    )
+
+
+def _host_density_seam(pe, sel, n_draw):
+    # The ordinary reducer (_validate_hierarchy_inputs) behind a host-density
+    # companion's sampler target, jitted as a sampler runs it: the injections
+    # are concrete constants of the traced program.
+    from darksirens.likelihood.host_density import make_host_density_target
+
+    target = make_host_density_target(
+        ds.model(cosmology=COSMOLOGY, population=POPULATION),
+        redshift_model=_VolumeRedshift(),
+        gw_pe=pe, gw_selection=sel, pe_state=None, selection_state=None,
+        n_events=EVENTS.n_events, nsamp=EVENTS.nsamp, n_draw=n_draw,
+        max_likelihood_variance=1.0e6,
+    )
+    plan = target.parameters
+    theta = 0.5 * (np.asarray(plan.lower, dtype=float) + np.asarray(plan.upper, dtype=float))
+    return jax.jit(target.log_likelihood)(jnp.asarray(theta))
+
+
+@pytest.mark.parametrize("seam", [_spectral_seam, _host_density_seam])
+def test_likelihood_seams_refuse_ndraw_below_the_live_injections(seam):
+    from darksirens.gw.runtime import make_gw_event
+
+    def event(store):
+        c = store.columns
+        return make_gw_event(
+            m1det=c["m1det"], m2det=c["m2det"], dL=c["dL"], chieff=c["chieff"],
+            prior_wt=store.prior_wt, pixels=np.zeros(len(c["dL"]), dtype=np.int32),
+        )
+
+    pe, sel = event(EVENTS), event(INJECTIONS)
+    with pytest.raises(ValueError, match="n_draw=192.0 is smaller than the 768 live"):
+        seam(pe, sel, 192.0)
+    assert np.isfinite(float(seam(pe, sel, 768.0)))
+
+
+# ---------------------------------------------------------------------------
+# The survey depth
+
+
+def _with_depth(store, z_depth):
+    return CatalogStore(
+        path=store.path, nside=store.nside, z_depth=z_depth, catalog=store.catalog
+    )
+
+
+DEPTH_MODES = {
+    "count_ratio_row": dict(completeness="incomplete", count_ratio="row"),
+    "count_ratio_pooled": dict(completeness="incomplete", count_ratio="pooled"),
+    "selection": CATALOG_MODES["selection"],
+    "field_selection": CATALOG_MODES["field_selection"],
+    "complete": CATALOG_MODES["complete"],
+}
+
+
+@pytest.mark.parametrize("mode", sorted(DEPTH_MODES))
+@pytest.mark.parametrize("z_depth", (np.nan, np.inf, 0.0, -1.0, 6.0))
+def test_a_survey_depth_outside_the_grid_is_refused_at_bind(mode, z_depth):
+    # A NaN or zero depth dropped every galaxy from the observed branch (the
+    # selection completeness then gave the catalog-free value, +11.07 against
+    # -14.78 at H0 = 55); a depth beyond the grid gave a row more observed
+    # hosts than galaxies. Both bound and evaluated with no error.
+    analysis = ds.model(
+        cosmology=COSMOLOGY,
+        population=POPULATION,
+        catalog=_with_depth(STORE, z_depth),
+        **DEPTH_MODES[mode],
+    )
+    with pytest.raises(ValueError, match="z_depth"):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+@pytest.mark.parametrize("z_depth", (0.22, Z_TOP))
+def test_a_survey_depth_inside_the_grid_binds(z_depth):
+    for kwargs in (DEPTH_MODES["count_ratio_row"], DEPTH_MODES["selection"]):
+        assert np.isfinite(_values(_with_depth(STORE, z_depth), **kwargs)).all()
+
+
+def test_a_mixture_names_the_catalog_whose_depth_is_refused():
+    analysis = ds.model(
+        cosmology=COSMOLOGY,
+        population=POPULATION,
+        catalog=[STORE, _with_depth(catalog_store(12), np.nan)],
+        completeness="selection",
+        selection=[SELECTION, SELECTION],
+        catalog_sky_weighting="field",
+    )
+    with pytest.raises(ValueError, match=r"catalog 2 \(catalog-fixture-12\.h5\): z_depth"):
+        bind_analysis(analysis, events=EVENTS, injections=INJECTIONS)
+
+
+@pytest.mark.parametrize("z_depth", (np.nan, 0.0, -0.3))
+def test_load_catalog_refuses_a_survey_depth_that_is_not_a_redshift(tmp_path, z_depth):
+    path = _write_catalog(tmp_path / "c.h5")
+    with h5py.File(path, "a") as f:
+        f.attrs["z_depth"] = z_depth
+    with pytest.raises(ValueError, match="z_depth must be a finite redshift above 0") as info:
+        load_catalog(path)
+    assert str(path) in str(info.value)
+    with h5py.File(path, "a") as f:
+        f.attrs["z_depth"] = 0.3
+    assert load_catalog(path).z_depth == 0.3
+
+
+def test_the_depth_normaliser_reads_a_depth_beyond_the_grid_as_its_end():
+    # Direct callers of the kernel are not checked at bind: there a depth
+    # beyond the grid gave a mass below the depth above one (1.058 for this
+    # row), so N_obs * m counted more hosts than galaxies.
+    from darksirens.catalog.redshift import build_catalog_kernel_state
+    from darksirens.catalog.types import CatalogParameters, GalaxyCatalog
+    from darksirens.cosmology.parameters import CosmologyParameters
+
+    catalog = _jax_catalog(
+        GalaxyCatalog(
+            apix=1.0,
+            zgals=np.array([[0.5, 2.0, 4.5]]),
+            dzgals=np.array([[0.05, 0.2, 0.5]]),
+            wgals=np.ones((1, 3)),
+            ngals=np.array([3], dtype=np.int32),
+        )
+    )
+    cosmo = CosmologyParameters(H0=70.0, Om0=0.3075, w0=-1.0, wa=0.0)
+
+    def mass(z_depth):
+        params = CatalogParameters(sigma_kde=0.0, z_depth=z_depth)
+        state = build_catalog_kernel_state(cosmo, params, catalog)
+        return float(np.exp(state.log_depth_mass[0]))
+
+    at_top = mass(Z_TOP)
+    assert abs(at_top - 1.0) < 1e-12
+    for beyond in (6.0, 10.0):
+        assert mass(beyond) == at_top
+    assert mass(1.0) < 1.0

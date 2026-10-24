@@ -90,7 +90,10 @@ CORE_REMEDIES = (
     "— the sampler initializes and is pushed toward the region satisfying the "
     "criterion); infer(..., max_likelihood_variance=<cap>) (accept a larger MC "
     "variance — the measured sigma^2 at your best-fit point must be below "
-    '<cap>). infer(..., sampler_preflight="off") skips this probe.'
+    "<cap>); for an InferenceTarget, whose likelihood options infer refuses, "
+    "build its likelihood with selection_neff_soft_guard=True or "
+    'max_likelihood_variance=<cap> instead. infer(..., sampler_preflight="off") '
+    "skips this probe."
 )
 
 LEGACY_FLAG_STRINGS = (

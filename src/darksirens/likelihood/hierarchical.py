@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from darksirens.cosmology.distances import (
     dL_of_z,
@@ -54,6 +56,7 @@ def _angular_log_weight_fn(
     dL_grid,
     dL_lo,
     dL_hi,
+    H0=None,
 ):
     """Return frozen ``log g(nhat,z(dL))`` weighting, or ``None`` for isotropy.
 
@@ -75,7 +78,7 @@ def _angular_log_weight_fn(
 
     def _weight(nx, ny, nz, dL):
         dL_c = jnp.clip(dL, dL_lo, dL_hi)
-        z = z_of_dL_precomputed(dL_c, dL_grid)
+        z = z_of_dL_precomputed(dL_c, dL_grid, H0=H0)
         return model.log_g(nx, ny, nz, z, theta)
 
     return _weight
@@ -120,6 +123,7 @@ def spectral_siren_log_likelihood(
         raise ValueError(f"nsamp must be >= 1, got {nsamp}")
     if n_draw <= 0:
         raise ValueError(f"n_draw must be positive, got {n_draw}")
+    _require_ndraw_covers_injections(gw_sel, n_draw)
 
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
@@ -138,7 +142,7 @@ def spectral_siren_log_likelihood(
     dL_lo = dL_grid[0]
     dL_hi = dL_grid[-1]
     angular_weight = _angular_log_weight_fn(
-        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi, H0=H0
     )
 
     compute_dtype = _resolve_compute_dtype(
@@ -175,8 +179,10 @@ def spectral_siren_log_likelihood(
         return jnp.where(supported & jnp.isfinite(ldw), ldw, -jnp.inf)
 
     if compute_dtype is not None:
-        from .mixed_precision import make_log_weight, volume_log_prior
+        from .mixed_precision import make_log_weight, refuse_event_underflow, volume_log_prior
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         _log_weight = make_log_weight(
             dtype=compute_dtype,
             cosmology=cosmology,
@@ -231,7 +237,26 @@ def spectral_siren_log_likelihood(
     return total
 
 
-def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw):
+def _require_ndraw_covers_injections(gw_sel, n_draw):
+    """Refuse ``n_draw`` below the number of live detected injections.
+
+    ``1/N_eff = S2/S^2 - 1/n_draw`` is clamped at zero for round-off, so a
+    draw count smaller than the detected set turns a materially negative value
+    into ``N_eff = +inf``, which passes every reliability guard and drops the
+    Farr correction. Checked when the inputs are concrete (not traced).
+    """
+    valid, prior_wt = gw_sel.valid, gw_sel.prior_wt
+    if any(isinstance(v, jax.core.Tracer) for v in (valid, prior_wt, n_draw)):
+        return
+    n_live = int(np.count_nonzero(np.asarray(valid) & (np.asarray(prior_wt) > 0.0)))
+    if float(n_draw) < n_live:
+        raise ValueError(
+            f"n_draw={n_draw} is smaller than the {n_live} live detected injections; "
+            "n_draw counts every generated injection (detected or not)"
+        )
+
+
+def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw, gw_sel):
     pop_params = jnp.asarray(pop_params)
     if pop_params.ndim == 0 or int(pop_params.shape[0]) == 0:
         raise ValueError(f"empty pop_params for {pop_model!r}")
@@ -241,6 +266,7 @@ def _validate_hierarchy_inputs(pop_params, pop_model, n_events, nsamp, n_draw):
         raise ValueError(f"nsamp must be >= 1, got {nsamp}")
     if n_draw <= 0:
         raise ValueError(f"n_draw must be positive, got {n_draw}")
+    _require_ndraw_covers_injections(gw_sel, n_draw)
     return pop_params
 
 
@@ -315,7 +341,7 @@ def _ordinary_hierarchical_likelihood(
     """
 
     pop_params = _validate_hierarchy_inputs(
-        pop_params, pop_model, n_events, nsamp, n_draw
+        pop_params, pop_model, n_events, nsamp, n_draw, gw_sel
     )
     log_p_pop = pop_model_parser(
         pop_model=pop_model,
@@ -332,7 +358,7 @@ def _ordinary_hierarchical_likelihood(
     dL_grid = dL_of_z(distance_zgrid, H0, Om0, w0, wa)
     dL_lo, dL_hi = dL_grid[0], dL_grid[-1]
     angular_weight = _angular_log_weight_fn(
-        angular_model, angular_params, dL_grid, dL_lo, dL_hi
+        angular_model, angular_params, dL_grid, dL_lo, dL_hi, H0=H0
     )
     # The population's per-likelihood-point state, built once here instead of
     # in every PE block and injection batch (the low-precision weights build
@@ -392,8 +418,14 @@ def _ordinary_hierarchical_likelihood(
         pe_weight = _branch_weight(log_prior_pe, catalog_pe)
         sel_weight_core = _branch_weight(log_prior_sel, catalog_sel)
     if compute_dtype is not None:
-        from .mixed_precision import make_branch_log_weight, make_log_weight
+        from .mixed_precision import (
+            make_branch_log_weight,
+            make_log_weight,
+            refuse_event_underflow,
+        )
 
+        refuse_event_underflow(gw_pe, compute_dtype)
+        refuse_event_underflow(gw_sel, compute_dtype)
         lowp = dict(
             dtype=compute_dtype,
             cosmology=cosmology,
@@ -503,8 +535,13 @@ def dark_siren_log_likelihood(
     reduction in float64; see :mod:`darksirens.likelihood.mixed_precision`.
 
     ``catalog_params.selection`` selects the completeness. ``None`` (the
-    default) is the frozen per-row count ratio read from the observed-density
-    caches. A runtime magnitude-selection model is the opt-in
+    default) is the count ratio read from the observed-density caches, its
+    estimator chosen by the caches' type: an
+    :class:`~darksirens.catalog.completeness.ObservedDensityCache` gives the
+    frozen per-row ratio, a
+    :class:`~darksirens.catalog.completeness.PooledCountRatioCache` the
+    pooled one (what ``bind_analysis`` passes for the ``ds.model`` default,
+    ``count_ratio="pooled"``). A runtime magnitude-selection model is the opt-in
     ``completeness="selection"``: its radial curve, times ``row_fraction_pe``
     / ``row_fraction_sel`` (one coverage fraction per row of each catalog
     view) when given, is every row's completeness
@@ -708,13 +745,20 @@ def bright_siren_log_likelihood(
     )
 
     pop_params = _validate_hierarchy_inputs(
-        pop_params, pop_model, n_events, nsamp, n_draw
+        pop_params, pop_model, n_events, nsamp, n_draw, gw_sel
     )
     counterparts = tuple(counterparts)
     if len(counterparts) != n_events:
         raise ValueError(
             f"bright-siren counterparts has {len(counterparts)} entries but "
             f"n_events={n_events}"
+        )
+    # Each counterpart's slice is checked on its own below, which cannot see a
+    # wrong grouping: a too-small nsamp gives full slices of the wrong samples.
+    n_pe = int(gw_pe.dL.shape[0])
+    if n_pe != n_events * nsamp:
+        raise ValueError(
+            f"gw_pe has {n_pe} samples, expected n_events*nsamp={n_events * nsamp}"
         )
 
     log_p_pop = pop_model_parser(

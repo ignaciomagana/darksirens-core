@@ -19,6 +19,7 @@ import numpy as np
 from jax import jit
 
 from .. import _cosmology_support as _support
+from . import _grid
 from ._interpolation import interpnd, interpnd_scalar_head
 from .parameters import H0_FID, OM0_FID, W0_FID, WA_FID
 
@@ -310,10 +311,51 @@ def z_of_dL(
 ):
     """Invert luminosity distance, returning NaN outside the table support."""
     dL_grid = dL_of_z(zgrid, H0, Om0, w0, wa)
-    return z_of_dL_precomputed(dL, dL_grid)
+    return z_of_dL_precomputed(dL, dL_grid, H0=H0)
 
 
-def z_of_dL_precomputed(dL, dL_grid):
+def _invert_first_distance_cell(dL, dL_grid, z1, H0):
+    """Exact inverse of :func:`dL_of_z` on its first cell ``0 <= z < z1``.
+
+    There the Hermite branch (:func:`_low_z_hermite_correction`) makes the
+    comoving distance ``S z - k z^2``, with ``S = c / H0`` its slope at zero
+    and ``k`` set by ``r(z1) = dL_grid[1] / (1 + z1)``, so ``dL = (1 + z)(S z
+    - k z^2)``. Three Newton steps from the chord estimate, which is off by
+    under 1e-2, reach rounding. ``dL`` must lie in ``[0, dL_grid[1]]``.
+    """
+    c = jnp.asarray(float(speed_of_light), dtype=jnp.result_type(dL_grid.dtype, float))
+    S = c / H0
+    k = (S - dL_grid[1] / ((1.0 + z1) * z1)) / z1
+    z = z1 * dL / dL_grid[1]
+    for _ in range(3):
+        r = S * z - k * z * z
+        z = z - ((1.0 + z) * r - dL) / (r + (1.0 + z) * (S - 2.0 * k * z))
+    return z
+
+
+def _corrected_first_distance_cell(z, dL, dL_grid, nodes, H0):
+    """``z`` with the first cell replaced by :func:`_invert_first_distance_cell`."""
+    if H0 is None:
+        raise ValueError(
+            "DARKSIRENS_LOW_Z_INTERP=corrected inverts the first distance cell "
+            "exactly, which needs H0: call z_of_dL_precomputed(dL, dL_grid, H0=H0)"
+        )
+    # Clipped so the branch not taken stays finite (no NaN in its gradient).
+    first = _invert_first_distance_cell(
+        jnp.clip(dL, dL_grid[0], dL_grid[1]), dL_grid, nodes[1], H0
+    )
+    return jnp.where(dL < dL_grid[1], first, z)
+
+
+def z_of_dL_precomputed(dL, dL_grid, H0=None):
+    """Invert ``dL`` on a precomputed ``dL_of_z(zgrid, H0, Om0, w0, wa)`` grid.
+
+    ``H0`` is that grid's Hubble constant. Only the opt-in
+    ``DARKSIRENS_LOW_Z_INTERP=corrected``
+    (:data:`darksirens.cosmology._grid.LOW_Z_INTERP`) reads it, to invert the
+    first cell exactly (:func:`_invert_first_distance_cell`); the default
+    interpolates the first cell along its chord, as the frozen reference does.
+    """
     dL_grid = jnp.asarray(dL_grid)
     n = dL_grid.shape[0]
     if dL_grid.ndim != 1 or n != zgrid.shape[0]:
@@ -327,6 +369,8 @@ def z_of_dL_precomputed(dL, dL_grid):
         if _USE_INTERP_SCAN
         else _interp_unrolled(dL, dL_grid, zgrid)
     )
+    if _grid.LOW_Z_INTERP == "corrected":
+        z = _corrected_first_distance_cell(z, dL, dL_grid, zgrid, H0)
     return jnp.where(in_grid, z, jnp.nan)
 
 

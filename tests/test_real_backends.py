@@ -258,6 +258,41 @@ def test_resumed_dynesty_runs_report_the_termination_of_the_whole_run(tmp_path):
     assert (again["ncall"], again["niter"]) == (result["ncall"], result["niter"])
 
 
+def test_resuming_a_capped_dynesty_run_keeps_its_maxcall_stop_reason(tmp_path, capsys):
+    """run_nested saves the checkpoint after adding the final live points, so a
+    run stopped by its call cap leaves a finished checkpoint. Resuming it
+    samples nothing, and the cap test (calls made by this run_nested) found 0
+    calls: the record said "unknown" for a run that stopped on maxcall."""
+    pytest.importorskip("dynesty")
+    target = ds.InferenceTarget(
+        log_likelihood=_log_likelihood,
+        parameters=_target().parameters,
+        identity={"test": "capped-resume"},
+    )
+    checkpoint = str(tmp_path / "capped.pkl")
+    options = dict(nlive=50, dlogz=0.1, max_samples=300, show_progress=False, seed=1)
+    with pytest.warns(UserWarning, match="stopped short"):
+        capped = ds.infer(
+            target,
+            sampler="dynesty",
+            checkpoint_interval_seconds=1e-6,
+            checkpoint_file_resolved=checkpoint,
+            **options,
+        )
+    assert capped["stop_reason"] == "maxcall"
+    capsys.readouterr()
+
+    with pytest.warns(UserWarning, match="finished static run"):
+        again = ds.infer(
+            target, sampler="dynesty", resume_from_resolved=checkpoint, **options
+        )
+    assert again["stop_reason"] == "maxcall"
+    assert "checkpoint was saved at the end of a finished run" in capsys.readouterr().out
+    assert again["logZ"] == capped["logZ"]
+    assert again["dlogz_final"] == pytest.approx(capped["dlogz_final"], abs=1e-12)
+    assert (again["ncall"], again["niter"]) == (capped["ncall"], capped["niter"])
+
+
 def test_numpyro_recovers_the_analytic_posterior():
     pytest.importorskip("numpyro")
     result = ds.infer(
@@ -280,6 +315,63 @@ def test_numpyro_recovers_the_analytic_posterior():
     log_likelihood = np.asarray(result["log_likelihood"])
     expected = -0.5 * np.sum(np.asarray(result["samples"]) ** 2, axis=1)
     np.testing.assert_allclose(log_likelihood, expected, rtol=0.0, atol=1e-9)
+
+
+def test_numpyro_enforces_a_target_s_joint_priors(capsys):
+    """NUTS sampled each site on its own box: with a flat likelihood about half
+    the draws broke each constraint (the nested transform gives none), while
+    the run printed that rejection enforced them."""
+    pytest.importorskip("numpyro")
+    import jax.numpy as jnp
+
+    uniform = ("uniform", None, None)
+    plan = ds.ParameterPlan(
+        labels=("w0", "w1", "dx", "dy", "dz", "a", "b"),
+        lower=(0.0, 0.0, -1.0, -1.0, -1.0, 0.0, 0.0),
+        upper=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        prior_kinds=(uniform,) * 7,
+        joint_constraints=(
+            ("simplex", (0, 1)),
+            ("ball3", (2, 3, 4)),
+            ("ordered_le", (5, 6)),
+        ),
+    )
+    target = ds.InferenceTarget(lambda theta: 0.0 * jnp.sum(theta), plan)
+    result = ds.infer(
+        target, sampler="numpyro", show_progress=False, seed=3,
+        nuts_warmup=200, nuts_samples=1000,
+    )
+    assert "enforced for NUTS by likelihood-side REJECTION" in capsys.readouterr().out
+    samples = np.asarray(result["samples"])
+    assert np.all(samples[:, 0] + samples[:, 1] <= 1.0)
+    assert np.all(np.sum(samples[:, 2:5] ** 2, axis=1) <= 1.0)
+    assert np.all(samples[:, 5] <= samples[:, 6])
+    # Still the prior: the walls reject, they do not pin the chain.
+    assert np.ptp(samples[:, 0]) > 0.5 and np.ptp(samples[:, 5]) > 0.5
+
+
+def test_numpyro_lognormal_prior_stays_inside_its_bounds():
+    """The lognormal site's support was (0, inf): NUTS left [1, 10] on half the
+    draws (0.04 to 25) on the untruncated density, median 1.02."""
+    pytest.importorskip("numpyro")
+    import jax.numpy as jnp
+    from scipy.stats import truncnorm
+
+    plan = ds.ParameterPlan(
+        labels=("x",), lower=(1.0,), upper=(10.0,),
+        prior_kinds=(("lognormal", 0.0, 1.0),), joint_constraints=(),
+    )
+    target = ds.InferenceTarget(lambda theta: 0.0 * jnp.sum(theta), plan)
+    result = ds.infer(
+        target, sampler="numpyro", show_progress=False, seed=1,
+        nuts_warmup=300, nuts_samples=2000,
+    )
+    x = np.asarray(result["samples"])[:, 0]
+    # exp(log 10) is 10 to an ulp, the nested transform's top edge too.
+    assert np.all(x >= 1.0) and np.all(x <= 10.0 * (1.0 + 1e-12))
+    # The flat likelihood leaves the prior: lognormal(0, 1) truncated to [1, 10].
+    median = float(np.exp(truncnorm.median(0.0, np.log(10.0))))
+    assert abs(np.median(x) - median) < 0.15, (np.median(x), median)
 
 
 def test_dynesty_diagnostics_names_the_extra_when_matplotlib_is_missing(monkeypatch):

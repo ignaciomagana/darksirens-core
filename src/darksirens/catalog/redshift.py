@@ -64,7 +64,7 @@ _KERNEL_SENTINEL_CUT: float = -1.0e29
 _ROW_CHUNK_AUTO_THRESHOLD: int = 2**25
 _ROW_CHUNK_SIZE: int = 512
 
-# Opt-in galaxy-list layout (``kernel_layout="galaxy_list"``): the per-galaxy
+# Galaxy-list layout (``kernel_layout="galaxy_list"``, the default): the per-galaxy
 # normaliser runs over the real galaxies chunk by chunk, so its node arrays are
 # (chunk x 24) rather than (N_galaxies x 24).  Each galaxy executes the same
 # arithmetic in any chunk.  _GALAXY_MAP picks how the chunks run:
@@ -140,6 +140,19 @@ def _row_real_mask(zs, ws, ngal):
     return ws > 0.0
 
 
+def _padding_safe_widths(dzs, real):
+    """``dzs`` with a non-finite padded width read as 1.0.
+
+    Padded widths are masked out of every value, but a NaN or inf one makes
+    ``sqrt(dz**2 + sigma_kde**2)`` NaN there, and the reverse pass through the
+    masked branch is then ``0 * NaN``: the ``sigma_kde`` gradient (and, in the
+    padded normaliser, the ``H0`` one) came back NaN.  Real widths and finite
+    padding are returned as they are.
+    """
+
+    return jnp.where(real | jnp.isfinite(dzs), dzs, 1.0)
+
+
 def _logsumexp_neginf_safe(terms):
     """Gradient-safe logsumexp with exact ``-inf`` for an all-padding row."""
 
@@ -197,7 +210,7 @@ def _ndtri_one_pass(p):
     branch's coefficients first and runs a single Horner pair over them;
     every operation of the chosen branch is the library's, in the library's
     order, so the value is the library's (checked bit for bit in the tests).
-    Used only by the opt-in galaxy-list layout.
+    Used only by the galaxy-list layout.
     """
 
     dtype = lax.dtype(p).type
@@ -366,11 +379,13 @@ def _renormalize_below_depth(
     renormalization.  Phase 5B uses it to scale the observed-count amplitude.
     ``log_Z_depth``, when given, is the truncated normaliser already
     evaluated (zero on padding), as :func:`_row_log_kernel_norms` returns it.
+    A depth beyond the grid's end is read as the grid's end, where every
+    kernel is already truncated (the mass below it is then one, not more).
     """
 
     if log_Z_depth is None:
         log_Z_depth = _row_log_kernel_norms(
-            zs, sig_eff, real, log_g_grid, z_hi=z_depth
+            zs, sig_eff, real, log_g_grid, z_hi=jnp.minimum(z_depth, _ZMAX)
         )
     log_m = jnp.where(
         has_galaxies,
@@ -392,6 +407,7 @@ def _row_kernel_state(
     log_Z_depth=None,
 ):
     real = _row_real_mask(zs, ws, ngal)
+    dzs = _padding_safe_widths(dzs, real)
     sig_eff = jnp.maximum(
         jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR
     )
@@ -490,7 +506,7 @@ def _log_kw_eff_rowmax(log_kw_eff):
 
 
 # ------------------------------------------------------------------------
-# Opt-in galaxy-list layout of the per-galaxy normaliser
+# Galaxy-list layout of the per-galaxy normaliser (the default)
 # ------------------------------------------------------------------------
 def galaxy_index(catalog: GalaxyCatalog) -> GalaxyIndex:
     """The flat positions of ``catalog``'s real galaxies (host side, NumPy).
@@ -518,7 +534,7 @@ def galaxy_index(catalog: GalaxyCatalog) -> GalaxyIndex:
 
 
 def with_galaxy_index(catalog: GalaxyCatalog) -> GalaxyCatalog:
-    """``catalog`` carrying its :class:`GalaxyIndex` (the galaxy-list opt-in).
+    """``catalog`` carrying its :class:`GalaxyIndex` (the galaxy-list layout).
 
     With the index attached, :func:`build_catalog_kernel_state` evaluates the
     per-galaxy kernel normaliser on the real galaxies only
@@ -624,7 +640,7 @@ def _galaxy_list_log_kernel_norms(catalog, sigma_kde, log_g_grid, z_depth):
     zs = jnp.asarray(catalog.zgals).reshape(-1)[flat]
     dzs = jnp.asarray(catalog.dzgals).reshape(-1)[flat]
     sig_eff = jnp.maximum(jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR)
-    z_his = (_ZMAX,) if z_depth is None else (_ZMAX, z_depth)
+    z_his = (_ZMAX,) if z_depth is None else (_ZMAX, jnp.minimum(z_depth, _ZMAX))
 
     def norms(z, s):
         return tuple(
@@ -700,8 +716,8 @@ def build_catalog_kernel_state(
     """Build per-galaxy observed-host kernel quantities once per proposal.
 
     A catalog that carries a galaxy list (:func:`with_galaxy_index`) has its
-    per-galaxy normaliser evaluated on the real galaxies only (the opt-in
-    ``kernel_layout="galaxy_list"``); every other step, and the state
+    per-galaxy normaliser evaluated on the real galaxies only (the
+    ``kernel_layout="galaxy_list"`` default); every other step, and the state
     returned, is the padded one.  A catalog that carries a kernel window
     (:func:`with_kernel_window`) also gets the window's traced verdict
     (``window_ok``).
@@ -744,6 +760,17 @@ KERNEL_PIN_PROBE_ROWS: int = 8
 #: ``redshift/catalog.py:1006``): the premise holds to ~1e-14 over H0 in
 #: [20, 140]; the smallest violation legacy measured is 3.9e-2.
 KERNEL_PIN_TOL: float = 1.0e-9
+
+#: Rounding allowance of that comparison, in units of the compared value's
+#: float resolution: the tolerance of a slot is the larger of
+#: ``KERNEL_PIN_TOL`` and this many ``eps * |value|``.  It exceeds
+#: ``KERNEL_PIN_TOL`` only where ``|log_kw_eff|`` is above ~7e4, which a finite
+#: survey depth produces for a row whose galaxies all lie thousands of widths
+#: above it (``log_kw_eff`` ~ 2.5e7 for spectroscopic galaxies at z ~ 1
+#: against a depth of 0.3).  There the probe and the shifted pin differ by
+#: 2-3 units of float64 resolution, several times ``KERNEL_PIN_TOL``, so the
+#: absolute comparison failed on rounding alone at about half the H0 values.
+KERNEL_PIN_TOL_EPS: float = 64.0
 
 #: Version tag hashed first into every pin's ``catalog_digest``.
 KERNEL_PIN_DIGEST_SCHEME: str = "darksirens.catalog-kernel-pin.digest/1"
@@ -890,6 +917,22 @@ def _host_blocks(value):
     for start in range(0, n_rows, step):
         block = lax.slice_in_dim(value, start, min(start + step, n_rows))
         yield np.ascontiguousarray(np.asarray(block))
+
+
+def _host_rows(value, rows: slice) -> np.ndarray:
+    """Rows ``rows`` of a 2-D ``value`` on the host, as float64.
+
+    A host array is sliced in place.  A device array is sliced on the device
+    first, so the host copy ``np.asarray`` caches belongs to the slice and is
+    freed with it (see :func:`_host_blocks`).
+    """
+
+    if _host_resident(value):
+        return np.asarray(np.asarray(value)[rows], dtype=np.float64)
+    n_rows = int(value.shape[0])
+    start = min(rows.start or 0, n_rows)
+    stop = n_rows if rows.stop is None else min(rows.stop, n_rows)
+    return np.asarray(lax.slice_in_dim(value, start, stop), dtype=np.float64)
 
 
 def _digest_array(h, name: str, value) -> None:
@@ -1165,7 +1208,8 @@ def pinned_catalog_kernel_state(
     ``pinned.probe_rows`` from the live ``H0``, ``Om0``, ``w0``, ``wa``,
     ``delta``, ``sigma_kde`` and ``z_depth`` with the per-proposal builder and
     returns ``True`` when every slot live in both agrees with the shifted pin
-    to ``KERNEL_PIN_TOL``.  The caller spends a ``False`` verdict on the prior
+    to ``KERNEL_PIN_TOL`` (or ``KERNEL_PIN_TOL_EPS`` units of the shifted
+    value's float resolution, when that is larger).  The caller spends a ``False`` verdict on the prior
     normaliser (see :func:`darksirens.catalog.models.build_incomplete_catalog_prior_state_from_curves`).
     """
 
@@ -1188,10 +1232,12 @@ def pinned_catalog_kernel_state(
     )
     ref_eff = pinned.log_kw_eff[rows]
     compared = (probe_eff > _KERNEL_SENTINEL_CUT) & (ref_eff > _KERNEL_SENTINEL_CUT)
-    ok = jnp.all(
-        jnp.where(compared, jnp.abs(probe_eff - (ref_eff + shift)), 0.0)
-        <= KERNEL_PIN_TOL
+    want = ref_eff + shift
+    tol = jnp.maximum(
+        KERNEL_PIN_TOL,
+        KERNEL_PIN_TOL_EPS * jnp.finfo(want.dtype).eps * jnp.abs(want),
     )
+    ok = jnp.all(jnp.where(compared, jnp.abs(probe_eff - want) <= tol, True))
 
     # -1e30 + shift is exactly -1e30 in f64 (|shift| < 10): padding stays
     # padding, and the row maximum moves with the row.
@@ -1212,7 +1258,7 @@ def pinned_catalog_kernel_state(
 
 
 # ------------------------------------------------------------------------
-# Opt-in redshift window of the per-sample kernel sum
+# Redshift window of the per-sample kernel sum (kernel_window, "auto" by default)
 # ------------------------------------------------------------------------
 #: Relative margin of a window's stored half-width over ``k_r sigma_max,r``.
 #: It covers the rounding of the window's boundary comparisons and, under
@@ -1229,7 +1275,7 @@ _WINDOW_Z_SLACK: float = 1.0e-12
 
 
 class CatalogKernelWindow(NamedTuple):
-    """The opt-in redshift window of the per-sample catalog kernel sum.
+    """The redshift window of the per-sample catalog kernel sum.
 
     ``half_width`` is the ``(N_rows,)`` array of half-widths ``K_r`` (zero
     on an empty row), ``size`` the static window length ``W`` (the slots each
@@ -1306,14 +1352,18 @@ def kernel_window_applies(catalog: GalaxyCatalog, sigma_kde: float) -> bool:
 
     if not np.isfinite(abs(float(sigma_kde))):
         return False
-    z = np.asarray(catalog.zgals, dtype=np.float64)
     ngals = np.asarray(catalog.ngals).astype(np.int64)
-    if z.ndim != 2:
+    if np.ndim(catalog.zgals) != 2:
         return False
-    real = np.arange(z.shape[1])[None, :] < ngals[:, None]
-    if not bool(np.all(np.isfinite(z[real]))):
-        return False
-    return bool(_rows_sorted(z, ngals))
+    n_rows, n_max = (int(n) for n in np.shape(catalog.zgals))
+    cols = np.arange(n_max)[None, :]
+    for rows in row_blocks(n_rows, n_max):
+        z = _host_rows(catalog.zgals, rows)
+        if not bool(np.all(np.isfinite(z[cols < ngals[rows, None]]))):
+            return False
+        if not bool(_rows_sorted(z, ngals[rows])):
+            return False
+    return True
 
 
 def kernel_window(
@@ -1386,34 +1436,44 @@ def kernel_window(
     sigma = abs(float(sigma_kde))
     if not np.isfinite(sigma):
         raise ValueError(f"the kernel window sigma_kde must be finite, got {sigma_kde!r}")
-    z = np.asarray(catalog.zgals, dtype=np.float64)
-    dz = np.asarray(catalog.dzgals, dtype=np.float64)
     ngals = np.asarray(catalog.ngals).astype(np.int64)
-    if z.ndim != 2 or dz.shape != z.shape:
+    if np.ndim(catalog.zgals) != 2 or np.shape(catalog.dzgals) != np.shape(catalog.zgals):
         raise ValueError("zgals and dzgals must be (N_rows, N_max)")
-    n_rows, n_max = z.shape
+    n_rows, n_max = (int(n) for n in np.shape(catalog.zgals))
     if ngals.shape != (n_rows,) or np.any(ngals < 0) or np.any(ngals > n_max):
         raise ValueError("ngals must be (N_rows,) counts in [0, N_max]")
-    real = np.arange(n_max)[None, :] < ngals[:, None]
-    if not bool(np.all(np.isfinite(z[real]))):
-        raise ValueError("the kernel window needs finite real-galaxy redshifts")
-    if not bool(_rows_sorted(z, ngals)):
-        raise ValueError(
-            "the kernel window needs each row's galaxies sorted by redshift: load the "
-            "catalog with sort_rows_by_z=True (the default of load_catalog)"
-        )
-    sig = np.where(
-        real, np.maximum(np.sqrt(dz**2 + sigma**2), SIGMA_EFF_FLOOR), 0.0
-    )
-    sig_max = sig.max(axis=1) if n_max else np.zeros(n_rows)
+    # Row blocks: the temporaries are one block's size, and a device catalog
+    # keeps no host copy of its arrays (see ``_host_rows``).
+    cols = np.arange(n_max)[None, :]
+    blocks = list(row_blocks(n_rows, n_max))
+    sig_max = np.zeros(n_rows)
+    for rows in blocks:
+        z = _host_rows(catalog.zgals, rows)
+        real = cols < ngals[rows, None]
+        if not bool(np.all(np.isfinite(z[real]))):
+            raise ValueError("the kernel window needs finite real-galaxy redshifts")
+        if not bool(_rows_sorted(z, ngals[rows])):
+            raise ValueError(
+                "the kernel window needs each row's galaxies sorted by redshift: load "
+                "the catalog with sort_rows_by_z=True (the default of load_catalog)"
+            )
+        if n_max:
+            dz = _host_rows(catalog.dzgals, rows)
+            sig = np.where(
+                real, np.maximum(np.sqrt(dz**2 + sigma**2), SIGMA_EFF_FLOOR), 0.0
+            )
+            sig_max[rows] = sig.max(axis=1)
     half_width = _window_k(ngals, eps) * sig_max * (1.0 + _WINDOW_WIDTH_MARGIN)
     half_width = np.where(ngals > 0, half_width, 0.0)
     span = 2.0 * half_width * (1.0 + 1.0e-9) + 2.0 * _WINDOW_Z_SLACK
     size = 1
-    for row in np.flatnonzero(ngals > 0):
-        zz = z[row, : ngals[row]]
-        upper = np.searchsorted(zz, zz + span[row], side="right")
-        size = max(size, int(np.max(upper - np.arange(zz.size))))
+    for rows in blocks:
+        z = _host_rows(catalog.zgals, rows)
+        start = rows.start or 0
+        for row in np.flatnonzero(ngals[rows] > 0):
+            zz = z[row, : ngals[start + row]]
+            upper = np.searchsorted(zz, zz + span[start + row], side="right")
+            size = max(size, int(np.max(upper - np.arange(zz.size))))
     size = min(size, max(n_max, 1))
     if isinstance(catalog.zgals, jax.Array):
         half_width = jnp.asarray(half_width)
@@ -1433,7 +1493,7 @@ def with_kernel_window(
     *,
     strict: bool = True,
 ) -> GalaxyCatalog:
-    """``catalog`` carrying its :class:`CatalogKernelWindow` (the window opt-in).
+    """``catalog`` carrying its :class:`CatalogKernelWindow` (the kernel window).
 
     With the window attached, :func:`eval_log_catalog_prior_state` sums each
     sample's kernel over the window's ``W`` slots rather than the whole row,
@@ -1644,6 +1704,16 @@ def _log_catalog_prior_impl(
     params: CatalogParameters,
     catalog: GalaxyCatalog,
 ):
+    if params.z_depth is not None:
+        # The legacy direct prior has no depth (legacy passes it to the state
+        # builder only); refuse one rather than return the untruncated kernel.
+        raise ValueError(
+            "log_catalog_prior and log_catalog_prior_vmap evaluate the catalog "
+            "kernel without a survey depth, and params.z_depth is "
+            f"{params.z_depth!r}: for a depth-limited catalog use "
+            "build_catalog_kernel_state with eval_log_catalog_prior_state, or pass "
+            "params._replace(z_depth=None) for the untruncated kernel"
+        )
     zs = catalog.zgals[row]
     dzs = catalog.dzgals[row]
     ws = catalog.wgals[row]
@@ -1672,7 +1742,13 @@ def log_catalog_prior(
     catalog: GalaxyCatalog,
     distance_table=None,
 ):
-    """Direct scalar catalog prior; empty rows return exactly ``-inf``."""
+    """Direct scalar catalog prior; empty rows return exactly ``-inf``.
+
+    It has no survey depth: ``params.z_depth`` must be ``None`` (a depth
+    raises ``ValueError``; :func:`eval_log_catalog_prior_state` on a state
+    from :func:`build_catalog_kernel_state` evaluates a depth-limited
+    catalog).
+    """
 
     return _log_catalog_prior_impl(z, row, cosmo, params, catalog)
 
@@ -1686,7 +1762,10 @@ def log_catalog_prior_vmap(
     catalog: GalaxyCatalog,
     distance_table=None,
 ):
-    """Distance-table-aware vector boundary over paired ``(z, row)`` values."""
+    """Distance-table-aware vector boundary over paired ``(z, row)`` values.
+
+    As :func:`log_catalog_prior`, ``params.z_depth`` must be ``None``.
+    """
 
     return vmap(
         lambda zi, ri: _log_catalog_prior_impl(zi, ri, cosmo, params, catalog)
@@ -1700,6 +1779,7 @@ __all__ = [
     "KERNEL_PIN_H0_REF",
     "KERNEL_PIN_PROBE_ROWS",
     "KERNEL_PIN_TOL",
+    "KERNEL_PIN_TOL_EPS",
     "KERNEL_WIDTHS_BELOW_ZERO_MAX",
     "PinnedCatalogKernel",
     "SIGMA_EFF_FLOOR",

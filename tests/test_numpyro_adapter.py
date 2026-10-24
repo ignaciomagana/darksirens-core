@@ -130,6 +130,7 @@ def _plan(labels, *, conditional_pairs=(), conditioned=()):
         upper=jnp.asarray([1.0] * len(labels)),
         conditional_pairs=tuple(conditional_pairs),
         conditioned=frozenset(conditioned),
+        rejected_constraints=(),
         target_accept=0.85,
         max_tree_depth=3,
         num_warmup=2,
@@ -250,3 +251,30 @@ def test_conditional_upper_samples_conditioner_before_child(monkeypatch):
     np.testing.assert_array_equal(
         result["log_likelihood"], posterior["log_likelihood"]
     )
+
+
+def test_rejected_joint_constraints_enter_the_nuts_model_as_a_factor(monkeypatch):
+    """The static plan announced likelihood-side rejection, but the model never
+    read ``rejected_constraints``: a target's flat likelihood left the box."""
+    zeros = {"x": np.zeros(1), "y": np.zeros(1), "z": np.zeros(1)}
+    extra = {
+        "diverging": np.zeros(1, dtype=bool),
+        "num_steps": np.ones(1, dtype=int),
+        "accept_prob": np.ones(1),
+    }
+    labels = ["x", "y", "z"]
+    for low, expected in ((0.0, 0.0), (0.6, -np.inf)):
+        events = _install_fake_numpyro(monkeypatch, posterior=zeros, extra=extra)
+        plan = _plan(labels)
+        # The fake Uniform site takes its midpoint: 0.5 (valid) or 0.8 (x + y > 1).
+        plan.lower = jnp.asarray([low, low, 0.0])
+        plan.rejected_constraints = (("simplex", (0, 1)), ("ordered_le", (2, 1)))
+        run_numpyro(
+            lambda theta: jnp.asarray(0.0),
+            labels,
+            SimpleNamespace(seed=0, show_progress=False),
+            plan,
+            SimpleNamespace(init_values={name: 0.5 for name in labels}),
+        )
+        factors = [event for event in events if event[0] == "factor"]
+        assert factors == [("factor", "likelihood", 0.0), ("factor", "joint_prior", expected)]

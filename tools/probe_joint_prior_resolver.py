@@ -12,6 +12,41 @@ import warnings
 import numpy as np
 
 
+#: Declared divergence from the frozen reference: core's rejection-fallback
+#: warning for conditional_upper adds this sentence, because rejection changes
+#: that constraint's prior density, not only logZ (MIGRATION.md, "Review fixes
+#: (2026-10-20)", "Samplers and prior transforms", "conditional_upper
+#: warnings"). {case: suffix}: in the candidate arm exactly one warning of the
+#: case ends with the suffix, and it is removed; in the legacy arm no warning
+#: carries it. The rest of every message and every other field stay compared
+#: exactly.
+DECLARED_WARNING_SUFFIX = {
+    "conditional_bad_bounds": (
+        " For conditional_upper the prior density changes as well: rejection "
+        "leaves the uniform density on the region x_i <= x_j, not the declared "
+        "conditional x_i ~ U(lo, x_j), so the posterior differs, not only logZ."
+    ),
+}
+
+
+def _apply_declared_warning_suffix(rows, implementation):
+    """Check each declared case's warning suffix, then report the legacy text."""
+    by_name = {row["name"]: row for row in rows}
+    for name, suffix in DECLARED_WARNING_SUFFIX.items():
+        warnings_ = by_name[name]["warnings"]
+        carrying = [item for item in warnings_ if item["message"].endswith(suffix)]
+        expected = 0 if implementation == "legacy" else 1
+        if len(carrying) != expected:
+            raise SystemExit(
+                f"{name}: {len(carrying)} warning(s) end with the declared suffix, "
+                f"expected {expected} for the {implementation} arm; update "
+                "DECLARED_WARNING_SUFFIX deliberately"
+            )
+        for item in carrying:
+            item["message"] = item["message"][: -len(suffix)]
+    return rows
+
+
 class _FakeModel:
     def __init__(self, groups):
         self.constraint_groups = groups
@@ -154,7 +189,9 @@ def main():
     parser.add_argument("--legacy-root", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    payload = _run(args.implementation, args.legacy_root)
+    payload = _apply_declared_warning_suffix(
+        _run(args.implementation, args.legacy_root), args.implementation
+    )
     args.out.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
 
 
