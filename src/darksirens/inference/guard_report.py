@@ -28,6 +28,13 @@ range: a complete campaign's detections thin out there, a truncated one's
 pile up against its edge. ``N_obs`` times that share is about the
 log-likelihood bias, and the report warns when it exceeds
 ``COVERAGE_WARN_NATS``.
+
+``ds.infer`` runs it for an ordinary analysis and, since
+:data:`TARGET_GUARD_REPORT_ATTRIBUTES` exists, for an
+:class:`~darksirens.InferenceTarget` that exposes what it reads from a
+binding (see :func:`darksirens.inference.public.infer`). The coverage check
+reads a core binding's injections, which a target does not expose, so a
+target's report has no ``selection_coverage``.
 """
 
 from __future__ import annotations
@@ -42,6 +49,20 @@ import numpy as np
 GUARD_REPORT_DRAWS = 32
 # One warning when more than this fraction of the draws is guarded.
 GUARD_WARN_FRACTION = 0.05
+
+#: Capability marker: ``ds.infer`` runs :func:`guard_report` for an
+#: :class:`~darksirens.InferenceTarget` that exposes these attributes, the ones
+#: the report reads from a binding (a ``diagnostics(theta)`` method returning
+#: the likelihood's diagnostics record, ``n_events``,
+#: ``max_likelihood_variance`` and ``selection_neff_soft_guard``), and records
+#: it in ``result["guard_report"]``. A companion that runs its own report when
+#: it builds a target can skip that report when this name exists.
+TARGET_GUARD_REPORT_ATTRIBUTES = (
+    "diagnostics",
+    "n_events",
+    "max_likelihood_variance",
+    "selection_neff_soft_guard",
+)
 
 # The guards a report names, in the order it lists them.
 GUARD_NAMES = ("selection_neff", "pe_mc_variance")
@@ -212,6 +233,7 @@ def guard_report(
     n_draws: int = GUARD_REPORT_DRAWS,
     seed: int = 0,
     warn_fraction: float = GUARD_WARN_FRACTION,
+    for_target: bool = False,
 ):
     """Evaluate ``bound``'s guards at ``n_draws`` prior draws and report them.
 
@@ -239,7 +261,13 @@ def guard_report(
 
     Warns once (``UserWarning``) when more than ``warn_fraction`` of the
     draws is guarded, naming the guard and where it fired, and once when
-    ``max_edge_nats`` exceeds ``COVERAGE_WARN_NATS``.
+    ``max_edge_nats`` exceeds ``COVERAGE_WARN_NATS``. The guarded-draws
+    warning says how to accept a larger Monte-Carlo variance: through
+    ``infer(..., max_likelihood_variance=<cap>)`` for an ordinary analysis,
+    or, with ``for_target=True`` (``ds.infer`` passes it for an
+    :class:`~darksirens.InferenceTarget`, which refuses that argument),
+    through the target's builder, which sets the cap when it builds the
+    target. ``for_target`` changes only that sentence, never the report.
     """
     import jax.numpy as jnp
 
@@ -301,13 +329,26 @@ def guard_report(
         details = "; ".join(
             f"{_describe(name, entry)}: {_GUARD_MEANING[name]}" for name, entry in fired.items()
         )
+        if for_target:
+            # ds.infer refuses max_likelihood_variance for an InferenceTarget.
+            cap_advice = (
+                "An InferenceTarget's max_likelihood_variance is set when the "
+                "target is built (infer refuses it for a target): pass "
+                "max_likelihood_variance=<cap> to the target's builder to accept "
+                "a larger Monte-Carlo variance; "
+            )
+        else:
+            cap_advice = (
+                "infer(..., max_likelihood_variance=<cap>) accepts a larger "
+                "Monte-Carlo variance; "
+            )
         warnings.warn(
             f"The likelihood guard fired on {guarded}/{n_draws} prior draws "
             f"({100.0 * guarded / n_draws:.0f}%): {details}. The likelihood is "
             f"{effect} there, so the sampler leaves that part of the prior out "
             "of the posterior. result['guard_report'] records it. "
-            "infer(..., max_likelihood_variance=<cap>) accepts a larger "
-            "Monte-Carlo variance; infer(..., guard_report=False) skips this check.",
+            + cap_advice
+            + "infer(..., guard_report=False) skips this check.",
             UserWarning,
             stacklevel=4,
         )
@@ -337,6 +378,7 @@ __all__ = [
     "GUARD_NAMES",
     "GUARD_REPORT_DRAWS",
     "GUARD_WARN_FRACTION",
+    "TARGET_GUARD_REPORT_ATTRIBUTES",
     "classify_guard",
     "guard_report",
     "selection_coverage",

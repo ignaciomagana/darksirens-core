@@ -245,6 +245,18 @@ class InferenceTarget:
     ``logZ_corrected = logZ - log_prior_volume_fraction``, as for an
     ordinary analysis; ``None`` (the default) records neither. Core's own
     target builders set it from their analysis.
+
+    A subclass may also expose what ``ds.infer``'s guard report reads from a
+    binding (:data:`darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`:
+    a ``diagnostics(theta)`` method returning the likelihood's diagnostics
+    record, and ``n_events``, ``max_likelihood_variance`` and
+    ``selection_neff_soft_guard``); ``ds.infer`` then runs the report for
+    it. A target whose records carry a leading member axis may supply a
+    ``guard_report(prior_transform, labels, *, n_draws, seed)`` method
+    returning its own report, and a target may record the sampler it was
+    built for as ``built_for_sampler``. See
+    :func:`darksirens.inference.public.infer`. None of these is a field of
+    this class; a target without them runs as before.
     """
 
     log_likelihood: Callable
