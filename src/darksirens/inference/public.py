@@ -50,6 +50,7 @@ _BACKEND_OPTIONS = frozenset({
     "resume_force",
     # Dynesty, and the directory of its optional diagnostics.
     "dynesty_walks",
+    "dynesty_batch",
     "dynesty_diagnostics",
     "run_dir",
     "save_path",

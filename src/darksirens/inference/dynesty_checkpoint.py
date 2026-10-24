@@ -28,20 +28,31 @@ _DETACHED = _DetachedCallable()
 
 
 def save_dynesty_checkpoint(sampler, fname):
-    """Serialize dynesty sampler state with its live callables detached."""
+    """Serialize dynesty sampler state with its live callables detached.
+
+    A pool on the likelihood wrapper (``dynesty_batch``'s batched pool) is
+    live state too: dynesty drops ``sampler.pool`` when it pickles, but not
+    ``sampler.loglikelihood.pool``, so it is detached here like the callables.
+    Without a pool the wrapper is left untouched.
+    """
     from dynesty.utils import save_sampler
 
     holder = sampler.loglikelihood
     held_loglike = holder.loglikelihood
     held_ptform = sampler.prior_transform
+    held_pool = getattr(holder, "pool", None)
     held_save = sampler.__dict__.pop("save", None)
     holder.loglikelihood = _DETACHED
     sampler.prior_transform = _DETACHED
+    if held_pool is not None:
+        holder.pool = None
     try:
         save_sampler(sampler, fname)
     finally:
         holder.loglikelihood = held_loglike
         sampler.prior_transform = held_ptform
+        if held_pool is not None:
+            holder.pool = held_pool
         if held_save is not None:
             sampler.__dict__["save"] = held_save
 
