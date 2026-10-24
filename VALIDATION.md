@@ -22,10 +22,18 @@ NumPy:       1.26.4
 SciPy:       1.12.0
 h5py:        3.12.1
 Astropy:     6.1.4 (validation/legacy probe dependency)
-TinyNS:      3f9e1b2537f32b59f17ee9ce68b2d725681a024c
+TinyNS:      3f9e1b2537f32b59f17ee9ce68b2d725681a024c (0.1.0; see below)
 backend:     CPU for parity gates
 x64:         enabled for scientific evaluation
 ```
+
+The base install now pins TinyNS 1.0.0
+(`a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd`, tag `v1.0.0`), which
+`phase8-regression` and the wheel gate install; 0.1.0 is the TinyNS the
+reconstruction was accepted with. No parity gate runs a sampler (a stochastic
+posterior is never a parity check, see below), so the move changes no gate's
+reference. The `real-backends` workflow keeps TinyNS 0.2.3 for the 0.x
+branch of the TinyNS adapter (MIGRATION.md, "TinyNS 1.0.0").
 
 The package metadata freezes the core numerical runtime to this validated stack.
 Optional sampler/GP integrations remain separately declared.

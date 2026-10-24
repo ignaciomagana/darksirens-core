@@ -139,6 +139,7 @@ def test_every_backend_option_is_accepted(monkeypatch):
         nuts_chain_method="sequential", tinyns_preset="recommended",
         tinyns_walks=9, tinyns_checkpoint_path=None, tinyns_resume_from=None,
         tinyns_checkpoint_path_out=None, tinyns_checkpoint_interval=100,
+        tinyns_num_delete=5,
     )
     infer(_analysis(), events=object(), injections=object(), sampler="tinyns", **options)
     for name, value in options.items():

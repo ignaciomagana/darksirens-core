@@ -185,6 +185,12 @@ def run_tinyns(likelihood, prior_transform, ndim: int, opts):
         return run_tinyns_v1(
             likelihood, prior_transform, ndim, opts, loglike_form=tinyns_loglike
         )
+    if getattr(opts, "tinyns_num_delete", None) is not None:
+        raise ValueError(
+            "tinyns_num_delete is a TinyNS 1.x option; the installed tinyns "
+            f"{getattr(tinyns, '__version__', 'unversioned')} has none. Install "
+            "the base pin (TinyNS 1.0.0) or drop tinyns_num_delete."
+        )
 
     config = build_tinyns_config(opts)
     require_tinyns_for_config(config, tinyns)

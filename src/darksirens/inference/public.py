@@ -63,8 +63,10 @@ _BACKEND_OPTIONS = frozenset({
     "nuts_samples",
     "nuts_chains",
     "nuts_chain_method",
-    # TinyNS.
+    # TinyNS. num_delete is a TinyNS 1.x option (tinyns_v1_adapter); 0.x has
+    # none, so it is not among the tinyns_config.BASE_DEFAULTS names.
     "tinyns_preset",
+    "tinyns_num_delete",
 })
 
 # infer's own keywords, offered as close matches of an unknown one.

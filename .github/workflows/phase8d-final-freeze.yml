@@ -119,6 +119,9 @@ jobs:
           assert scipy.__version__ == "1.12.0"
           assert h5py.__version__ == "3.12.1"
           assert hasattr(tinyns, "NestedSampler")
+          # The base pin is TinyNS 1.0.0, which run_tinyns hands to the 1.x
+          # adapter (tinyns_v1_adapter).
+          assert tinyns.__version__ == "1.0.0", tinyns.__version__
           print("base runtime/default backend: PASS")
           PY
 
@@ -136,7 +139,7 @@ jobs:
               "scipy==1.12.0",
               "h5py==3.12.1",
               "tinyns",
-              "3f9e1b2537f32b59f17ee9ce68b2d725681a024c",
+              "a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd",
           ):
               assert required in text, (required, reqs)
 

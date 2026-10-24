@@ -29,6 +29,8 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # tinyns is the base pin of pyproject.toml (TinyNS 1.0.0, tag v1.0.0);
+      # tests/test_packaging_contract.py checks that the two agree.
       - name: Install validated CPU numerics and test extras
         run: |
           python -m pip install --upgrade pip
@@ -37,7 +39,7 @@ jobs:
             "h5py==3.12.1" "astropy==6.1.4" "pytest==8.3.4" "ruff==0.15.20" \
             "equinox==0.11.10" "tinygp==0.3.0" \
             "dynesty==2.1.4" "numpyro==0.17.0" "matplotlib==3.9.2" "healpy==1.17.3" \
-            "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
+            "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd"
           python -m pip install --no-deps -e .
 
       - name: Definite-error lint

@@ -256,7 +256,7 @@ def test_isotropic_presets_run_on_old_tinyns():
 
 @pytest.mark.parametrize("preset", ["livecov", "bounded_single", "bounded_multi",
                                     "fused_bounded_multi"])
-def test_live_cov_presets_on_the_base_pin_are_refused_with_the_remedy(preset):
+def test_live_cov_presets_on_tinyns_0_1_are_refused_with_the_remedy(preset):
     from darksirens.inference.tinyns_config import TINYNS_LIVECOV_VALIDATED_COMMIT
 
     config = _build(_NS(tinyns_preset=preset))
