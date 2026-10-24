@@ -128,7 +128,7 @@ jobs:
         run: |
           python -m pip install \
             "matplotlib==3.9.2" "healpy==1.17.3" "tqdm==4.66.5" \
-            "dynesty==2.1.4" "seaborn==0.12.2" "numpyro==0.17.0"
+            "dynesty==2.1.4" "seaborn==0.12.2" "numpyro==0.17.0" "numpy==1.26.4" "scipy==1.12.0"
 
       - name: Evaluate pinned legacy spectral fixture in separate process
         run: |
