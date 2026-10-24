@@ -6,10 +6,12 @@ load GW data, build runtime likelihood state, or run a sampler.
 
 from __future__ import annotations
 
+import collections
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import operator
 import re
 from typing import Any
@@ -63,8 +65,9 @@ CATALOG_SKY_WEIGHTINGS = ("conditional", "field")
 FIELD_NORMALIZER_SETTINGS = ("auto", "direct", "moments")
 #: Completeness of one catalog of a field-weighted analysis (``model(...,
 #: catalog_sky_weighting="field", completeness=...)``, one value or one per
-#: catalog): the per-row count ratio, the magnitude-selection curve, or a
-#: complete catalog (every host is in it).
+#: catalog): the count ratio (its estimator set by ``model(...,
+#: count_ratio=...)``), the magnitude-selection curve, or a complete catalog
+#: (every host is in it).
 FIELD_COMPLETENESS_SETTINGS = ("incomplete", "selection", "complete")
 #: Settings of ``model(..., host_mass=...)``: what a sky row's host mass is
 #: under the field weighting. ``"count"`` (the default) is the row's galaxy
@@ -79,10 +82,25 @@ HOST_MASS_SETTINGS = ("count", "weight")
 #: (:func:`darksirens.catalog.completeness.build_pooled_count_ratio_cache`);
 #: ``"row"`` (the legacy estimator, the frozen reference's and the default
 #: before) divides each row's smoothed observed density by the smoothed
-#: expected one, with the fixed kernel width 0.05. ``model(count_ratio=None)``
+#: expected one, with the fixed kernel width 0.05. ``"pooled_kernel"``
+#: (opt-in) is ``"pooled"`` with each galaxy counted through its redshift
+#: kernel instead of its point redshift (``redshift_errors=True`` of the same
+#: function), which photometric redshifts need. ``model(count_ratio=None)``
 #: (the default) resolves to ``"pooled"`` wherever a catalog runs the count
 #: ratio and to ``"row"`` (inert) everywhere else.
-COUNT_RATIO_SETTINGS = ("row", "pooled")
+COUNT_RATIO_SETTINGS = ("row", "pooled", "pooled_kernel")
+#: The pooled count ratios: one curve for the whole catalog, with a window.
+_POOLED_COUNT_RATIOS = ("pooled", "pooled_kernel")
+#: Settings of ``model(..., mixture_density=...)`` for a field mixture of two or
+#: more catalogs: what each catalog's branch ``n_k(z | p_k) / Z_k`` is per.
+#: ``"pixel"`` (the default, the frozen reference's convention) is the host
+#: probability of the sample's row, so branch k carries a factor of its pixel
+#: area; ``"steradian"`` (opt-in) multiplies branch k by ``A_min / A_k``, its
+#: pixel area relative to the smallest (a host density per steradian on the
+#: finest catalog's pixel scale), so the weights are host fractions whatever
+#: each catalog's nside. When every catalog has the same nside that factor is
+#: exactly 1 and the two give the same values under every Neff guard.
+MIXTURE_DENSITY_SETTINGS = ("pixel", "steradian")
 #: Label of the stick-breaking mixture weight of catalog ``m >= 2``.
 MIXTURE_WEIGHT_LABEL = "fcat_{}"
 
@@ -126,8 +144,8 @@ class IncompleteCatalogRedshift:
 
     ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS` and applies without
     a ``selection``; ``count_ratio_window`` is the kernel width of
-    ``"pooled"`` (``None`` for ``"row"``), whose rows may also carry a
-    ``row_fraction``. The field defaults are the legacy ``"row"`` estimator
+    ``"pooled"`` and ``"pooled_kernel"`` (``None`` for ``"row"``), whose rows
+    may also carry a ``row_fraction``. The field defaults are the legacy ``"row"`` estimator
     of the frozen reference, for a record built directly; ``model`` resolves
     its own default (``"pooled"``, window 0.02) and always sets both.
     """
@@ -164,11 +182,11 @@ class FieldCatalogMixtureRedshift:
 
     ``components`` are the catalogs in order (catalog ``k + 1`` of the
     labels' ``_c{k+1}`` suffix). ``completeness`` is one of
-    :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the per-row count
-    ratio; ``"selection"``; ``"complete"``) when every catalog has the same
-    one, else a tuple with one entry per catalog. ``n0_units`` is the unit of
-    every ``log10n0``. ``normalizer`` is the resolved form of the catalogs'
-    survey-global normalisers (``"direct"`` or ``"moments"``, see
+    :data:`FIELD_COMPLETENESS_SETTINGS` (``"incomplete"``, the count ratio of
+    ``count_ratio``; ``"selection"``; ``"complete"``) when every catalog has
+    the same one, else a tuple with one entry per catalog. ``n0_units`` is
+    the unit of every ``log10n0``. ``normalizer`` is the resolved form of the
+    catalogs' survey-global normalisers (``"direct"`` or ``"moments"``, see
     :mod:`darksirens.catalog.mixture`; it is not evaluated for one catalog,
     where it cancels), likewise one value when they agree and a tuple
     otherwise. :attr:`catalog_completeness` and :attr:`catalog_normalizers`
@@ -177,8 +195,12 @@ class FieldCatalogMixtureRedshift:
     count) or ``"weight"`` (the sum of its galaxy weights; every catalog is
     then complete). ``count_ratio`` is one of :data:`COUNT_RATIO_SETTINGS`,
     the estimator of every catalog that runs ``"incomplete"``, and
-    ``count_ratio_window`` the kernel width of ``"pooled"`` (``None`` for
-    ``"row"``).
+    ``count_ratio_window`` the kernel width of ``"pooled"`` and
+    ``"pooled_kernel"`` (``None`` for ``"row"``). ``mixture_density`` is one
+    of :data:`MIXTURE_DENSITY_SETTINGS`: ``"pixel"`` (each branch is the host
+    probability of the sample's row) or ``"steradian"`` (each branch
+    multiplied by ``A_min / A_k``, its catalog's pixel area relative to the
+    smallest).
     """
 
     components: tuple
@@ -188,6 +210,7 @@ class FieldCatalogMixtureRedshift:
     host_mass: str = "count"
     count_ratio: str = "row"
     count_ratio_window: float | None = None
+    mixture_density: str = "pixel"
 
     @property
     def n_catalogs(self) -> int:
@@ -276,9 +299,11 @@ class ParameterPlan:
     ``n0_units`` records ``model(..., n0_units=...)`` for an incomplete-catalog
     analysis (``"physical"`` otherwise).
     ``kernel_pin`` records ``model(..., kernel_pin=...)`` (``"auto"`` or
-    ``"off"``) and ``kernel_pin_active`` whether it applies: an
+    ``"off"``) and ``kernel_pin_active`` whether it applies: a conditional
     incomplete-catalog analysis under ``"auto"`` that samples none of
-    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``. The bound likelihood of
+    ``Om0``, ``w0``, ``wa``, ``delta``, ``sigma_kde``, or a field-weighted
+    analysis under ``"auto"`` with any catalog pinned (complete catalogs
+    included; :func:`catalog_kernel_pins_active`). The bound likelihood of
     such a plan evaluates the catalog kernel quadrature once, at bind time.
     ``catalog_model`` is the canonical JSON text of the catalog model's
     non-default settings (for example ``completeness="selection"`` and its
@@ -291,7 +316,21 @@ class ParameterPlan:
     copy of those parameters (labels ``<label>_c{k}``); ``()`` (the default)
     when every catalog shares the one population. ``n_catalog_population``
     counts those coordinates, which sit after the catalogs' survey blocks and
-    before the mixture weights.
+    before the mixture weights. ``angular_model`` records ``model(...,
+    angular=...)``: two angular models can declare the same coordinates
+    (``"sphere_gp_z"`` and ``"overdensity_gp"`` do), and
+    :func:`~darksirens.inference.run_fingerprint.parameter_plan_semantic`
+    records the name of those. ``fixed_constraint_log_fraction`` is the log
+    prior fraction a partially fixed joint prior pair keeps (``0.0`` when
+    none is): the pair's sampled member is sampled over its own bounds and
+    the likelihood is zero outside the interval the fixed member leaves it,
+    so the raw ``logZ`` carries this data-independent offset, which
+    ``ds.infer`` adds to ``log_prior_volume_fraction``. It is ``0.0`` too
+    when that offset is not computed (a pair member with a per-catalog copy:
+    the likelihood is zero wherever any catalog's population vector leaves
+    the support, and the fraction that keeps depends on which members are
+    copied; the warning says so). It derives from the fixed values, so the
+    fingerprint block does not record it.
     """
 
     labels: tuple[str, ...]
@@ -316,6 +355,8 @@ class ParameterPlan:
     catalog_model: str = ""
     catalog_population: tuple[tuple[int, tuple[str, ...]], ...] = ()
     n_catalog_population: int = 0
+    angular_model: str = "isotropic"
+    fixed_constraint_log_fraction: float = 0.0
 
     @property
     def catalog_model_settings(self) -> dict:
@@ -363,6 +404,52 @@ def _counterpart_nside(value) -> int:
     if not (1 <= nside <= 2**29):
         raise ValueError("counterpart_nside must lie in [1, 2**29]")
     return int(nside)
+
+
+def _check_counterpart(counterpart, index: int, nside: int) -> None:
+    """Refuse a counterpart whose redshift term or sky gate is ``-inf`` everywhere.
+
+    A zero or NaN ``dz``, a NaN redshift, or a gated pixel outside the
+    counterpart frame makes that event's evidence, and so every likelihood
+    value, ``-inf`` with nothing naming the counterpart (legacy refused a
+    non-finite or non-positive ``z`` and ``dz`` at parse time).
+    """
+
+    import numpy as np
+
+    def real_scalar(name):
+        value = getattr(counterpart, name)
+        array = np.asarray(value)
+        if array.ndim != 0 or array.dtype.kind not in "iuf":
+            raise ValueError(
+                f"counterpart {index}: {name} must be a real scalar, got {value!r}"
+            )
+        return float(array)
+
+    z = real_scalar("z")
+    if not (np.isfinite(z) and z > 0.0):
+        raise ValueError(
+            f"counterpart {index}: z must be a finite positive redshift, got {counterpart.z!r}"
+        )
+    dz = real_scalar("dz")
+    if not (np.isfinite(dz) and dz > 0.0):
+        raise ValueError(
+            f"counterpart {index}: dz must be a finite positive redshift width, "
+            f"got {counterpart.dz!r}"
+        )
+    if bool(counterpart.sky_marginalized):
+        return  # the sky gate is off, so the pixel is never read
+    pixel = np.asarray(counterpart.pixel)
+    npix = 12 * nside * nside
+    integral = pixel.ndim == 0 and (
+        np.issubdtype(pixel.dtype, np.integer)
+        or (np.issubdtype(pixel.dtype, np.floating) and float(pixel).is_integer())
+    )
+    if not integral or not (0 <= int(pixel) < npix):
+        raise ValueError(
+            f"counterpart {index}: pixel must be an integer RING pixel id in "
+            f"[0, {npix}) at counterpart_nside={nside}, got {counterpart.pixel!r}"
+        )
 
 
 def resolve_selection_model(selection, z_depth=None):
@@ -450,32 +537,71 @@ def _count_ratio_window(count_ratio, window):
     if count_ratio == "row":
         if window is not None:
             raise ValueError(
-                "count_ratio_window applies only to count_ratio='pooled': the "
-                "legacy estimator's (count_ratio='row') kernel width is fixed at 0.05"
+                "count_ratio_window applies only to count_ratio='pooled' or "
+                "'pooled_kernel': the legacy estimator's (count_ratio='row') "
+                "kernel width is fixed at 0.05"
             )
         return None
-    from darksirens.catalog.completeness import POOLED_WINDOW_DEFAULT
+    from numbers import Real
+
+    import numpy as np
+
+    from darksirens.catalog.completeness import POOLED_BIN_WIDTH, POOLED_WINDOW_DEFAULT
 
     if window is None:
         return POOLED_WINDOW_DEFAULT
-    if isinstance(window, bool) or not isinstance(window, (int, float)):
+    if isinstance(window, (bool, np.bool_)) or not isinstance(window, Real):
         raise TypeError(f"count_ratio_window must be a number, got {window!r}")
     window = float(window)
     if not 0.0 < window < float("inf"):
         raise ValueError(f"count_ratio_window must be finite and > 0, got {window!r}")
+    if window < POOLED_BIN_WIDTH:
+        # The galaxies enter in redshift bins of POOLED_BIN_WIDTH and the
+        # kernel is evaluated at the bin centres: narrower than a bin, a
+        # redshift node between two centres sees no galaxy at all.
+        raise ValueError(
+            f"count_ratio_window must be at least the pooled histogram's bin "
+            f"width {POOLED_BIN_WIDTH:g}, got {window!r}: the galaxies are "
+            "binned at that width, and a narrower kernel evaluated at the "
+            "redshift nodes depends on where they fall between bin centres "
+            "(about half the nodes see no galaxy)"
+        )
     return window
 
 
-def _resolve_row_fraction(row_fraction, store):
-    """Host-validate a per-row coverage fraction; return (read-only array, sha256)."""
+def _resolve_row_fraction(row_fraction, store, *, refuse=True):
+    """Host-validate a per-row coverage fraction; return (read-only array, sha256).
+
+    Real galaxies in a row with fraction 0 are counted twice
+    (:func:`~darksirens.catalog.completeness.galaxies_outside_row_fraction`):
+    refused (``refuse``, the pooled count ratio) or warned about
+    (``completeness="selection"``, whose values are the frozen reference's,
+    which accepts them).
+    """
     import numpy as np
 
+    from darksirens.catalog.completeness import (
+        galaxies_outside_row_fraction,
+        refuse_galaxies_outside_row_fraction,
+    )
     from darksirens.selection.footprint import validate_selection_row_fraction
 
     n_rows = int(np.shape(store.catalog.zgals)[0])
     array = np.array(
         validate_selection_row_fraction(row_fraction, n_rows), dtype=np.float64
     )
+    if refuse:
+        refuse_galaxies_outside_row_fraction(array, store.catalog.ngals)
+    else:
+        text = galaxies_outside_row_fraction(array, store.catalog.ngals)
+        if text is not None:
+            warnings.warn(
+                f"{text} (the frozen reference's values, which completeness="
+                "'selection' keeps). Give those rows their coverage fraction, or "
+                "remove their galaxies",
+                UserWarning,
+                stacklevel=5,
+            )
     array.setflags(write=False)
     return array, hashlib.sha256(array.tobytes()).hexdigest()
 
@@ -500,20 +626,25 @@ def _resolve_redshift(
         and counterparts is None
         and completeness in (None, "incomplete"),
     )
-    pooled = count_ratio == "pooled"
+    pooled = count_ratio in _POOLED_COUNT_RATIOS
     if pooled and (catalog is None or completeness not in (None, "incomplete")):
         raise ValueError(
-            "count_ratio='pooled' applies only to the count-ratio completeness "
+            f"count_ratio={count_ratio!r} applies only to the count-ratio completeness "
             "(completeness='incomplete') of a catalog, got "
             f"catalog={'None' if catalog is None else 'set'} and "
             f"completeness={completeness!r}"
         )
-    if selection is not None and completeness != "selection" or (
-        row_fraction is not None and completeness != "selection" and not pooled
-    ):
+    if selection is not None and completeness != "selection":
         raise ValueError(
-            "selection and row_fraction apply only to completeness='selection', got "
+            "selection applies only to completeness='selection', got "
             f"completeness={completeness!r}"
+        )
+    if row_fraction is not None and completeness != "selection" and not pooled:
+        raise ValueError(
+            "row_fraction applies only to completeness='selection' and to the "
+            "pooled count ratio (count_ratio='pooled', the default of "
+            f"completeness='incomplete'), got completeness={completeness!r} and "
+            f"count_ratio={count_ratio!r}"
         )
     if n0_units is not None:
         if n0_units not in N0_UNITS_SETTINGS:
@@ -557,10 +688,10 @@ def _resolve_redshift(
             raise ValueError("bright sirens require at least one counterpart")
         if not all(isinstance(item, Counterpart) for item in counterpart_tuple):
             raise TypeError("counterparts must contain only darksirens.Counterpart objects")
-        return BrightRedshift(
-            counterpart_tuple,
-            _counterpart_nside(counterpart_nside),
-        ), ()
+        nside = _counterpart_nside(counterpart_nside)
+        for index, item in enumerate(counterpart_tuple):
+            _check_counterpart(item, index, nside)
+        return BrightRedshift(counterpart_tuple, nside), ()
 
     if counterpart_nside is not None:
         raise ValueError("counterpart_nside requires counterparts")
@@ -606,7 +737,7 @@ def _resolve_redshift(
         fraction, digest = (
             (None, None)
             if row_fraction is None
-            else _resolve_row_fraction(row_fraction, catalog)
+            else _resolve_row_fraction(row_fraction, catalog, refuse=False)
         )
         return (
             IncompleteCatalogRedshift(
@@ -655,7 +786,7 @@ def _per_catalog(value, n, what, single_types):
 
 def _resolve_mixture(
     catalogs, completeness, *, n0_units, selection, row_fraction, field_normalizer,
-    host_mass="count", count_ratio=None, count_ratio_window=None,
+    host_mass="count", count_ratio=None, count_ratio_window=None, mixture_density=None,
 ):
     """The :class:`FieldCatalogMixtureRedshift` of ``catalog_sky_weighting="field"``.
 
@@ -685,17 +816,17 @@ def _resolve_mixture(
             where = f" for catalog {k + 1}" if per_catalog else ""
             raise ValueError(
                 "catalog_sky_weighting='field' supports completeness='incomplete' (the "
-                "per-row count ratio), 'selection' or 'complete'"
-                f"{where}, got completeness={entry!r}"
+                "count ratio, its estimator set by count_ratio), 'selection' or "
+                f"'complete'{where}, got completeness={entry!r}"
             )
     resolved = tuple(entry or "incomplete" for entry in entries)
     count_ratio, count_ratio_window = _default_count_ratio(
         count_ratio, count_ratio_window, "incomplete" in resolved
     )
-    pooled = count_ratio == "pooled"
+    pooled = count_ratio in _POOLED_COUNT_RATIOS
     if pooled and "incomplete" not in resolved:
         raise ValueError(
-            "count_ratio='pooled' applies only to the count-ratio completeness "
+            f"count_ratio={count_ratio!r} applies only to the count-ratio completeness "
             f"(completeness='incomplete'), got completeness={completeness!r}"
         )
     if host_mass == "weight":
@@ -711,6 +842,14 @@ def _resolve_mixture(
                 )
     if n0_units is not None and n0_units not in N0_UNITS_SETTINGS:
         raise ValueError(f"n0_units must be one of {N0_UNITS_SETTINGS}, got {n0_units!r}")
+    if n0_units is not None and not any(c in ("incomplete", "selection") for c in resolved):
+        # As for one conditional catalog: with every catalog complete there is
+        # no log10n0 for the unit to apply to.
+        raise ValueError(
+            "n0_units applies only to an incomplete-catalog analysis (a catalog "
+            "with completeness='incomplete' or 'selection'), got "
+            f"completeness={completeness!r}: a complete catalog has no log10n0"
+        )
     per_catalog_normalizer = isinstance(field_normalizer, (list, tuple))
     if per_catalog_normalizer:
         settings = tuple(field_normalizer)
@@ -734,10 +873,18 @@ def _resolve_mixture(
                 f"{setting!r}"
             )
         if setting == "moments" and comp != "selection":
+            if comp == "complete":
+                reason = "a complete catalog's normaliser is its galaxy count"
+            elif pooled:
+                reason = (
+                    "the pooled count ratio factors as the selection curve does, "
+                    "C_p = f_p clip(R), but its moments form is not implemented"
+                )
+            else:
+                reason = "the per-row count ratio's clip at 1 does not factor"
             raise ValueError(
-                "field_normalizer='moments' is exact only for completeness='selection' "
-                "(the count ratio's clip at 1 does not factor, and a complete "
-                f"catalog's normaliser is its galaxy count){where}; use 'direct' or 'auto'"
+                "field_normalizer='moments' is implemented only for "
+                f"completeness='selection' ({reason}){where}; use 'direct' or 'auto'"
             )
         normalizers.append(
             ("moments" if comp == "selection" else "direct") if setting == "auto" else setting
@@ -746,13 +893,17 @@ def _resolve_mixture(
     import numpy as np
 
     fractions = _per_catalog(row_fraction, n, "row_fraction", (np.ndarray,))
-    if "selection" not in resolved and (
-        any(s is not None for s in selections)
-        or (not pooled and any(f is not None for f in fractions))
-    ):
+    if "selection" not in resolved and any(s is not None for s in selections):
         raise ValueError(
-            "selection and row_fraction apply only to completeness='selection', got "
+            "selection applies only to completeness='selection', got "
             f"completeness={completeness!r}"
+        )
+    if "selection" not in resolved and not pooled and any(f is not None for f in fractions):
+        raise ValueError(
+            "row_fraction applies only to completeness='selection' and to the "
+            "pooled count ratio (count_ratio='pooled', the default of "
+            f"completeness='incomplete'), got completeness={completeness!r} and "
+            f"count_ratio={count_ratio!r}"
         )
     if n >= 2:
         for k, store in enumerate(catalogs):
@@ -769,6 +920,34 @@ def _resolve_mixture(
                     "mixture's normaliser Z_k sums the host mass of every row, "
                     "empty rows included"
                 )
+    if mixture_density is not None:
+        if mixture_density not in MIXTURE_DENSITY_SETTINGS:
+            raise ValueError(
+                f"mixture_density must be one of {MIXTURE_DENSITY_SETTINGS}, got "
+                f"{mixture_density!r}"
+            )
+        if n < 2:
+            raise ValueError(
+                "mixture_density applies to a field mixture of two or more catalogs: "
+                "with one catalog its area factor A_min / A_1 is 1"
+            )
+    elif n >= 2:
+        nsides = [int(store.nside) for store in catalogs]
+        if len(set(nsides)) > 1:
+            warnings.warn(
+                f"the catalogs of this field mixture have different HEALPix resolutions "
+                f"(nside {', '.join(str(s) for s in nsides)}): each branch n_k / Z_k is "
+                "the host probability of the sample's row, so branch k carries a "
+                "factor of its pixel area, the weights fcat_k are not host fractions "
+                "and their uniform-simplex prior is not uniform in the host fractions. "
+                "mixture_density='steradian' divides each branch by its pixel area "
+                "relative to the finest catalog's (a host density per steradian on that "
+                "pixel scale); mixture_density='pixel' keeps the frozen "
+                "reference's convention. Pass mixture_density to ds.model to choose "
+                "and silence this warning.",
+                UserWarning,
+                stacklevel=4,
+            )
     components = []
     for k, (store, sel, frac, comp) in enumerate(
         zip(catalogs, selections, fractions, resolved)
@@ -782,11 +961,16 @@ def _resolve_mixture(
             or (frac is not None and not (pooled and comp == "incomplete"))
         ):
             raise ValueError(
-                f"catalog {k + 1} runs completeness={comp!r}: selection and "
-                "row_fraction apply only to completeness='selection'; give None "
-                "for its entry"
+                f"catalog {k + 1} runs completeness={comp!r}: selection applies "
+                "only to completeness='selection', and row_fraction to it and to "
+                "the pooled count ratio (count_ratio='pooled' with "
+                "completeness='incomplete'); give None for its entry"
             )
-        fraction, digest = (None, None) if frac is None else _resolve_row_fraction(frac, store)
+        fraction, digest = (
+            (None, None)
+            if frac is None
+            else _resolve_row_fraction(frac, store, refuse=comp != "selection")
+        )
         try:
             sel = None if sel is None else resolve_selection_model(sel, store.z_depth)
         except (TypeError, ValueError) as exc:
@@ -799,6 +983,26 @@ def _resolve_mixture(
                 row_fraction_sha256=digest,
             )
         )
+    # One catalog split by sky region (for example by depth) into catalogs
+    # with complementary footprints is not what the mixture models.
+    covered = [
+        (k, np.asarray(c.row_fraction) > 0.0)
+        for k, c in enumerate(components)
+        if c.row_fraction is not None
+    ]
+    for i, (k, a) in enumerate(covered):
+        for m, b in covered[i + 1 :]:
+            if a.shape == b.shape and not np.any(a & b):
+                warnings.warn(
+                    f"catalogs {k + 1} and {m + 1} cover disjoint sky rows (their "
+                    "row_fraction is never positive in the same row): the field "
+                    "mixture gives each catalog one global weight, so in the rows of "
+                    "either the other counts every host as missing and each catalog's "
+                    "galaxy contrast is diluted by its weight. It is not the model of "
+                    "one catalog whose depth varies over the sky",
+                    UserWarning,
+                    stacklevel=4,
+                )
     return FieldCatalogMixtureRedshift(
         components=tuple(components),
         completeness=_collapse_setting(resolved),
@@ -807,6 +1011,7 @@ def _resolve_mixture(
         host_mass=host_mass,
         count_ratio=count_ratio,
         count_ratio_window=count_ratio_window,
+        mixture_density=mixture_density or "pixel",
     )
 
 
@@ -1104,7 +1309,7 @@ def _partner_support(kind, members, fixed, bounds):
     return free, lo, hi
 
 
-def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
+def _check_fixed_constraints(model_obj, fixed, bounds, kinds=None, copied=()) -> float:
     """Check fixed values against the model's joint prior constraints.
 
     Fixed values that violate a constraint, or leave the pair's sampled member
@@ -1112,9 +1317,33 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
     whatever ``allow_out_of_prior`` says: that opt-out concerns a parameter's
     own prior bounds, not the support of a joint prior. A partially fixed pair
     otherwise warns: it cannot be a cube map any more.
+
+    Returns the log prior fraction the likelihood-side rejection keeps
+    (``ParameterPlan.fixed_constraint_log_fraction``): the sampled member of
+    a partially fixed pair is sampled over its own bounds, and only the
+    interval the fixed member leaves it has support. It sums the pairs whose
+    sampled member has a uniform prior (``kinds``) and appears in no other
+    partially fixed pair, and none of whose members has a per-catalog copy
+    (``copied``, the base labels of ``model(per_catalog_population=...)``;
+    with a copy the likelihood is zero wherever any catalog's population
+    vector leaves the support, and the fraction of the box that keeps
+    depends on which members are copied, which is not computed here).
+    Another pair's offset is not known here and is named in its warning.
     """
-    for kind, group in getattr(model_obj, "constraint_groups", None) or ():
-        members = [str(label) for label in group]
+    groups = [
+        (kind, [str(label) for label in group])
+        for kind, group in getattr(model_obj, "constraint_groups", None) or ()
+    ]
+    # How many partially fixed pairs each sampled member belongs to.
+    free_count = collections.Counter(
+        label
+        for _, members in groups
+        if any(m in fixed for m in members) and not all(m in fixed for m in members)
+        for label in members
+        if label not in fixed
+    )
+    log_fraction = 0.0
+    for kind, members in groups:
         fixed_members = [label for label in members if label in fixed]
         if not fixed_members:
             continue
@@ -1127,6 +1356,7 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
                     "the likelihood would be zero everywhere"
                 )
             continue
+        known = False
         if (
             len(members) == 2
             and kind in ("ordered_le", "conditional_upper", "simplex")
@@ -1140,14 +1370,64 @@ def _check_fixed_constraints(model_obj, fixed, bounds) -> None:
                     f"(interval [{lo}, {hi}]); fix {free!r} as well or move "
                     "the fixed value"
                 )
+            kind_of_free = (kinds or {}).get(free, _UNIFORM)[0]
+            if (
+                kind_of_free == "uniform"
+                and free_count[free] == 1
+                and not any(label in copied for label in members)
+            ):
+                b_lo, b_hi = bounds[free]
+                log_fraction += math.log((hi - lo) / (b_hi - b_lo))
+                known = True
+        if known:
+            offset = (
+                "logZ carries the log prior-fraction offset, which ds.infer "
+                "adds to log_prior_volume_fraction"
+            )
+        elif any(label in copied for label in members):
+            offset = (
+                "a per-catalog copy of "
+                f"{[label for label in members if label in copied]} makes the "
+                "rejection act on every catalog's population vector, so logZ "
+                "carries an offset that depends on which members are copied and "
+                "that log_prior_volume_fraction does not include"
+            )
+        else:
+            offset = (
+                "logZ carries a log prior-fraction offset that "
+                "log_prior_volume_fraction does not include"
+            )
+        if kind == "conditional_upper" and members[0] in fixed:
+            # The declared pair is upper ~ U(lo, hi), lower | upper ~ U(lo,
+            # upper): at a fixed lower member the upper one's conditional
+            # density is proportional to 1 / (upper - lo), while the sampled
+            # member is uniform over the interval the fixed value leaves it.
+            lo_text = f" - {bounds[members[1]][0]!r}" if members[1] in bounds else ""
+            warnings.warn(
+                f"joint prior constraint {kind}{tuple(members)} has fixed "
+                f"member(s) {fixed_members}, its lower member; {members[1]!r} is sampled "
+                "uniformly over the interval the fixed value leaves it (its "
+                "own uniform prior with likelihood-side rejection, and "
+                f"{offset}). Fixing it also changes the prior on "
+                f"{members[1]!r}: that is not the declared joint prior conditioned "
+                f"on {members[0]!r}, under which {members[1]!r} has a density "
+                f"proportional to 1 / ({members[1]}{lo_text}): the posterior "
+                "differs from that conditional, not only logZ. Fix "
+                f"{members[1]!r} instead (the lower member then has the "
+                "declared conditional prior), or both members.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            continue
         warnings.warn(
             f"joint prior constraint {kind}{tuple(members)} has fixed "
             f"member(s) {fixed_members}; the sampled member(s) keep its "
             "likelihood-side rejection (the invalid region keeps zero "
-            "likelihood, and logZ carries the log prior-fraction offset).",
+            f"likelihood, and {offset}).",
             RuntimeWarning,
             stacklevel=4,
         )
+    return log_fraction
 
 
 def per_catalog_population_label(label: str, catalog_number: int) -> str:
@@ -1327,12 +1607,15 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     and row-fraction digest. The completeness and the normaliser are one
     string when every catalog shares it (the record of every analysis before
     per-catalog completeness) and a list with one entry per catalog otherwise.
-    ``host_mass`` enters only when it is not the default ``"count"``, and
+    ``host_mass`` enters only when it is not the default ``"count"``,
+    ``mixture_density`` only when it is not the default ``"pixel"``, and
     ``count_ratio`` with its window only when it is not ``"row"`` (the legacy
     estimator, the default before 2026-10-10, and the inert value of every
     analysis without a count-ratio catalog), so the record of every such
     analysis is unchanged. The default count ratio since 2026-10-10 is
-    ``"pooled"``, so a default count-ratio plan records it.
+    ``"pooled"``, so a default count-ratio plan records it. A conditional
+    complete catalog records its ``empty_policy`` only when it is the
+    opt-in ``"volume"``.
     """
     pooled = (
         {}
@@ -1345,8 +1628,10 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
     if isinstance(redshift, FieldCatalogMixtureRedshift):
         from darksirens.selection.catalog import selection_record
 
+        density = getattr(redshift, "mixture_density", "pixel")
         return _canonical_json({
             **({} if redshift.host_mass == "count" else {"host_mass": redshift.host_mass}),
+            **({} if density == "pixel" else {"mixture_density": density}),
             **pooled,
             "sky_weighting": "field",
             "completeness": redshift.completeness,
@@ -1363,6 +1648,13 @@ def _catalog_model_record(redshift, labels=(), kernel_pin="auto") -> str:
                 for c in redshift.components
             ],
         })
+    if isinstance(redshift, CompleteCatalogRedshift):
+        # Only the opt-in policy enters, so a default complete plan is unchanged.
+        if redshift.empty_policy == "zero":
+            return ""
+        return _canonical_json(
+            {"completeness": "complete", "empty_policy": redshift.empty_policy}
+        )
     selection = getattr(redshift, "selection", None)
     if selection is None:
         if not pooled:
@@ -1406,11 +1698,13 @@ def catalog_kernel_pins_active(redshift, sampled_labels, setting="auto") -> tupl
 def kernel_pin_applies(redshift, sampled_labels, setting="auto") -> bool:
     """Whether the bound likelihood pins the catalog kernel at bind time.
 
-    True for an incomplete-catalog analysis under ``setting="auto"`` whose
-    sampled labels include none of ``Om0``, ``w0``, ``wa``, ``delta``,
-    ``sigma_kde``: the kernel's redshift dependence is then fixed up to the
-    scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never values,
-    as legacy's ``kernel_pin_admissible`` does
+    True for a conditional incomplete-catalog analysis under
+    ``setting="auto"`` whose sampled labels include none of ``Om0``, ``w0``,
+    ``wa``, ``delta``, ``sigma_kde``, and for a field-weighted analysis with
+    any catalog pinned (:func:`catalog_kernel_pins_active`, which pins a
+    complete catalog too): the kernel's redshift dependence is then fixed up
+    to the scalar ``(H0_ref / H0)^3``. It reads the sampled labels, never
+    values, as legacy's ``kernel_pin_admissible`` does
     (``likelihood/factory.py:1031-1052``, which also restricts the pin to
     the unmarked incomplete ``dark_sirens`` model).
     """
@@ -1448,6 +1742,7 @@ def model(
     host_mass="count",
     count_ratio=None,
     count_ratio_window=None,
+    mixture_density=None,
 ) -> Analysis:
     """Construct an ordinary spectral, catalog, or bright-siren analysis.
 
@@ -1463,7 +1758,13 @@ def model(
 
     ``empty_policy`` is legal only with ``completeness='complete'`` and selects
     the galaxy-free-row branch of that likelihood: ``'zero'`` (the default) or
-    the ``'volume'`` robustness approximation.
+    the ``'volume'`` robustness approximation. The plan records ``'volume'``
+    (``ParameterPlan.catalog_model``) and a run fingerprint changes with it.
+
+    ``ParameterPlan.angular_model`` records ``angular``. The two angular
+    models whose coordinates are the same (``'sphere_gp_z'`` and
+    ``'overdensity_gp'``) enter a run fingerprint by name; every other
+    model is told apart by its coordinates.
 
     ``n0_units`` is legal only for an incomplete-catalog analysis and sets the
     unit of ``log10n0``. ``'physical'`` (the default, the frozen legacy
@@ -1497,6 +1798,21 @@ def model(
     not a question of prior bounds. Nor does it check that the model is
     defined at the value.
 
+    Fixing one member of a joint prior pair (for example ``lambda_0`` of the
+    GWTC-5 simplex) warns: the sampled member keeps its own uniform prior
+    with likelihood-side rejection outside the interval the fixed value
+    leaves it, so the raw ``logZ`` carries the log prior fraction that
+    interval keeps (``ParameterPlan.fixed_constraint_log_fraction``, added
+    to ``ds.infer``'s ``log_prior_volume_fraction``; not added when a member
+    of the pair has a per-catalog copy, which makes the rejection act per
+    catalog). For ``ordered_le``, ``simplex`` and a fixed upper member of
+    ``conditional_upper`` that uniform prior is the declared joint prior
+    conditioned on the fixed value. For a fixed lower member of
+    ``conditional_upper`` (``m2_low`` of the GWTC-5 pair) it is not: the
+    declared conditional of the upper member falls as
+    ``1 / (m1_low - lower bound)``, so the posterior differs as well, and the
+    warning says so.
+
     ``kernel_pin="auto"`` (the default) lets an incomplete-catalog analysis
     that fixes ``Om0``, ``w0``, ``wa``, ``delta`` and ``sigma_kde`` (``H0``
     may be sampled) evaluate the per-galaxy catalog kernel quadrature once,
@@ -1509,10 +1825,13 @@ def model(
     quadrature. The plan records the setting and whether the
     pin applies (``ParameterPlan.kernel_pin``,
     ``ParameterPlan.kernel_pin_active``). It has no effect on spectral,
-    bright-siren or complete-catalog analyses.
+    bright-siren or conditional complete-catalog analyses. Under
+    ``catalog_sky_weighting="field"`` it applies to every catalog, complete
+    ones included (see below), whose value then differs from
+    ``kernel_pin="off"`` by rounding.
 
     ``completeness="selection"`` (opt-in) completes an incomplete catalog with
-    an explicit magnitude-selection model instead of the per-row count ratio:
+    an explicit magnitude-selection model instead of the count ratio:
     ``selection`` is a :class:`~darksirens.selection.catalog.GaussianMagnitudeSelection`,
     a :class:`~darksirens.selection.catalog.SchechterMagnitudeSelection`, or
     its runtime payload mapping (``darksirens-catalog-selection-1.0``, as
@@ -1529,8 +1848,10 @@ def model(
     samples them; ``m_lim``, ``M_faint_offset`` and the K-correction are never
     sampled. The plan records the selection model and the row fraction's
     digest (``ParameterPlan.catalog_model``) and a run fingerprint changes with
-    them. ``selection`` and ``row_fraction`` are refused with any other
-    completeness.
+    them. ``selection`` is refused with any other completeness, and
+    ``row_fraction`` with any other except the pooled count ratio
+    (``count_ratio="pooled"``, the default of ``completeness="incomplete"``,
+    whose rows it covers the same way; see ``count_ratio`` below).
 
     ``selection`` may instead be a
     :class:`~darksirens.selection.catalog.TabulatedSelection` (payload family
@@ -1564,7 +1885,8 @@ def model(
     divided by catalog k's full-sky total ``Z_k``, for PE and selection
     samples alike. ``completeness`` is one value for every catalog or a list
     with one entry per catalog (for example ``["incomplete", "selection"]``):
-    ``"incomplete"`` (``None``; the per-row count ratio), ``"selection"`` (the
+    ``"incomplete"`` (``None``; the count ratio, its estimator set by
+    ``count_ratio``), ``"selection"`` (the
     magnitude-selection curve) or ``"complete"`` (the catalog holds every
     host: ``n_k = N_obs,p p_cat(z | p)``, no missing hosts and no survey
     depth, and ``Z_k = sum_p N_obs,p``, the frozen reference's field
@@ -1584,16 +1906,38 @@ def model(
     picks how ``Z_k`` is computed, one value or one per catalog: ``"auto"``
     (default) is chosen per catalog, ``"moments"`` for the selection
     completeness, exact and cheap, and ``"direct"`` (the full-sky row sums)
-    for the count ratio, the only exact form there, and for a complete
-    catalog (its galaxy count). The kernel pin applies per catalog (to its
+    for the count ratio, the only form implemented there (the per-row
+    estimator's clip at 1 does not factor; the pooled one factors as the
+    selection curve does, but its moments form is not implemented), and for
+    a complete catalog (its galaxy count). The kernel pin applies per catalog (to its
     compact rows and, with a survey depth, its full sky) when ``Om0``,
-    ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed. The plan
+    ``w0``, ``wa`` and its own ``delta``, ``sigma_kde`` are fixed, whatever
+    the catalog's completeness: a complete catalog is pinned too. The plan
     records the weighting, completeness, number of catalogs, normaliser,
     per-catalog pin activity and selection payloads in
     ``ParameterPlan.catalog_model``; the completeness and the normaliser are
     recorded as one value when every catalog shares it (so a single value, or
     a list of equal entries, gives the plan and fingerprint of one value) and
-    as a list otherwise. ``compute_dtype="float32"`` is not available with a
+    as a list otherwise. Each branch ``n_k(z | p_k) / Z_k`` is the host
+    probability of the sample's row of catalog k, a mass per pixel, which is
+    the frozen reference's convention (``mixture_density="pixel"``, the
+    default). The PE and selection samples need a density per steradian, so
+    branch k carries a factor of its pixel area: when every catalog has the
+    same nside that factor is common and cancels, and the weights are the
+    catalogs' host fractions; when the nsides differ the weights act as
+    ``w_k A_k / sum_j w_j A_j`` (``A_k`` the pixel area), they are not host
+    fractions, and the uniform-simplex prior is not uniform in the host
+    fractions. ``ds.model`` then warns unless ``mixture_density`` is given.
+    ``mixture_density="steradian"`` (opt-in) divides each branch by its
+    catalog's pixel area relative to the smallest, ``n_k A_min / (Z_k A_k)``
+    (a host density per steradian on the finest catalog's pixel scale), so
+    the weights are host fractions whatever each catalog's nside; with equal
+    nsides it gives the default's values under the hard and the soft Neff
+    guard alike (the common scale keeps ``log mu``, which the soft wall
+    reads, where the default has it). It is refused with one catalog (its
+    factor ``A_min / A_1`` is 1). The plan records it
+    (``ParameterPlan.catalog_model``) and a run fingerprint changes with it;
+    ``"pixel"`` is not recorded. ``compute_dtype="float32"`` is not available with a
     complete catalog, as for a conditional complete-catalog analysis, and a
     missing-host extension
     (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`) is not
@@ -1630,13 +1974,33 @@ def model(
     ``completeness="selection"`` does with a fitted curve
     (:func:`~darksirens.catalog.completeness.build_pooled_count_ratio_cache`).
     ``count_ratio_window`` is its Gaussian width in redshift (default 0.02;
-    refused with ``"row"``; a window alone asks for ``"pooled"``). The catalog
-    is one completeness cell: a catalog whose depth varies over the sky must
-    be given as one catalog per depth (``catalog_sky_weighting="field"``, each
-    with its ``row_fraction``). Binding refuses a window that holds fewer than
-    100 effective galaxies at the catalog's median redshift and warns below
-    1000. ``"row"`` is the legacy estimator (the frozen reference's, and the
-    default before 2026-10-10; kept for reproducibility and legacy parity):
+    refused with ``"row"``; a window alone asks for ``"pooled"``): any real
+    number, at least the galaxy histogram's bin width
+    (:data:`~darksirens.catalog.completeness.POOLED_BIN_WIDTH`, 1e-4), below
+    which the kernel at the redshift nodes depends on where they fall
+    between the bin centres and is refused. The catalog
+    is one completeness cell, so the estimator does not model a depth that
+    varies over the sky. One catalog per depth under
+    ``catalog_sky_weighting="field"`` is not that model either: in every row
+    of one region the other catalogs hold no galaxy and count as wholly
+    missing hosts, so each region's galaxy contrast is diluted by its mixture
+    weight, which pulls the result toward the catalog-free one. Binding
+    refuses a window that holds fewer than 100 effective galaxies at the
+    catalog's median redshift and warns below 1000. ``"pooled"`` counts each
+    galaxy at its point redshift with the weight ``1/dN_exp``, which grows
+    as ``z^-2``: galaxies scattered toward ``z = 0`` by their redshift errors
+    (photometric redshifts, or a redshift below its peculiar-velocity error)
+    push the ratio above 1 there, and the clip then makes the catalog
+    complete and removes its missing hosts, whatever its completeness;
+    binding warns where this moves the ratio by more than a factor 1.5.
+    ``"pooled_kernel"`` (opt-in) counts each galaxy through its redshift
+    kernel instead (width its ``dzgals``; ``sigma_kde`` is not included): the
+    pooled ratio of the catalog's own host density, so the observed and the
+    missing hosts add up to the expected density for a catalog that carries
+    no host information, with or without redshift errors
+    (``redshift_errors=True`` of the same builder). ``"row"`` is the legacy
+    estimator (the frozen reference's, and the default before 2026-10-10;
+    kept for reproducibility and legacy parity):
     it divides each row's smoothed observed density by the smoothed expected
     density, with a fixed Gaussian width of 0.05 in redshift, and clips the
     row's ratio at 1. Both densities rise steeply with redshift, so that
@@ -1645,12 +2009,17 @@ def model(
     0.7 to 0.8 km/s/Mpc on the two mocks it was measured on; see the README).
     The default ``None`` resolves to ``"pooled"`` wherever a catalog runs the
     count ratio and to an inert ``"row"`` everywhere else; an explicit
-    ``"pooled"`` is refused where no catalog runs it. It is one value for
-    every catalog that runs ``"incomplete"``. The plan records ``"pooled"``
-    and its window (``ParameterPlan.catalog_model``) and a run fingerprint
+    ``"pooled"`` or ``"pooled_kernel"`` is refused where no catalog runs it.
+    It is one value for every catalog that runs ``"incomplete"``. The plan
+    records ``"pooled"`` or ``"pooled_kernel"`` and its window
+    (``ParameterPlan.catalog_model``) and a run fingerprint
     changes with them; ``"row"`` is not recorded, so an explicit
     ``count_ratio="row"`` reproduces the plan and fingerprint of a run made
-    before the default changed.
+    before the default changed. Every count ratio counts raw galaxies: the
+    galaxy weights do not enter the completeness, but they set each row's
+    redshift shape in the observed term, so weights that vary with redshift
+    inside a row bias ``H0``, and no weight-fraction completeness can be
+    supplied here (unlike ``completeness="selection"``).
 
     ``per_catalog_population={k: [parameter, ...]}`` (opt-in, a mixture of
     ``K >= 2`` catalogs only) gives catalog ``k`` (``2 <= k <= K``, the
@@ -1673,10 +2042,17 @@ def model(
     weights (the frozen reference's order), catalog by catalog, each in model
     order. A joint prior constraint of the model whose members are all
     copied applies to the copies too. The selection term uses the same
-    per-catalog kernel, so the expected detected fraction is ``mu = sum_k
-    w_k alpha_k(L_k)``, ``alpha_k`` the detectable fraction of branch k's
-    population over branch k's host density (``p_det`` integrated against
-    ``p_pop(. | L_k) n_k / Z_k``), estimated from the same injections. The
+    per-catalog kernel, so the selection integral is ``mu = sum_k w_k
+    alpha_k(L_k)``, ``alpha_k`` the integral of ``p_det`` against ``p_pop(.
+    | L_k) n_k / Z_k``, estimated from the same injections. Neither is a
+    fraction: the population's redshift factor (``(1 + z)^(gamma - 1)``, or
+    the Madau-Dickinson ``psi(z) / (1 + z)``) is not normalised over
+    redshift, so ``alpha_k`` can exceed 1. The weight ``fcat_k`` is catalog
+    k's share of the host density (each host counted alike), not its share of
+    the mergers: that also carries each branch's redshift factor integrated
+    over its host density, so with a copied rate parameter (``gamma``, or a
+    Madau-Dickinson parameter) the merger share of catalog k at fixed
+    ``fcat_k`` moves with it. The
     plan records the blocks (``ParameterPlan.catalog_population``) and a run
     fingerprint changes with them; ``ds.decode_parameters`` returns the K
     vectors as ``catalog.populations``. Without it (the default) one
@@ -1726,9 +2102,15 @@ def model(
             host_mass=host_mass,
             count_ratio=count_ratio,
             count_ratio_window=count_ratio_window,
+            mixture_density=mixture_density,
         )
         catalog_priors = _INCOMPLETE_CATALOG_PRIORS
     else:
+        if mixture_density is not None:
+            raise ValueError(
+                "mixture_density applies only to catalog_sky_weighting='field' with two "
+                "or more catalogs"
+            )
         if host_mass != "count" and catalog is None:
             raise ValueError(
                 "host_mass='weight' requires a galaxy catalog: it sets a sky row's "
@@ -1878,6 +2260,7 @@ def model(
 
     fixed_population = None
     population_fixed: dict[str, float] = {}
+    fixed_constraint_log_fraction = 0.0
     if population.fixed_values:
         population_model = get_model(
             population.model_name,
@@ -1889,13 +2272,15 @@ def model(
             population, population_model, pop_labels, pop_lower, pop_upper,
             allow_out_of_prior,
         )
-        _check_fixed_constraints(
+        fixed_constraint_log_fraction = _check_fixed_constraints(
             population_model,
             population_fixed,
             {
                 label: (float(lo), float(hi))
                 for label, lo, hi in zip(pop_labels, pop_lower, pop_upper)
             },
+            {label: tuple(kind) for label, kind in zip(pop_labels, pop_kinds)},
+            {label for _, owned in catalog_population for label in owned},
         )
     if population_fixed and len(population_fixed) == len(pop_labels):
         fixed_population = tuple(population_fixed[label] for label in pop_labels)
@@ -2001,6 +2386,8 @@ def model(
         catalog_model=_catalog_model_record(redshift, labels, kernel_pin),
         catalog_population=catalog_population,
         n_catalog_population=n_catalog_population,
+        angular_model=str(angular),
+        fixed_constraint_log_fraction=fixed_constraint_log_fraction,
     )
     return Analysis(
         cosmology=cosmology,
@@ -2020,6 +2407,7 @@ __all__ = [
     "FIELD_COMPLETENESS_SETTINGS",
     "HOST_MASS_SETTINGS",
     "FIELD_NORMALIZER_SETTINGS",
+    "MIXTURE_DENSITY_SETTINGS",
     "FieldCatalogMixtureRedshift",
     "COMPLETENESS_SETTINGS",
     "ParameterPlan",

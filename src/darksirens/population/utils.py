@@ -141,8 +141,35 @@ PAIRING_SCALES = ("node_max", "analytic")
 #: otherwise: with the opt-in ``pairing_m1_grid`` set (which an explicit
 #: ``"per_point"`` refuses) it is the m1 grid, exactly as under
 #: ``"per_sample"``.  Set ``"per_sample"`` to reproduce a run made before the
-#: change bit for bit, or to resume its checkpoint.
+#: change bit for bit, or to resume its checkpoint; a run made before
+#: 2026-10-01 also needs ``pairing_scale="node_max"`` (:data:`PAIRING_SCALES`).
 PAIRING_NORMS = ("per_sample", "per_point", "auto")
+
+#: How the Golomb 1G models integrate the progenitor IMF against the
+#: remnant-mass kernel (``GolombRemnantMass1G._eval_1g_unnorm``): ``"grid"``
+#: (default, the frozen reference's rule) is a trapezoid on the fixed mass
+#: grid; ``"split"`` (opt-in) puts the nodes relative to the sampled edges
+#: ``M_tr`` and ``M_tr + 2 Delta`` and spaces them in ``ln M_I`` finely
+#: enough for the narrowest kernel the prior allows (see
+#: :data:`GOLOMB_SPLIT_NODES`).
+GOLOMB_QUADRATURES = ("grid", "split")
+
+#: Node counts of ``golomb_quadrature="split"``: trapezoid nodes uniform in
+#: ``ln M_I`` on ``[m_lo, 20]`` (below the fixed IMF break) and on
+#: ``[20, M_tr]``, and Gauss-Legendre nodes in ``M_I`` on
+#: ``[M_tr, M_tr + 2 Delta]``, where the remnant map is the quadratic that
+#: peaks at the disruption edge.  The ln-spacing is at most 0.008 over the
+#: shipped prior (``M_tr <= 50``), about six nodes per kernel width at the
+#: ``sigma = 0.05`` prior floor.
+GOLOMB_SPLIT_NODES = (384, 128, 64)
+
+#: How exactly a population density is normalised (see
+#: ``NormalizationGridSettings``): ``"legacy"`` (default) is correct up to a
+#: factor that depends on the hyperparameters only, which cancels in a
+#: likelihood with one population; ``"exact"`` (opt-in) makes the density
+#: integrate to one, which a likelihood whose catalog branches carry
+#: different populations (``per_catalog_population``) needs.
+POPULATION_NORMS = ("legacy", "exact")
 
 # Grid of the per-point taper table (``pairing_norm="per_point"``), in
 # lambda = log s, s = (m1 - m_edge)/(m_shoulder - m_edge) the primary mass's
@@ -240,10 +267,13 @@ class NormalizationGridSettings:
     the pairing grid to a mass model whose primary-mass support extends past
     ``m_hi`` (e.g. ``gwtc5_fiducial_bpl2peaks`` with a fixed high-mass edge at
     300 Msun) never perturbs the mass-normalisation grid of any other model.
-    ``jnp.interp`` clamps queries outside the grid ends, so a ceiling BELOW a
-    model's support would silently bias the pairing normaliser inside the
-    support; :func:`size_pairing_grid_to_support` /
-    :func:`assert_pairing_grid_covers_support` keep it truthful.
+    A sample above the ceiling takes the per-sample normaliser instead of the
+    interpolant (``PairingModel.__call__``; ``jnp.interp`` would clamp it to
+    the end node, which biased the normaliser inside a wider model's support),
+    so a ceiling below a model's support costs accuracy nowhere;
+    :func:`size_pairing_grid_to_support` /
+    :func:`assert_pairing_grid_covers_support` keep the interpolant covering
+    the support.
 
     ``pairing_norm`` (env ``DARKSIRENS_GW_PAIRING_NORM``) is ``"auto"``
     (default since 2026-10-02), ``"per_point"`` or ``"per_sample"``.
@@ -264,6 +294,44 @@ class NormalizationGridSettings:
     (one scalar per point plus the closed-form plateau), and inside the taper
     window it reads a table in support-relative coordinates, so no cell ever
     straddles the edge.  It needs no support sizing and no ``pairing_m_hi``.
+
+    ``pairing_scale`` (env ``DARKSIRENS_GW_PAIRING_SCALE``) is ``"analytic"``
+    (default since 2026-10-01) or ``"node_max"``, the historical arithmetic
+    (see :data:`PAIRING_SCALES`).  A run made before 2026-10-01 is reproduced
+    bit for bit, and its checkpoint resumed, with ``pairing_scale="node_max"``
+    together with ``pairing_norm="per_sample"`` (and the catalog settings of
+    :mod:`darksirens.catalog.settings`).
+
+    ``golomb_quadrature`` (env ``DARKSIRENS_GW_GOLOMB_QUADRATURE``) is
+    ``"grid"`` (default) or the opt-in ``"split"`` (see
+    :data:`GOLOMB_QUADRATURES`).  Under ``"grid"`` the Golomb 1G density is a
+    trapezoid on the fixed mass grid (h = 0.4 Msun), which has two known
+    errors: the disruption edge ``M_tr + 2 Delta``, where the integrand drops
+    from its maximum to zero, is a sampled location the fixed nodes cross, so
+    ``log p_pop`` jumps by up to 2 nats per 30 bump samples whenever it
+    crosses a node (every 0.4 Msun of ``M_tr`` or ``2 Delta``) and is flat in
+    between; and below ``M_tr`` a kernel narrower than the node spacing
+    (``sigma m < h``) is seen at one node only, which inflates ``phi_1G`` at
+    low mass by about ``h / (sqrt(2 pi) sigma m)`` (3.4x at 1 Msun for
+    ``sigma = 0.05``).  ``"split"`` removes both: no node crosses a sampled
+    edge, and the narrowest kernel spans several nodes.  The mass grid the
+    density is then evaluated on and interpolated from is unchanged.
+
+    ``population_norm`` (env ``DARKSIRENS_GW_POPULATION_NORM``) is
+    ``"legacy"`` (default) or the opt-in ``"exact"`` (see
+    :data:`POPULATION_NORMS`).  Under ``"legacy"`` two population families
+    integrate to a hyperparameter-dependent constant rather than to one,
+    which cancels in a likelihood with a single population but biases the
+    relative branch weights when catalog branches carry different
+    populations: a grammar mixture's component without a low-mass edge of its
+    own (the Gaussian ``peak``) is normalised over the whole mass grid while
+    its pairing, which uses the mixture's edge ``m_min``, removes all of its
+    mass below ``m_min`` (``powerlaw+peak`` integrates to 0.88 at an in-prior
+    corner); and the GWTC-3 and GWTC-5 fiducial masses form each component's
+    kept fraction as ``1 - deficit``, so a steep power law almost entirely
+    inside the taper window loses up to 19% of its kept fraction to the
+    window quadrature.  ``"exact"`` normalises the edge-less component over
+    ``[m_min, m_hi]`` and integrates the kept part directly.
     """
 
     n_mass: int = _env_int("DARKSIRENS_GW_N_MASS", 500)
@@ -274,6 +342,8 @@ class NormalizationGridSettings:
     pairing_edge_tol: float = _env_float("DARKSIRENS_GW_PAIRING_EDGE_TOL", 1.0e-4)
     pairing_scale: str = os.environ.get("DARKSIRENS_GW_PAIRING_SCALE", "analytic")
     pairing_norm: str = os.environ.get("DARKSIRENS_GW_PAIRING_NORM", "auto")
+    golomb_quadrature: str = os.environ.get("DARKSIRENS_GW_GOLOMB_QUADRATURE", "grid")
+    population_norm: str = os.environ.get("DARKSIRENS_GW_POPULATION_NORM", "legacy")
     m_lo: float = M_LO
     m_hi: float = M_HI
     pairing_m_hi: float = M_HI
@@ -316,6 +386,16 @@ class NormalizationGridSettings:
             raise ValueError(
                 f"pairing_norm must be one of {PAIRING_NORMS}, got "
                 f"{self.pairing_norm!r} (env DARKSIRENS_GW_PAIRING_NORM)"
+            )
+        if self.golomb_quadrature not in GOLOMB_QUADRATURES:
+            raise ValueError(
+                f"golomb_quadrature must be one of {GOLOMB_QUADRATURES}, got "
+                f"{self.golomb_quadrature!r} (env DARKSIRENS_GW_GOLOMB_QUADRATURE)"
+            )
+        if self.population_norm not in POPULATION_NORMS:
+            raise ValueError(
+                f"population_norm must be one of {POPULATION_NORMS}, got "
+                f"{self.population_norm!r} (env DARKSIRENS_GW_POPULATION_NORM)"
             )
         # The two options answer the same question differently: the m1 grid
         # interpolates the per-sample normaliser from static nodes, "per_point"
@@ -371,6 +451,12 @@ class NormalizationGridSettings:
         # per-sample normaliser, or the reverse.
         if out["pairing_norm"] == "per_sample":
             del out["pairing_norm"]
+        # The two opt-ins are recorded only when set: every run made without
+        # them evaluated the defaults, so their fingerprints keep matching.
+        if out["golomb_quadrature"] == "grid":
+            del out["golomb_quadrature"]
+        if out["population_norm"] == "legacy":
+            del out["population_norm"]
         return out
 
     def per_point_pairing_norm(self) -> bool:
@@ -409,6 +495,8 @@ def configure_normalization_grids(
     pairing_edge_tol: float | None = None,
     pairing_scale: str | None = None,
     pairing_norm: str | None = None,
+    golomb_quadrature: str | None = None,
+    population_norm: str | None = None,
 ) -> NormalizationGridSettings:
     """Update cached normalisation-grid sizes and clear derived grids.
 
@@ -421,12 +509,15 @@ def configure_normalization_grids(
     should normally use that helper rather than setting the bound directly.
     ``pairing_scale`` is ``"analytic"`` (default) or ``"node_max"``; see
     :data:`PAIRING_SCALES`. ``pairing_norm`` is ``"auto"`` (default),
-    ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`. Like every setting here they
-    are read when a likelihood is traced, so configure them before binding the
-    analysis.
+    ``"per_point"`` or ``"per_sample"``; see :data:`PAIRING_NORMS`.
+    ``golomb_quadrature`` is ``"grid"`` (default) or the opt-in ``"split"``;
+    see :data:`GOLOMB_QUADRATURES`. ``population_norm`` is ``"legacy"``
+    (default) or the opt-in ``"exact"``; see :data:`POPULATION_NORMS`. Like
+    every setting here they are read when a likelihood is traced, so configure
+    them before binding the analysis.
     """
 
-    global _NORMALIZATION_GRID_SETTINGS, N_MASS, N_Q, N_CHI
+    global _NORMALIZATION_GRID_SETTINGS, _PAIRING_SIZING, N_MASS, N_Q, N_CHI
 
     updates = {}
     for key, value in {"n_mass": n_mass, "n_q": n_q, "n_chi": n_chi,
@@ -434,13 +525,20 @@ def configure_normalization_grids(
                         "pairing_edge_nq": pairing_edge_nq,
                         "pairing_edge_tol": pairing_edge_tol,
                         "pairing_scale": pairing_scale,
-                        "pairing_norm": pairing_norm}.items():
+                        "pairing_norm": pairing_norm,
+                        "golomb_quadrature": golomb_quadrature,
+                        "population_norm": population_norm}.items():
         if value is not None:
             updates[key] = value
     if pairing_m1_grid is not _SENTINEL:
         updates["pairing_m1_grid"] = pairing_m1_grid
     if updates:
-        _NORMALIZATION_GRID_SETTINGS = replace(_NORMALIZATION_GRID_SETTINGS, **updates)
+        # A configuration applies to what the caller configured, not to a
+        # pairing grid a model's support grew: the next sizing starts again
+        # from the result (see size_pairing_grid_to_support).
+        base = _pairing_sizing_base(_NORMALIZATION_GRID_SETTINGS)
+        _NORMALIZATION_GRID_SETTINGS = replace(base, **updates)
+        _PAIRING_SIZING = None
         _clear_grid_caches()
 
     # Backward-compatible scalar aliases for callers that inspect the values
@@ -451,28 +549,81 @@ def configure_normalization_grids(
     return _NORMALIZATION_GRID_SETTINGS
 
 
-def size_pairing_grid_to_support(m1_support_max: float) -> NormalizationGridSettings:
-    """Grow the opt-in pairing m1 grid so it covers a mass model's m1 support.
+#: ``(sized, base)`` of the last grid :func:`size_pairing_grid_to_support` grew:
+#: ``sized`` is the settings object it installed and ``base`` the configured
+#: settings it grew them from.  Matched by identity, so settings installed any
+#: other way (``configure_normalization_grids``, a direct assignment) are their
+#: own base.
+_PAIRING_SIZING: tuple | None = None
 
-    No-op when the pairing grid is disabled (``pairing_m1_grid is None``) or the
-    current ``pairing_m_hi`` already covers ``m1_support_max``.  Otherwise the
-    upper bound is raised to ``m1_support_max`` and the node COUNT is scaled up
-    in proportion to the added log-range, so log spacing is preserved and the
-    per-node density (hence the documented interpolation accuracy near the
-    ``m_min`` log-kink) does NOT drop as the range grows.  The default ceiling
-    is never lowered, so models whose support ends at or below ``M_HI`` keep the
-    historical ``[m_lo, M_HI]`` grid bit-for-bit.
+
+def _pairing_sizing_base(s: NormalizationGridSettings) -> NormalizationGridSettings:
+    """The configured settings ``s`` was sized from (``s`` itself if it was not)."""
+    if _PAIRING_SIZING is not None and _PAIRING_SIZING[0] is s:
+        return _PAIRING_SIZING[1]
+    return s
+
+
+def configured_normalization_grid_settings() -> NormalizationGridSettings:
+    """The configured settings, before any pairing m1 grid sizing grew them.
+
+    What a likelihood's numerics depend on: the grid a trace uses is sized
+    from these for its own model (:func:`pairing_grid_settings_for_support`).
     """
+    return _pairing_sizing_base(normalization_grid_settings())
+
+
+def pairing_grid_settings_for_support(
+    m1_support_max: float, base: NormalizationGridSettings | None = None
+) -> NormalizationGridSettings:
+    """The settings :func:`size_pairing_grid_to_support` installs for a support.
+
+    Pure: computed from the CONFIGURED settings (not from a grid an earlier,
+    wider model grew), so the result depends on ``m1_support_max`` and the
+    configuration only.  ``base`` sizes from other configured settings (a
+    binding's, as it was bound) instead of the current ones.
+    """
+    if base is None:
+        base = configured_normalization_grid_settings()
+    else:
+        base = _pairing_sizing_base(base)
+    if base.pairing_m1_grid is None:
+        return base
+    support = float(m1_support_max)
+    if support <= base.pairing_m_hi:
+        return base
+    old_span = math.log(base.pairing_m_hi / base.m_lo)
+    new_span = math.log(support / base.m_lo)
+    new_n = int(math.ceil(base.pairing_m1_grid * new_span / old_span))
+    return replace(base, pairing_m1_grid=new_n, pairing_m_hi=support)
+
+
+def size_pairing_grid_to_support(m1_support_max: float) -> NormalizationGridSettings:
+    """Size the opt-in pairing m1 grid so it covers a mass model's m1 support.
+
+    No-op when the pairing grid is disabled (``pairing_m1_grid is None``).  When
+    the configured ``pairing_m_hi`` covers ``m1_support_max`` the configured
+    grid is used; otherwise the upper bound is raised to ``m1_support_max`` and
+    the node COUNT is scaled up in proportion to the added log-range, so log
+    spacing is preserved and the per-node density (hence the documented
+    interpolation accuracy near the ``m_min`` log-kink) does NOT drop as the
+    range grows.  The sizing always starts from the configured grid
+    (:func:`pairing_grid_settings_for_support`): a model whose support ends at
+    or below the configured ceiling gets the configured ``[m_lo,
+    pairing_m_hi]`` grid bit-for-bit even after a wider model grew it earlier
+    in the same process (it used to keep the grown 300 Msun grid, so its
+    numerics depended on what had been bound before it).
+    """
+    global _NORMALIZATION_GRID_SETTINGS, _PAIRING_SIZING
     s = normalization_grid_settings()
-    if s.pairing_m1_grid is None:
+    target = pairing_grid_settings_for_support(m1_support_max)
+    if target == s:
         return s
-    new_hi = max(s.pairing_m_hi, float(m1_support_max))
-    if new_hi <= s.pairing_m_hi:
-        return s
-    old_span = math.log(s.pairing_m_hi / s.m_lo)
-    new_span = math.log(new_hi / s.m_lo)
-    new_n = int(math.ceil(s.pairing_m1_grid * new_span / old_span))
-    return configure_normalization_grids(pairing_m1_grid=new_n, pairing_m_hi=new_hi)
+    base = _pairing_sizing_base(s)
+    _NORMALIZATION_GRID_SETTINGS = target
+    _PAIRING_SIZING = None if target is base else (target, base)
+    _clear_grid_caches()
+    return target
 
 
 def assert_pairing_grid_covers_support(
@@ -480,12 +631,13 @@ def assert_pairing_grid_covers_support(
 ) -> None:
     """Fail loudly if the opt-in pairing grid does not cover an m1 support.
 
-    Defense in depth against a silent ``jnp.interp`` clamp INSIDE the mass
-    model's support: with the grid enabled, any sample at
-    ``pairing_m_hi < m1 <= m1_support_max`` would reuse the endpoint normaliser
-    (measured up to ~0.4 in log density for ``gwtc5_fiducial_bpl2peaks`` at
-    m1=299 with a 200-node ceiling).  Raises ``ValueError`` so CLI callers can
-    surface it through their ``_fatal`` path.  No-op when the grid is disabled.
+    The check that the grid was sized for the model: with the grid enabled,
+    samples at ``pairing_m_hi < m1 <= m1_support_max`` lie above the
+    interpolant.  They take the per-sample normaliser (``PairingModel.__call__``),
+    so they are not biased; before 2026-10-20 ``jnp.interp`` clamped them to the
+    endpoint normaliser (measured up to ~0.4 in log density for
+    ``gwtc5_fiducial_bpl2peaks`` at m1=299 with a 200 Msun ceiling).  Raises
+    ``ValueError``.  No-op when the grid is disabled.
     """
     s = normalization_grid_settings()
     if s.pairing_m1_grid is None:
@@ -498,11 +650,14 @@ def assert_pairing_grid_covers_support(
             f"pairing-normalisation grid upper bound pairing_m_hi={s.pairing_m_hi} "
             f"does not cover the primary-mass support{who} "
             f"(m1_support_max={support}): samples with "
-            f"{s.pairing_m_hi} < m1 <= {support} would be clamped to the grid "
-            "endpoint by jnp.interp, silently biasing the pairing normaliser "
-            "inside the model support. Let the CLI size the grid "
-            "(size_pairing_grid_to_support) or disable --pairing_norm_grid "
-            "(exact per-sample q-normalisation)."
+            f"{s.pairing_m_hi} < m1 <= {support} lie above the interpolation "
+            "grid and take the per-sample normaliser instead. Size the grid to "
+            "the model "
+            "(darksirens.population.ensure_pairing_grid_covers(name), or "
+            "size_pairing_grid_to_support(m1_support_max)) or disable it "
+            "(DARKSIRENS_GW_PAIRING_M1_GRID=none, or "
+            "configure_normalization_grids(pairing_m1_grid=None)) for the exact "
+            "per-sample q-normalisation."
         )
 
 
@@ -565,14 +720,14 @@ def get_pairing_m1_grid():
 
     Spans ``[m_lo, pairing_m_hi]``; log spacing clusters nodes at low m1 where
     the pairing normaliser I(m1) turns on fastest.  Callers evaluate I on these
-    nodes once per proposal and interpolate per sample; ``jnp.interp`` CLAMPS m1
-    outside the bounds to the grid ends.  Clamping is harmless ONLY where the
-    mass model has no support (p(m1)=0 makes the normaliser there irrelevant),
-    so ``pairing_m_hi`` MUST cover the selected mass model's primary-mass
-    support -- otherwise a valid sample inside the support silently uses the
-    endpoint normaliser.  The CLI sizes ``pairing_m_hi`` to the model via
-    :func:`size_pairing_grid_to_support`; :func:`assert_pairing_grid_covers_support`
-    guards against an undersized grid.  Only meaningful when ``pairing_m1_grid``
+    nodes once per proposal and interpolate per sample inside the span; a
+    sample outside it takes the per-sample normaliser (``jnp.interp`` would
+    clamp it to the grid end, which is wrong wherever the mass model still has
+    support).  :func:`~darksirens.population.ensure_pairing_grid_covers`, which
+    :func:`~darksirens.population.registry.pop_model_parser` and
+    :func:`~darksirens.runtime_binding.bind_analysis` call, sizes
+    ``pairing_m_hi`` to the model (:func:`size_pairing_grid_to_support`) so the
+    interpolant covers its support.  Only meaningful when ``pairing_m1_grid``
     is configured (not None).
     """
     s = normalization_grid_settings()
@@ -699,6 +854,16 @@ def get_pairing_edge_quadrature():
     """
     s = normalization_grid_settings()
     return _gauss_legendre_01(s.pairing_edge_nq)
+
+
+def get_golomb_top_quadrature():
+    """Gauss-Legendre nodes/weights on (0, 1) for the top panel of ``golomb_quadrature="split"``.
+
+    ``GOLOMB_SPLIT_NODES[2]`` nodes on ``[M_tr, M_tr + 2 Delta]``, where the
+    remnant map is smooth and its kernel never narrower than
+    ``sigma M_tr`` (1 Msun at the shipped prior's floors).
+    """
+    return _gauss_legendre_01(GOLOMB_SPLIT_NODES[2])
 
 
 def sfilter_low_cap(dtype) -> float:
@@ -837,7 +1002,12 @@ def sfilter_low(m, m_min, dm):
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m <= m_min, 0.0, S)
-    S = jnp.where(m >= m_min + dm, 1.0, S)
+    # The shoulder is also decided from the rounded delta the exponent uses:
+    # fl(m - m_min) can equal dm while m < fl(m_min + dm) (m_min = 2.05,
+    # dm = 8.05, m = 10.1), and the second term's denominator is then 0, so
+    # the exponent clipped to +cap and S was 3.5e-57 at that one float
+    # instead of its limit 1. Every other input gives the same value as before.
+    S = jnp.where((m >= m_min + dm) | (delta >= dm), 1.0, S)
     return S
 
 @jit
@@ -852,5 +1022,6 @@ def sfilter_high(m, m_max, dm):
     )
     S = 1.0 / (jnp.exp(expo) + 1.0)
     S = jnp.where(m >= m_max, 0.0, S)
-    S = jnp.where(m <= m_max - dm, 1.0, S)
+    # Mirror of sfilter_low's shoulder: also decided from the rounded delta.
+    S = jnp.where((m <= m_max - dm) | (delta >= dm), 1.0, S)
     return S

@@ -28,8 +28,11 @@ tolerance) keeps refusing a case it cannot serve, as before.
     are (chunk x 24) rather than ``N_rows x N_max x 24``, and its node count
     is set by the real galaxies rather than by the padded slots.  The rest of
     the dark-siren likelihood (the per-sample kernel sum over ``N_max`` slots
-    included) is unchanged, and so are its values (each galaxy runs the same
-    arithmetic).  ``"padded"`` evaluates ``Z_i`` on the padded
+    included) is unchanged, and so are its values to rounding (each galaxy
+    runs the same arithmetic): bit for bit under the unrolled chunks the
+    ``"auto"`` schedule picks on CPU, and within a few ulp of the padded state
+    with a survey depth under the loop it picks elsewhere
+    (``darksirens.catalog.redshift._GALAXY_MAP``).  ``"padded"`` evaluates ``Z_i`` on the padded
     ``(N_rows, N_max)`` catalog, padding slots included (the historical
     program).  The galaxy list refuses no case (it is built from the very
     view it serves), so this setting needs no ``"auto"``:
@@ -95,7 +98,10 @@ with, when a binding is given).  A run under the new defaults therefore
 records them, and resuming a checkpoint written before the change under the
 new defaults is refused as a settings change: set ``kernel_layout="padded"``,
 ``missing_density="grid"`` and ``kernel_window="off"`` (with the population
-setting ``pairing_norm="per_sample"``) to resume it.
+setting ``pairing_norm="per_sample"``) to resume it.  A checkpoint written
+before 2026-10-01 also needs the population setting
+``pairing_scale="node_max"`` (env ``DARKSIRENS_GW_PAIRING_SCALE=node_max``),
+whose default became ``"analytic"`` that day.
 """
 
 from __future__ import annotations

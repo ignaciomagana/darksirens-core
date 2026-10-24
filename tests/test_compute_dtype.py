@@ -353,6 +353,55 @@ def test_a_column_below_the_float32_range_is_refused_and_overflow_is_zero_weight
     assert abs(float(b32(t)) - float(b64(t))) < TOL
 
 
+def test_replace_and_direct_calls_keep_the_underflow_refusal():
+    """``dataclasses.replace(bound, compute_dtype="float32")`` and a direct
+    likelihood call with it refuse a column below the float32 normal range,
+    as ``bind_analysis`` does. The weight used to round it to zero itself and
+    drop the sample whose float64 weight is the largest (event 0's log
+    evidence 87.2 -> -12.4, lnL -137.3 -> -236.9). The default program on a
+    float32 binding's rounded columns is refused too."""
+    from darksirens.cosmology.parameters import CosmologyParameters
+    from darksirens.likelihood.hierarchical import (
+        dark_siren_log_likelihood,
+        spectral_siren_log_likelihood,
+    )
+    from darksirens.runtime_binding import decode_parameters
+
+    events, injections = _stores()
+    tiny = np.array(events.prior_wt, copy=True)
+    tiny[0] = 1e-45
+    bad = replace(events, prior_wt=tiny)
+    match = "'prior_wt'.*below the normal float32 range"
+    spectral = bind_analysis(_analysis("spectral"), events=bad, injections=injections)
+    with pytest.raises(ValueError, match=match):
+        replace(spectral, compute_dtype="float32")
+    with pytest.raises(ValueError, match=match):
+        spectral_siren_log_likelihood(
+            CosmologyParameters(H0_TRUE, OM0, -1.0, 0.0),
+            jnp.asarray(get_fixed_population_params(MODEL), dtype=float),
+            spectral.gw_pe, spectral.gw_selection, spectral.n_events, spectral.nsamp,
+            spectral.n_draw, pop_model=MODEL, compute_dtype="float32",
+        )
+    dark = bind_analysis(_analysis("dark"), events=bad, injections=injections)
+    decoded = decode_parameters(dark, _fiducial_theta(dark, H0_TRUE))
+    with pytest.raises(ValueError, match=match):
+        dark_siren_log_likelihood(
+            decoded.cosmology, decoded.catalog, decoded.population,
+            dark.gw_pe, dark.catalog, dark.observed_density_cache,
+            dark.gw_selection, dark.catalog, dark.observed_density_cache,
+            dark.n_events, dark.nsamp, dark.n_draw, pop_model=MODEL, compute_dtype="float32",
+        )
+
+    # Onto clean data the replace is the float32 binding, bit for bit.
+    b64, b32 = _bind("spectral"), _bind("spectral", compute_dtype="float32")
+    onto = replace(b64, compute_dtype="float32")
+    assert onto.gw_pe.prior_wt.dtype == jnp.float32
+    t = jnp.asarray(_near_map_thetas(b64)[0])
+    assert _same_bits(onto(t), b32(t))
+    with pytest.raises(ValueError, match="compute_dtype=None runs the default float64 program"):
+        replace(b32, compute_dtype=None)
+
+
 # ---------------------------------------------------------------------------
 # Precision near the mock MAP, reductions in float64, gradients
 # ---------------------------------------------------------------------------
@@ -413,6 +462,84 @@ def test_float32_composes_with_the_per_point_pairing_normaliser(kind):
             diffs.append(abs(got - want))
         assert max(diffs) < TOL, diffs
         _check_per_sample_dtypes(kind)
+
+
+def _toe_pairing(dtype, jit=True):
+    """PowerLawPairing (beta = 0.5, m_min = 5, dm_min = 3) at m1 = m_min + s dm_min, m2 halfway into the toe.
+
+    Traced afresh on every call: the pairing settings are read at trace time,
+    and ``jax.jit`` of one function object would reuse its first trace.
+    """
+    from darksirens.population.base import ParamSpec
+    from darksirens.population.parametric import PowerLawPairing
+
+    pairing = PowerLawPairing(ParamSpec("beta", -2.0, 7.0))
+    s = np.array([1e-5, 1e-4, 6e-4, 1e-3, 5e-3, 2e-2, 1e-1, 0.5])
+    m1 = (5.0 + 3.0 * s).astype(dtype)
+    q = ((5.0 + 0.5 * (m1 - 5.0)) / m1).astype(dtype)
+    fn = lambda a, b, t: pairing(a, b, dtype(5.0), dtype(3.0), t)  # noqa: E731
+    out = (jax.jit(fn) if jit else fn)(jnp.asarray(m1), jnp.asarray(q), jnp.asarray([0.5], dtype=dtype))
+    return np.asarray(out)
+
+
+def test_float32_per_sample_pairing_rule_is_finite_under_jit_in_the_taper_toe():
+    # Under jit XLA rewrote the per-sample rule's (p / scale) / n_sc into
+    # p / (scale * n_sc); in float32 that product flushes to zero in the toe
+    # and the density was +inf (dropped as a non-finite weight) for every row
+    # with s <= 6e-4, while the eager value was right.
+    with _pairing_norm("per_point"):
+        want = _toe_pairing(np.float32)
+    with _pairing_norm("per_sample"):
+        got = _toe_pairing(np.float32)
+        eager = _toe_pairing(np.float32, jit=False)
+    assert got.dtype == np.float32 and np.all(np.isfinite(got)) and np.all(got > 0), got
+    # Jit and eager round float32 differently (m1 - m_min carries ~1.6% of
+    # its value at s = 1e-5), and the two rules normalise the same float32
+    # kernel.
+    assert np.max(np.abs(np.log(got) - np.log(eager))) < 2e-2
+    assert np.max(np.abs(np.log(got) - np.log(want))) < 2e-2
+
+
+def test_float32_m1_grid_normalises_the_float32_kernel():
+    # The opt-in m1 grid built its normaliser from float64 nodes, so a
+    # float32-floored kernel was divided by the integral of a float64-floored
+    # one: every row within ~1.2% of the window above m_min came out
+    # exp(130 - 79.85) = exp(50.15) too dense.
+    from _historical_settings import pairing_settings
+
+    with _pairing_norm("per_point"):
+        want = _toe_pairing(np.float32)
+    for norm in ("per_sample", "auto"):
+        with pairing_settings(pairing_norm=norm, pairing_m1_grid=1024):
+            got = _toe_pairing(np.float32)
+            got64 = _toe_pairing(np.float64)
+        assert got.dtype == np.float32 and np.all(np.isfinite(got)) and np.all(got > 0), got
+        assert np.max(np.abs(np.log(got) - np.log(want))) < 2e-2, (norm, np.log(got) - np.log(want))
+        # Where neither dtype's taper floor binds, float32 is float64 rounded.
+        np.testing.assert_allclose(got[-2:], got64[-2:], rtol=1e-4)
+
+
+def test_float32_population_density_in_the_taper_toe_under_every_pairing_rule():
+    # The finding's injection: m1src = m_min + 3e-4, m2src = m_min + 1.5e-4 at
+    # the powerlaw+peak fiducial (m_min = 5, dm_min = 3).  Float64 gives one
+    # log p_pop under every rule; in float32 the m1 grid gave +40.45 (and the
+    # bound likelihood -inf), and per_sample under jit +inf.
+    from _historical_settings import pairing_settings
+
+    log_p = get_model(MODEL).log_p_pop
+    theta = jnp.asarray(get_fixed_population_params(MODEL), dtype=float)
+    m1, q, z, chi = 5.0 + 3e-4, (5.0 + 1.5e-4) / (5.0 + 3e-4), 0.23, 0.05
+    for kw in (dict(pairing_norm="auto", pairing_m1_grid=None),
+               dict(pairing_norm="per_sample", pairing_m1_grid=None),
+               dict(pairing_norm="per_sample", pairing_m1_grid=1024)):
+        with pairing_settings(**kw):
+            vals = {}
+            for dt in (jnp.float64, jnp.float32):
+                f = jax.jit(lambda a, b, c, d, t: log_p(a, b, c, d, t))
+                vals[dt] = float(f(*(jnp.asarray([x], dtype=dt) for x in (m1, q, z, chi)),
+                                   theta.astype(dt))[0])
+        assert np.isfinite(vals[jnp.float32]), (kw, vals)
+        assert abs(vals[jnp.float32] - vals[jnp.float64]) < TOL, (kw, vals)
 
 
 def _walk(jaxpr, visit):
@@ -480,6 +607,32 @@ def _check_per_sample_dtypes(kind):
     # Every reduction that removes a sample axis (log-sum-exp maxima and sums,
     # the variance sums) is float64.
     assert reductions and {d for _, d in reductions} == {"float64"}, reductions
+
+
+def test_float32_selection_padding_keeps_the_float32_weights():
+    # The run fingerprint treats sel_batch_size as layout. The pad used to
+    # rebuild the float32 injections in float64 and recompute q there, so a
+    # batch size that does not divide the injections moved ln L by ~2e-7
+    # nats on this mock against one that does (2.3e-8, 1.8e-7 and 2.3e-8 at
+    # these three points). (The scanned and the single-pass float32 programs
+    # still round the weights differently, by ~1e-8 nats here, whatever the
+    # batch size: that is XLA's fusion, not the padding.) The tolerance is the
+    # float32 rounding level, not bit equality, and still catches the old pad
+    # at each point: without AVX-512 (XLA_FLAGS=--xla_cpu_max_isa=AVX2, and a
+    # CI runner) XLA rounds the float32 weights differently for different
+    # batch lengths, padding or not (batch sizes 8 and 823 both divide the
+    # injections and differ by 6.6e-10 nats; 999 and 823 by up to 3.5e-9),
+    # while with AVX-512 every layout here agrees to 6e-14.
+    b = _bind("spectral", compute_dtype="float32")
+    n_sel = int(b.gw_selection.dL.shape[0])
+    divisor = next(d for d in range(512, n_sel) if n_sel % d == 0)
+    reference = _bind("spectral", compute_dtype="float32", sel_batch_size=divisor)
+    thetas = [jnp.asarray(t) for t in _near_map_thetas(_bind("spectral"))[:3]]
+    for size in (999, 1024):
+        assert n_sel % size
+        padded = _bind("spectral", compute_dtype="float32", sel_batch_size=size)
+        for t in thetas:
+            assert float(padded(t)) == pytest.approx(float(reference(t)), rel=0, abs=1e-8), size
 
 
 def test_diagnostics_are_float64():

@@ -33,6 +33,41 @@ _RETURN_NAMES = (
     "chain_method",
 )
 
+#: Declared divergences of an error text from the frozen reference:
+#: {case: (legacy fragment, core fragment)}. Each arm checks that its own
+#: case's message contains its own fragment exactly once, and both arms then
+#: report the legacy fragment, so the rest of the message and every other field
+#: stay compared exactly. Any other difference still fails the comparison.
+#:
+#: chained_conditional: core's nested-sampler cube map composes a
+#: conditional_upper chain only when each conditioning parameter's own pair is
+#: declared first, and NumPyro's error says so (MIGRATION.md, "Review fixes
+#: (2026-10-20)", "Samplers and prior transforms", "Maps that share a
+#: coordinate").
+DECLARED_ERROR_TEXT = {
+    "chained_conditional": (
+        "whose cube map composes them, or declare",
+        "whose cube map composes them when each conditioning parameter's own "
+        "pair is declared first, or declare",
+    ),
+}
+
+
+def _apply_declared_error_text(behavior, implementation):
+    """Check each declared case's own error text, then report the legacy one."""
+    for name, (legacy_text, core_text) in DECLARED_ERROR_TEXT.items():
+        declared = legacy_text if implementation == "legacy" else core_text
+        error = behavior[name]["error"]
+        message = None if error is None else error["message"]
+        if message is None or message.count(declared) != 1:
+            raise SystemExit(
+                f"{name}: error message {message!r} does not contain the declared "
+                f"{implementation} text {declared!r} once; update DECLARED_ERROR_TEXT "
+                "deliberately"
+            )
+        error["message"] = message.replace(declared, legacy_text)
+    return behavior
+
 
 def _assignment_name(node):
     if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -267,6 +302,7 @@ def main():
         },
     }
     behavior = {name: _run_case(fn, case) for name, case in cases.items()}
+    behavior = _apply_declared_error_text(behavior, args.implementation)
     Path(args.out).write_text(json.dumps(behavior, indent=2, sort_keys=True))
 
 

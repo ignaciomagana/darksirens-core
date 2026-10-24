@@ -358,6 +358,87 @@ def test_inference_target_result_carries_no_prior_volume_keys(monkeypatch):
     assert infer(target, sampler="dynesty") == {"logZ": -4.0}
 
 
+def _fake_target_sampler(monkeypatch, result):
+    _install_fake_module(
+        monkeypatch,
+        "darksirens.inference.prior",
+        make_prior_transform=lambda *args, **kwargs: object(),
+    )
+    _install_fake_module(
+        monkeypatch,
+        "darksirens.inference.sampling",
+        run_sampler=lambda *args, **kwargs: dict(result),
+    )
+
+
+def test_inference_target_declaring_a_prior_volume_offset_is_corrected(monkeypatch):
+    """A target that declares its prior-box offset gets logZ_corrected like an
+    ordinary analysis; the raw logZ is untouched."""
+    import darksirens as ds
+
+    _fake_target_sampler(monkeypatch, {"logZ": -12.5, "logZerr": 0.1})
+    target = ds.InferenceTarget(
+        lambda theta: -1.0, _target_plan(), log_prior_volume_fraction=-0.5
+    )
+    result = infer(target, sampler="dynesty")
+    assert result["logZ"] == -12.5
+    assert result["log_prior_volume_fraction"] == -0.5
+    assert result["logZ_corrected"] == -12.0
+
+
+@pytest.mark.parametrize("fraction", [0.25, float("nan"), float("-inf")])
+def test_inference_target_refuses_an_invalid_prior_volume_offset(fraction):
+    import darksirens as ds
+
+    with pytest.raises(ValueError, match="log_prior_volume_fraction"):
+        ds.InferenceTarget(
+            lambda theta: -1.0, _target_plan(), log_prior_volume_fraction=fraction
+        )
+
+
+def test_core_built_targets_declare_the_angular_prior_volume_offset(monkeypatch):
+    """The field-mixture target over a multipole sky: ds.infer used to return
+    its raw logZ (-0.50 nat off for multipole, -3.38 for multipole_l3) with no
+    corrected value and nothing naming the offset."""
+    # The catalog stores and the mixture target need the catalog package,
+    # which loads its HDF5 reader on import.
+    pytest.importorskip("h5py")
+    from _catalog_model_fixtures import (
+        COSMOLOGY,
+        FIXED_POPULATION,
+        MODEL,
+        catalog_store,
+        gw_stores,
+    )
+
+    import darksirens as ds
+    from darksirens.likelihood.mixture import make_catalog_mixture_target
+    from darksirens.population.angular import angular_log_prior_volume_correction
+
+    events, injections = gw_stores()
+    catalogs = [catalog_store(11), catalog_store(23, nside=4, n_max=4)]
+    for angular in ("isotropic", "multipole", "multipole_l3"):
+        analysis = ds.model(
+            cosmology=COSMOLOGY,
+            population=ds.Population(MODEL, fixed=FIXED_POPULATION),
+            catalog=catalogs,
+            catalog_sky_weighting="field",
+            count_ratio="row",
+            angular=angular,
+        )
+        target = make_catalog_mixture_target(
+            analysis, events=events, injections=injections, max_likelihood_variance=1.0e3
+        )
+        expected = angular_log_prior_volume_correction(angular)
+        assert target.log_prior_volume_fraction == expected
+        _fake_target_sampler(monkeypatch, {"logZ": -12.5, "logZerr": 0.1})
+        result = infer(target, sampler="dynesty")
+        assert result["logZ"] == -12.5
+        assert result["log_prior_volume_fraction"] == expected
+        assert result["logZ_corrected"] == -12.5 - expected
+    assert angular_log_prior_volume_correction("multipole_l3") < -3.0
+
+
 def test_selection_neff_guard_auto_resolves_against_the_backend(monkeypatch):
     analysis = _angular_analysis("isotropic")
 
@@ -627,3 +708,77 @@ def test_a_failing_guard_report_never_stops_the_run(monkeypatch):
                        sampler="dynesty")
     assert calls == {"ran": True}
     assert "guard_report" not in result
+
+
+def test_the_old_soft_guard_name_is_refused_not_swallowed(monkeypatch):
+    """``selection_neff_soft_guard`` is ``bind_analysis``'s name for the
+    resolved guard; passed to infer it went into the sampler namespace and the
+    likelihood kept the default guard, without a word."""
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(TypeError, match=r"selection_neff_soft_guard.*selection_neff_guard='soft'"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="numpyro", selection_neff_soft_guard=True)
+    assert calls == {}
+    import darksirens as ds
+
+    target = ds.InferenceTarget(lambda theta: -1.0, _target_plan())
+    with pytest.raises(TypeError, match="selection_neff_soft_guard"):
+        infer(target, sampler="dynesty", selection_neff_soft_guard=False)
+
+
+def test_unknown_sampler_options_are_refused(monkeypatch):
+    """A misspelt option (NumPyro's are nuts_warmup/nuts_samples) ran without
+    it: no backend reads it. It is refused, naming the close match, before
+    anything runs (tests/test_infer_options.py has the other names)."""
+    import warnings
+
+    calls = _fake_ordinary(monkeypatch, {"logZ": 0.0})
+    with pytest.raises(TypeError, match=r"'num_samples': did you mean 'nuts_samples'\?"):
+        infer(_angular_analysis("isotropic"), events=object(), injections=object(),
+              sampler="numpyro", guard_report=False, num_warmup=5, num_samples=5)
+    assert calls == {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        infer(
+            _angular_analysis("isotropic"), events=object(), injections=object(),
+            sampler="tinyns", guard_report=False, nlive=50, nuts_warmup=5, nuts_samples=5,
+            tinyns_walks=9, tinyns_preset="prior", dynesty_walks=3,
+            resume_force=False, run_dir="/tmp/run", save_path="/tmp/run",
+        )
+
+
+# Names core stamps onto the options itself (mirrors of resolved state), or
+# that only the legacy command line's checkpoint resolution reads
+# (checkpointing.resolve_checkpoint_plan, which ds.infer does not call):
+# never infer keywords (tests/test_infer_options.py).
+_NOT_INFER_OPTIONS = {
+    "tinyns_resolved_config",
+    "run_fingerprint_digest",
+    "resume_forced_mismatch",
+    "resume",
+    "checkpoint_interval",
+}
+
+
+def test_every_option_a_backend_reads_is_a_known_sampler_option():
+    """The list infer checks against covers every name read from the
+    sampler namespace in the core sources (getattr/hasattr/attribute reads),
+    so a new backend option cannot be refused by mistake."""
+    import pathlib
+    import re
+
+    import darksirens
+    from darksirens.inference.public import _known_sampler_options
+
+    root = pathlib.Path(darksirens.__file__).parent
+    names = set()
+    pattern = re.compile(
+        r"(?:getattr|hasattr)\(opts, *\"([A-Za-z_][A-Za-z0-9_]*)\"|\bopts\.([A-Za-z_][A-Za-z0-9_]*)"
+    )
+    for path in root.rglob("*.py"):
+        for match in pattern.finditer(path.read_text()):
+            names.add(match.group(1) or match.group(2))
+    names.discard("sampler")  # set by the namespace itself
+    assert names, "the scan found no option reads"
+    names -= _NOT_INFER_OPTIONS
+    assert names <= _known_sampler_options(), sorted(names - _known_sampler_options())

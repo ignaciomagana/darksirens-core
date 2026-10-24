@@ -25,7 +25,9 @@ import numpy as np
 # verbatim comparison.  Nothing else is rewritten, every entry must occur in the
 # legacy record (a stale entry fails), and no legacy string may survive in the
 # candidate record, so any other drift in the message still fails the gate.
-# Core ships no selection-guard diagnostic script, so that remedy is dropped.
+# Core ships no selection-guard diagnostic script, so that remedy is replaced
+# by the one for an InferenceTarget, for which infer refuses both likelihood
+# keywords above.
 LEGACY_REMEDY_MAP = (
     (
         "--selection_neff_guard soft",
@@ -39,7 +41,9 @@ LEGACY_REMEDY_MAP = (
         "; python scripts/diagnose_selection_guard.py -- <your "
         "darksirens_inference args> (measure sigma^2_lnL on your data and "
         "report the smallest admitting cap)",
-        "",
+        "; for an InferenceTarget, whose likelihood options infer refuses, "
+        "build its likelihood with selection_neff_soft_guard=True or "
+        "max_likelihood_variance=<cap> instead",
     ),
     (
         "--sampler_preflight off",

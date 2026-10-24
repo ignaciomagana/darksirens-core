@@ -2,8 +2,9 @@ name: phase8d-release-contract
 
 # Builds the wheel, installs it into a clean environment and checks the frozen
 # package-root API, the pinned runtime and TinyNS metadata, default dispatch,
-# the default sampler's refusal without its extra, and that every public
-# example still runs (with the dynesty extra, the default sampler).
+# the default sampler's refusal without its extra, that every public
+# example still runs (with the dynesty extra, the default sampler), and that
+# the gwcat extra supplies the chi_eff prior core requires.
 #
 # This job used to open with "no scientific source change since accepted 8C"
 # (a diff of src/darksirens against 875a949). That freeze ended when Phases
@@ -211,6 +212,29 @@ jobs:
             echo "a packaging or example test skipped against the installed wheel"
             exit 1
           fi
+
+      - name: Verify the gwcat extra supplies the chi_eff prior core requires
+        run: |
+          # The extra's only job is the chi_eff prior for stores that do not fold
+          # it in (chi_eff_in_p_pe=False, chi_eff_swap_applied=False). Its first
+          # pin predated ChiEffPrior.support, so the hook raised ImportError.
+          /tmp/darksirens-phase8d/bin/python -m pip install "$(ls dist/darksirens-*.whl)[gwcat]"
+          /tmp/darksirens-phase8d/bin/python -m pip check
+          /tmp/darksirens-phase8d/bin/python - <<'PY'
+          import numpy as np
+
+          from darksirens.gw.samples import chi_eff_prior_logprob
+
+          # chi_eff 0.1 and 0.0 are inside the support for amax 0.99; 0.995 is
+          # outside it and must be -inf, the convention the hook checks for.
+          logp = chi_eff_prior_logprob(
+              np.array([0.1, 0.0, 0.995]),
+              np.array([30.0, 30.0, 30.0]),
+              np.array([20.0, 20.0, 20.0]),
+          )
+          assert np.isfinite(logp[:2]).all() and logp[2] == -np.inf, logp
+          print("gwcat extra chi_eff prior: PASS")
+          PY
 
       - name: Reject stale reconstruction docs
         run: |

@@ -116,6 +116,39 @@ def test_save_failure_restores_live_state(monkeypatch):
     assert sampler.save is original_save
 
 
+def test_save_detaches_a_likelihood_pool_and_puts_it_back(monkeypatch):
+    # dynesty_batch's pool sits on the likelihood wrapper, which dynesty's own
+    # __getstate__ does not clear; it is live state like the callables.
+    sampler = _sampler()
+    pool = object()
+    sampler.loglikelihood.pool = pool
+    seen = []
+
+    def save_sampler(current, fname):
+        seen.append(current.loglikelihood.pool)
+
+    _install_fake_dynesty(monkeypatch, save_sampler=save_sampler)
+    dc.save_dynesty_checkpoint(sampler, "checkpoint.pkl")
+    assert seen == [None]
+    assert sampler.loglikelihood.pool is pool
+
+    def explode(current, fname):
+        assert current.loglikelihood.pool is None
+        raise OSError("disk full")
+
+    _install_fake_dynesty(monkeypatch, save_sampler=explode)
+    with pytest.raises(OSError, match="disk full"):
+        dc.save_dynesty_checkpoint(sampler, "checkpoint.pkl")
+    assert sampler.loglikelihood.pool is pool
+
+
+def test_save_without_a_pool_leaves_the_likelihood_wrapper_alone(monkeypatch):
+    sampler = _sampler()
+    _install_fake_dynesty(monkeypatch)
+    dc.save_dynesty_checkpoint(sampler, "checkpoint.pkl")
+    assert not hasattr(sampler.loglikelihood, "pool")
+
+
 def test_save_without_instance_override_keeps_it_absent(monkeypatch):
     sampler = _sampler()
     assert "save" not in sampler.__dict__

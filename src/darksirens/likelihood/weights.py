@@ -45,9 +45,11 @@ so
         = (1 + z) * d(dL)/dz.
 
 In log space the target density in sample coordinates subtracts
-``log ddL_of_z + log(1+z)``.  This is the only place in the codebase
-where this canonical likelihood Jacobian is computed.  Do not inline it
-elsewhere.
+``log ddL_of_z + log(1+z)``.  This is the one float64 definition of this
+canonical likelihood Jacobian.  The opt-in float32 weight
+(``compute_dtype="float32"``) keeps a twin with the same arithmetic in its
+own dtype, :func:`darksirens.likelihood.mixed_precision.log_jacobian`:
+change the two together.  Do not inline it anywhere else.
 """
 
 from __future__ import annotations
@@ -195,7 +197,7 @@ def log_target_density_m1det_q_dL(
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
@@ -242,9 +244,11 @@ def log_target_density_base_and_z(
 
         log_sample_weight(...) = base + log_prior_z_fn(z, pix, catalog).
 
-    The factored LSS-marginalization path (``likelihood/core.py``) precomputes
-    ``base`` once and adds the member-dependent mixture prior per member, so the
-    O(N_max_gals) catalog-KDE work is not redone M times.  ``pix``, ``survey``
+    Nothing in core calls it: it is kept from the frozen reference, whose
+    factored LSS-marginalization path (the reference's ``likelihood/core.py``,
+    which core does not have) precomputed ``base`` once and added the
+    member-dependent mixture prior per member, so the O(N_max_gals)
+    catalog-KDE work was not redone M times.  ``pix``, ``survey``
     and ``catalog`` are accepted for signature parity with
     :func:`log_target_density_m1det_q_dL`; only the population model, cosmology,
     and ``prior_wt`` enter ``base``.
@@ -265,7 +269,7 @@ def log_target_density_base_and_z(
     """
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)
@@ -317,7 +321,7 @@ def log_sample_weight_branches(
 
     H0, Om0, w0, wa = cosmo.H0, cosmo.Om0, cosmo.w0, cosmo.wa
     if dL_grid is not None:
-        z = z_of_dL_precomputed(dL, dL_grid)
+        z = z_of_dL_precomputed(dL, dL_grid, H0=H0)
     else:
         z = z_of_dL(dL, H0, Om0, w0, wa)
     m1src = m1det / (1.0 + z)

@@ -252,3 +252,34 @@ def test_livecov_needs_tinyns_0_2_0(version, ok):
 
 def test_isotropic_presets_run_on_old_tinyns():
     require_tinyns_for_config(_build(_NS()), _NS(__version__="0.1.0"))
+
+
+@pytest.mark.parametrize("preset", ["livecov", "bounded_single", "bounded_multi",
+                                    "fused_bounded_multi"])
+def test_live_cov_presets_on_the_base_pin_are_refused_with_the_remedy(preset):
+    from darksirens.inference.tinyns_config import TINYNS_LIVECOV_VALIDATED_COMMIT
+
+    config = _build(_NS(tinyns_preset=preset))
+    with pytest.raises(ValueError) as excinfo:
+        require_tinyns_for_config(config, _NS(__version__="0.1.0"))
+    message = str(excinfo.value)
+    assert "needs tinyns >= 0.2.0; installed tinyns is 0.1.0" in message
+    assert preset in message and "isotropic presets" in message
+    assert f"tinyns.git@{TINYNS_LIVECOV_VALIDATED_COMMIT}" in message
+    # The commit named is a release the presets accept.
+    require_tinyns_for_config(config, _NS(__version__="0.2.3"))
+
+
+def test_the_refusal_names_every_preset_that_needs_tinyns_0_2():
+    from darksirens.inference.tinyns_config import _livecov_presets
+
+    needs = []
+    for name in _PRESETS:
+        if name == "custom":
+            continue
+        config = _build(_NS(tinyns_preset=name))
+        try:
+            require_tinyns_for_config(config, _NS(__version__="0.1.0"))
+        except ValueError:
+            needs.append(name)
+    assert sorted(needs) == sorted(_livecov_presets())

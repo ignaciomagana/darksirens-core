@@ -345,3 +345,137 @@ def test_out_of_table_distances_are_dropped_not_clamped():
     assert float(out_of_table.log_mu) != float(clamped.log_mu)
     assert float(out_of_table.log_likelihood) != float(clamped.log_likelihood)
     assert abs(float(out_of_table.log_mu) - float(clamped.log_mu)) > 1e-3
+
+
+# ------------------------------------------------------------------
+# 3b. The same mask on the catalog, mixture, bright and float32 paths.
+# ------------------------------------------------------------------
+
+#: A distance past the table top at every H0 of these fixtures (dL_lo is 0,
+#: so the lower rail is reached by a negative distance).
+_FAR_DL = 5.0e5
+_PE_OUT = (1, 9, 20)
+_SEL_OUT = (3, 40, 61, 100)
+
+
+#: The weights with their own distance mask: the catalog weight (dark,
+#: complete, marked and field-mixture likelihoods), the per-catalog population
+#: branch weight, both float32 weights and the bright-siren weight. The
+#: production field mixture and one float32 weight run by default.
+_MASK_CASES = (
+    "field_mixture", "dark_float32", "dark", "population_blocks",
+    "population_blocks_float32", "bright",
+)
+_FAST_MASK_CASES = ("field_mixture", "dark_float32")
+
+
+def _catalog_mask_binding(case):
+    """``(bound analysis, theta)`` of one ``_MASK_CASES`` entry."""
+    import darksirens as ds
+    from darksirens import Population
+    from darksirens.analysis import per_catalog_population_label
+    from darksirens.catalog.geometry import ang2pix_ring
+    from darksirens.runtime_binding import bind_analysis
+
+    from _catalog_model_fixtures import (
+        COSMOLOGY,
+        FIXED_POPULATION,
+        MODEL,
+        POPULATION_LABELS,
+        catalog_store,
+        gw_stores,
+        theta_of,
+    )
+
+    events, injections = gw_stores()
+    mu_g = POPULATION_LABELS[6]
+    fixed = Population(MODEL, fixed=FIXED_POPULATION)
+    a = catalog_store(11)
+    b = catalog_store(23, nside=4, empty=(5, 40, 41, 100), n_max=4)
+    point = {
+        "H0": 70.0, "log10n0": -2.0, "delta": 0.1, "sigma_kde": 0.003, mu_g: 36.0,
+        "log10n0_c2": -2.4, "delta_c2": -0.2, "sigma_kde_c2": 0.001, "fcat_2": 0.35,
+        per_catalog_population_label(mu_g, 2): 41.0,
+    }
+    kind = case.removesuffix("_float32")
+    if kind == "dark":
+        analysis = ds.model(cosmology=COSMOLOGY, population=fixed, catalog=a, count_ratio="row")
+    elif kind == "field_mixture":
+        analysis = ds.model(cosmology=COSMOLOGY, population=fixed, catalog=[a, b],
+                            catalog_sky_weighting="field", count_ratio="row")
+    elif kind == "population_blocks":
+        analysis = ds.model(
+            cosmology=COSMOLOGY,
+            population=Population(
+                MODEL, fixed={k: v for k, v in FIXED_POPULATION.items() if k != mu_g}
+            ),
+            catalog=[a, b], catalog_sky_weighting="field", count_ratio="row",
+            per_catalog_population={2: [mu_g]},
+        )
+    else:
+        # A wide counterpart, so the clamped samples would weigh in at both rails.
+        pixels = np.asarray(ang2pix_ring(1, events.columns["ra"], events.columns["dec"]))
+        counterparts = tuple(
+            ds.Counterpart(z=0.1, dz=2.0, pixel=int(pixels[i * events.nsamp]),
+                           sky_marginalized=True)
+            for i in range(events.n_events)
+        )
+        analysis = ds.model(cosmology=COSMOLOGY, population=fixed, counterparts=counterparts,
+                            counterpart_nside=1)
+    lowp = {"compute_dtype": "float32"} if case.endswith("_float32") else {}
+    bound = bind_analysis(analysis, events=events, injections=injections,
+                          max_likelihood_variance=1e3, **lowp)
+    return bound, theta_of(analysis, point)
+
+
+def _with_samples(event, index, mode):
+    """``event`` with the samples at ``index`` moved out of the table, or masked.
+
+    Their primary mass is raised in both modes so that, clamped to the table
+    top (z = zMax), they would still lie inside the population's mass support
+    and carry a finite weight: only the mask drops them.
+    """
+    dL = np.array(event.dL)
+    m1det = np.array(event.m1det)
+    valid = np.array(event.valid)
+    index = np.asarray(index)
+    m1det[index] = 240.0
+    if mode == "out_of_table":
+        dL[index[0::2]] = -1.0
+        dL[index[1::2]] = _FAR_DL
+    else:
+        valid[index] = False
+    return event._replace(dL=jnp.asarray(dL), m1det=jnp.asarray(m1det), valid=jnp.asarray(valid))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=() if case in _FAST_MASK_CASES else pytest.mark.slow)
+        for case in _MASK_CASES
+    ],
+)
+def test_out_of_table_distances_are_dropped_on_every_catalog_path(case):
+    """Every weight masks out-of-table distances, as the spectral weight does:
+    the diagnostics equal those of the same samples marked invalid, bit for
+    bit, and differ from the unmodified fixture's. No test fed such a sample
+    to these weights, so dropping their mask passed the suite."""
+    from dataclasses import replace
+
+    bound, theta = _catalog_mask_binding(case)
+    theta = jnp.asarray(theta)
+    moved = {}
+    for mode in ("out_of_table", "masked"):
+        moved[mode] = replace(
+            bound,
+            gw_pe=_with_samples(bound.gw_pe, _PE_OUT, mode),
+            gw_selection=_with_samples(bound.gw_selection, _SEL_OUT, mode),
+        ).diagnostics(theta)
+    assert np.isfinite(float(moved["masked"].log_likelihood))
+    for field in moved["masked"]._fields:
+        np.testing.assert_array_equal(
+            np.asarray(getattr(moved["out_of_table"], field)),
+            np.asarray(getattr(moved["masked"], field)),
+            err_msg=field,
+        )
+    assert float(moved["masked"].log_mu) != float(bound.diagnostics(theta).log_mu)

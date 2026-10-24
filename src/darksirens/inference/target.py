@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import math
+from numbers import Real
 from typing import Any, Callable
 
 from darksirens.analysis import ParameterPlan
@@ -14,7 +15,12 @@ from darksirens.analysis import ParameterPlan
 # uniform, an unknown two-index constraint applies the simplex fold), so the
 # seam rejects it here.  prior.py imports only numpy, so this does not widen
 # the dependency-light import surface.
-from .prior import JOINT_CONSTRAINT_ARITY, PRIOR_KINDS
+from .prior import (
+    JOINT_CONSTRAINT_ARITY,
+    PRIOR_KINDS,
+    check_joint_constraint_composition,
+    truncated_normal_window_problem,
+)
 
 
 def _validate_prior_kind(label: str, entry) -> None:
@@ -56,6 +62,55 @@ def _validate_prior_kind(label: str, entry) -> None:
         )
 
 
+def _samples_uniform(entry, lower, upper) -> bool:
+    """Whether ``make_prior_transform`` draws this coordinate uniformly."""
+    kind, _loc, scale = entry
+    if kind == "uniform":
+        return True
+    # The transform draws Beta(1, 1) on bounds inside [0, 1] as uniform.
+    return (
+        kind == "beta"
+        and (scale is None or float(scale) == 1.0)
+        and 0.0 <= float(lower)
+        and float(upper) <= 1.0
+    )
+
+
+def _validate_cube_map_domain(plan: ParameterPlan, kind: str, indices) -> None:
+    """Refuse a joint constraint whose cube map is not its declared density.
+
+    The maps sort, fold or condition unit-cube coordinates, or send them into
+    the unit ball, and each member is then rescaled by its own bounds and
+    inverse CDF. That is the declared density only for uniform members with
+    the bounds checked here, the bounds the ordinary path's resolver
+    (``resolve_joint_prior_constraints``) requires before it emits a map.
+    """
+    names = tuple(plan.labels[i] for i in indices)
+    for i in indices:
+        if not _samples_uniform(plan.prior_kinds[i], plan.lower[i], plan.upper[i]):
+            raise ValueError(
+                f"joint-constraint {kind}{names} needs a uniform prior on each "
+                f"member, got {tuple(plan.prior_kinds[i])!r} for "
+                f"{plan.labels[i]!r}: the cube map acts on unit-cube "
+                "coordinates, so a non-uniform inverse CDF breaks the "
+                "constraint. Enforce it in the likelihood instead."
+            )
+    bounds = tuple((float(plan.lower[i]), float(plan.upper[i])) for i in indices)
+    if kind in ("ordered_le", "conditional_upper"):
+        ok, need = bounds[0] == bounds[1], "equal bounds on both members"
+    elif kind == "simplex":
+        ok, need = all(b == (0.0, 1.0) for b in bounds), "bounds [0, 1]"
+    else:
+        ok, need = all(b == (-1.0, 1.0) for b in bounds), "bounds [-1, 1]"
+    if not ok:
+        raise ValueError(
+            f"joint-constraint {kind}{names} needs {need}, got {bounds}: the "
+            "cube map acts on unit-cube coordinates, so with these bounds it "
+            "samples another region or density than the constraint declares. "
+            "Enforce the constraint in the likelihood instead."
+        )
+
+
 def _validate_parameter_plan(plan: ParameterPlan) -> None:
     if not isinstance(plan, ParameterPlan):
         raise TypeError("parameters must be a darksirens.ParameterPlan")
@@ -78,8 +133,16 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
         if not lo < hi:
             raise ValueError(f"parameter {label!r} requires lower < upper")
 
-    for label, entry in zip(plan.labels, plan.prior_kinds):
+    for label, entry, lower, upper in zip(
+        plan.labels, plan.prior_kinds, plan.lower, plan.upper
+    ):
         _validate_prior_kind(label, entry)
+        if entry[0] in ("normal", "lognormal"):
+            problem = truncated_normal_window_problem(
+                entry[0], lower, upper, entry[1], entry[2]
+            )
+            if problem is not None:
+                raise ValueError(f"prior for parameter {label!r}: {problem}")
 
     for kind, indices in plan.joint_constraints:
         if not isinstance(kind, str) or not kind:
@@ -107,6 +170,8 @@ def _validate_parameter_plan(plan: ParameterPlan) -> None:
             raise ValueError(
                 f"joint-constraint {kind!r} indices must be distinct, got {indices}"
             )
+        _validate_cube_map_domain(plan, kind, indices)
+    check_joint_constraint_composition(plan.joint_constraints, plan.labels)
 
 
 def combine_parameter_plans(*plans: ParameterPlan) -> ParameterPlan:
@@ -172,6 +237,15 @@ class InferenceTarget:
     lists, str-keyed mappings, numpy arrays; anything else raises). Core
     never interprets either. Neither enters the dataclass hash.
 
+    ``log_prior_volume_fraction`` (optional, a finite number <= 0) is the
+    log of the fraction of the prior box on which the likelihood is not
+    rejected outright, when that fraction is a known constant (an angular
+    model whose ``log_g`` rejects part of the box, a partially fixed joint
+    prior pair). ``ds.infer`` then records it in the result with
+    ``logZ_corrected = logZ - log_prior_volume_fraction``, as for an
+    ordinary analysis; ``None`` (the default) records neither. Core's own
+    target builders set it from their analysis.
+
     A subclass may also expose what ``ds.infer``'s guard report reads from a
     binding (:data:`darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`:
     a ``diagnostics(theta)`` method returning the likelihood's diagnostics
@@ -189,11 +263,25 @@ class InferenceTarget:
     parameters: ParameterPlan
     identity: Any = field(default=None, kw_only=True, hash=False)
     provenance: Any = field(default=None, kw_only=True, hash=False)
+    log_prior_volume_fraction: float | None = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         if not callable(self.log_likelihood):
             raise TypeError("log_likelihood must be callable")
         _validate_parameter_plan(self.parameters)
+        fraction = self.log_prior_volume_fraction
+        if fraction is not None:
+            if isinstance(fraction, bool) or not isinstance(fraction, Real):
+                raise TypeError(
+                    "InferenceTarget.log_prior_volume_fraction must be a number "
+                    f"or None, got {fraction!r}"
+                )
+            if not (math.isfinite(float(fraction)) and float(fraction) <= 0.0):
+                raise ValueError(
+                    "InferenceTarget.log_prior_volume_fraction is the log of a "
+                    f"fraction: it must be finite and <= 0, got {fraction!r}"
+                )
+            object.__setattr__(self, "log_prior_volume_fraction", float(fraction))
         from .run_fingerprint import canonical_semantic
 
         # Fail at construction, not at the first checkpoint.

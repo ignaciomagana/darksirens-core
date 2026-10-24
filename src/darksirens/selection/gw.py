@@ -113,14 +113,22 @@ DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
 
 # Numerical floor for the remaining variance budget once the per-event
 # Monte-Carlo variances are subtracted: keeps the traced threshold finite
-# (the guard then rejects through the Neff comparison, never through NaN).
-# Its magnitude is load-bearing: with nEvents >= 1 the saturated threshold is
-# >= 1/_MIN_VARIANCE_BUDGET = 1e12, which must exceed any attainable Neff
-# (bounded by the injection-campaign size, <~ 1e9) so an over-budget proposal
-# is ALWAYS rejected.  Raising this epsilon without re-deriving that bound
-# can silently admit over-budget proposals; it also floors any requested
-# budget below 1e-12 (irrelevant in practice).
+# (the guard never rejects through NaN).  With nEvents >= 1 the saturated
+# threshold is >= 1/_MIN_VARIANCE_BUDGET = 1e12, above the Neff of any
+# campaign of < 1e9 detected injections, but NOT above Neff = +inf (the
+# zero-variance verdict) or the 1e12+ a near-uniform campaign reaches.  An
+# exhausted budget (the floor reached: pe_variance_sum within 1e-12 of
+# max_likelihood_variance, or above it) is therefore rejected explicitly in
+# selection_log_correction, not through this threshold.  The floor also
+# floors any requested budget below 1e-12 (irrelevant in practice).
 _MIN_VARIANCE_BUDGET = 1e-12
+
+# Under an exhausted budget the soft guard's gate argument Neff/threshold is
+# Neff / (N_obs^2 * 1e12), below this cap for every campaign of < 1e9
+# detected injections, where the gate already sits at full depth.  Clamping
+# to it leaves those values bit-identical and keeps the wall at full depth
+# when Neff is +inf or larger still.
+_EXHAUSTED_GATE_X = 1e-3
 
 
 # ============================================================
@@ -310,7 +318,11 @@ def selection_log_correction(
     Once ``pe_variance_sum`` exceeds the budget the threshold saturates at
     ``N_obs²/1e-12`` (its gradient w.r.t. ``pe_variance_sum`` clamps to
     zero there) and the wall repels through the ``Neff``/``log_mu``
-    channels at its validated full depth.
+    channels at its validated full depth.  An exhausted budget
+    (``pe_variance_sum >= max_likelihood_variance - 1e-12``, where the
+    threshold saturates) is rejected (hard) or kept at full wall depth (soft)
+    whatever ``Neff`` is, ``+inf`` included: no selection term can bring such
+    a total variance under the cap.
 
     The correction is:
 
@@ -349,6 +361,13 @@ def selection_log_correction(
     # whenever pe_variance_sum is.
     budget = jnp.maximum(max_likelihood_variance - pe_variance_sum, _MIN_VARIANCE_BUDGET)
     threshold = jnp.maximum(5.0 * n, (n * n) / budget)
+    # The PE variances alone use up the budget: no Neff can bring the total
+    # under it, including Neff = +inf, which passes the saturated threshold.
+    # Read off the floored budget (exactly where the threshold saturates), not
+    # by comparing pe_variance_sum again: a second use of pe_variance_sum
+    # changes how XLA fuses the jitted likelihood and moves admitted values
+    # by an ulp.
+    exhausted = budget <= _MIN_VARIANCE_BUDGET
     if soft_guard:
         # Gradient-based samplers (NumPyro NUTS) cannot cross a hard -inf wall:
         # every trajectory that brushes it is flagged divergent (the H1-profile
@@ -383,6 +402,7 @@ def selection_log_correction(
         finite_neff = jnp.isfinite(Neff)
         neff_safe = jnp.where(finite_neff, Neff, threshold)
         x = jnp.where(finite_neff, neff_safe / threshold, jnp.inf)
+        x = jnp.where(exhausted, jnp.minimum(x, _EXHAUSTED_GATE_X), x)
         gate = jax.nn.softplus(200.0 * (1.0 - x) - 10.0)
         reward_mag = n * jax.nn.softplus(-log_mu)
         wall = -gate * (100.0 + 2.0 * reward_mag)
@@ -400,7 +420,7 @@ def selection_log_correction(
         # way, collapse to the hard verdict.
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
-    too_sparse = ~(Neff > threshold)
+    too_sparse = ~(Neff > threshold) | exhausted
     correction = (
         -n * log_mu
         + n * (3.0 + n) / (2.0 * Neff)
@@ -486,6 +506,15 @@ def compute_selection_term(
     Returns the 3-tuple ``(log_mu, Neff, log_sigma2)`` (the third element is the
     log Monte-Carlo variance of μ, used by the strong-lensing cluster path; the
     standard single-event likelihood ignores it).
+
+    The estimate is unbiased only if the campaign's draw distribution covers
+    the detectable population, ``supp(p_det p_pop(. | Lambda)) ⊂ supp(p_draw)``,
+    at every ``Lambda`` the sampler visits. In the detector frame the
+    campaign's support is fixed while the detectable population reaches
+    further out as ``H0`` grows, so a campaign that stops inside the detection
+    horizon of part of the prior under-counts μ there; ``N_eff`` cannot see it
+    (the missing injections take their weight with them). The guard report of
+    ``ds.infer`` measures it (:func:`darksirens.inference.guard_report.selection_coverage`).
 
     Parameters
     ----------

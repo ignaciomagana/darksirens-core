@@ -312,6 +312,48 @@ def test_other_inputs_are_refused():
         ds.decode_parameters(bound, theta, z_depth=0.3)
 
 
+@pytest.mark.parametrize("kernel_pin", ["auto", "off"])
+def test_an_integer_or_float32_theta_evaluates_as_the_float64_one(kernel_pin):
+    """An H0 grid written by hand (``np.arange``: integers) or in float32 is the
+    float64 coordinate of the same values. The fixed values used to take
+    ``theta``'s dtype: an integer ``theta`` truncated ``log10n0=-2.5`` to -2,
+    ``delta=0.5`` and ``sigma_kde=0.01`` to 0, and a float32 one rounded them,
+    so the kernel pin's per-call probe made every call ``-inf``."""
+    from test_partial_fixing import FIDUCIALS, LABELS
+
+    # Only H0 and m_min are sampled, so an integer theta is a valid coordinate.
+    population = ds.Population(
+        MODEL, fixed={label: FIDUCIALS[label] for label in LABELS if label != LABELS[2]}
+    )
+    fixed_survey = {"log10n0": -2.5, "delta": 0.5, "sigma_kde": 0.01}
+    analysis = ds.model(
+        cosmology=COSMOLOGY, population=population, catalog=_catalog(), count_ratio="row",
+        fixed_survey=fixed_survey, n0_units="h_scaled", kernel_pin=kernel_pin,
+    )
+    assert analysis.parameters.kernel_pin_active == (kernel_pin == "auto")
+    events, injections = _stores()
+    bound = bind_analysis(analysis, events=events, injections=injections)
+    for h in np.arange(60, 76, 5):
+        integer = np.array([h, 5])
+        assert integer.dtype.kind == "i"
+        want = bound(integer.astype(np.float64))
+        assert np.isfinite(float(want))
+        assert _same_bits(bound(integer), want)
+        _assert_same(ds.decode_parameters(analysis, integer),
+                     ds.decode_parameters(analysis, integer.astype(np.float64)))
+        single = np.array([h + 0.25, 5.5], dtype=np.float32)  # exactly representable
+        assert _same_bits(bound(single), bound(single.astype(np.float64)))
+    decoded = ds.decode_parameters(analysis, np.array([70, 5]))
+    assert decoded.catalog.delta.dtype == np.float64
+    assert float(decoded.catalog.delta) == 0.5 and float(decoded.catalog.sigma_kde) == 0.01
+    assert float(decoded.catalog.n0) == pytest.approx(10.0**-2.5 * 0.7**3, rel=1e-14)
+    for bad in (np.array([True, False]), np.array([70.0 + 0j, 5.0])):
+        with pytest.raises(TypeError, match="theta must hold real numbers"):
+            ds.decode_parameters(analysis, bad)
+        with pytest.raises(TypeError, match="theta must hold real numbers"):
+            bound(bad)
+
+
 def test_root_export_is_light_and_listed():
     assert "decode_parameters" in ds.__all__
     assert "DecodedParameters" in runtime_binding.__all__

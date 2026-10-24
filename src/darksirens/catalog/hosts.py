@@ -25,6 +25,7 @@ from .redshift import (
     _inv_sig_eff,
     _log_kw_eff_rowmax,
     _map_rows,
+    _padding_safe_widths,
     _renormalize_below_depth,
     _row_log_kernel_norms,
     _row_real_mask,
@@ -37,6 +38,9 @@ jax.config.update("jax_enable_x64", True)
 LOG_H_CLIP: float = 7.0
 MU_MISS_NBINS: int = 40
 MARK_SATURATION_MAX_FRACTION: float = 0.5
+#: ``mu_miss_estimator`` values: the legacy count mean of ``h`` per redshift
+#: bin, and the opt-in mean weighted by the catalog base weights.
+MU_MISS_ESTIMATORS: tuple = ("count", "weighted")
 
 
 @jax.tree_util.register_pytree_node_class
@@ -104,8 +108,13 @@ class CenteredHostMarks:
 
     @classmethod
     def tree_unflatten(cls, names, children):
-        values, reference_z, reference_values = children
-        return cls(names, values, reference_z, reference_values)
+        # JAX rebuilds pytrees with non-array leaves (None, object() and
+        # ShapeDtypeStruct placeholders) in tree_map, device_put, vmap and
+        # eval_shape: restore the slots without re-running the validation.
+        obj = object.__new__(cls)
+        obj.names = names
+        obj.values, obj.reference_z, obj.reference_values = children
+        return obj
 
 
 class LogLinearHostModel:
@@ -176,6 +185,19 @@ def _real_mask(catalog: GalaxyCatalog):
     )[:, None]
 
 
+def _aligned_log_h(model: LogLinearHostModel, marks: CenteredHostMarks, catalog, eta):
+    """Clipped ``log h`` of the aligned table, padded slots read as zero marks.
+
+    Padding is ignored whatever it holds (``GalaxyCatalog``): zeroing it before
+    the product keeps a NaN or infinite pad out of every sum and its gradient
+    (``0 * nan`` is NaN).  Real slots are bit-for-bit ``model.log_h``.
+    """
+
+    model._check_names(marks.names)
+    values = jnp.where(_real_mask(catalog)[..., None], marks.values, 0.0)
+    return jnp.clip(model.log_h_values(values, eta), -LOG_H_CLIP, LOG_H_CLIP)
+
+
 def _host_array(array, *, what: str):
     """Return a concrete host view of a build-time table.
 
@@ -202,7 +224,9 @@ def _same_table(a, b, *, what: str) -> bool:
     b = _host_array(b, what=what)
     if a is None or b is None:
         return a is None and b is None
-    return a.shape == b.shape and bool(np.array_equal(a, b))
+    # NaN == NaN here: two equal tables with a NaN (padding, or a real mark
+    # that check_centered_marks then refuses) are the same table.
+    return a.shape == b.shape and bool(np.array_equal(a, b, equal_nan=True))
 
 
 def require_shared_host_view(
@@ -285,6 +309,10 @@ def check_centered_marks(
     ``mu_miss`` through the same clip, so an uncentered reference table kills
     eta in the missing branch exactly as an uncentered aligned table does in the
     observed branch.
+
+    A real galaxy, or a reference row, with a non-finite mark (or reference
+    redshift) is refused: it would turn ``mu_miss`` and the row normalisers
+    into NaN.  Padded slots are not read, whatever they hold.
     """
 
     model._check_names(marks.names)
@@ -295,8 +323,18 @@ def check_centered_marks(
         )
     values = _host_array(marks.values, what=f"{where}: mark table")
     ngals = _host_array(catalog.ngals, what=f"{where}: catalog row lengths")
-    abs_sum = np.sum(np.abs(values), axis=-1)
     real = np.arange(values.shape[1])[None, :] < ngals[:, None]
+    bad = real[..., None] & ~np.isfinite(values)
+    if np.any(bad):
+        row, slot, k = (int(i) for i in np.argwhere(bad)[0])
+        raise ValueError(
+            f"{where}: {int(np.sum(np.any(bad, axis=-1)))} real galaxies carry a "
+            f"non-finite host mark (first: row {row}, slot {slot}, "
+            f"{marks.names[k]} = {values[row, slot, k]!r}). A missing host "
+            "property is a data error: drop the galaxy or impute its mark "
+            "survey-side before building CenteredHostMarks."
+        )
+    abs_sum = np.sum(np.abs(values), axis=-1)
     n_real = int(np.sum(real))
     sat = (model.eta_bound * abs_sum >= LOG_H_CLIP) & real
     frac = float(np.sum(sat) / n_real) if n_real > 0 else 0.0
@@ -314,6 +352,15 @@ def check_centered_marks(
     )
     if reference is None or reference.shape[0] == 0:
         return
+    reference_z = _host_array(marks.reference_z, what=f"{where}: reference redshifts")
+    bad_ref = ~np.all(np.isfinite(reference), axis=-1) | ~np.isfinite(reference_z)
+    if np.any(bad_ref):
+        raise ValueError(
+            f"{where}: {int(np.sum(bad_ref))} survey-wide reference galaxies "
+            "carry a non-finite redshift or host mark (first: reference row "
+            f"{int(np.argmax(bad_ref))}). Every reference row is a real galaxy; "
+            "drop it or impute its mark survey-side."
+        )
     # Every reference row is a real galaxy, so the saturated fraction is a
     # plain mean over rows.
     ref_abs_sum = np.sum(np.abs(reference), axis=-1)
@@ -350,6 +397,7 @@ def _row_marked_kernel_state(
     """Legacy marked catalog kernel for one padded row."""
 
     real = _row_real_mask(zs, ws, ngal)
+    dzs = _padding_safe_widths(dzs, real)
     sig_eff = jnp.maximum(
         jnp.sqrt(dzs**2 + sigma_kde**2), SIGMA_EFF_FLOOR
     )
@@ -391,6 +439,24 @@ def _row_marked_kernel_state(
     return log_kw, sig_eff, log_N_host, log_depth_mass
 
 
+def _without_auto_kernel_window(catalog):
+    """``catalog`` without a window attached under ``kernel_window="auto"``.
+
+    The marked host kernel sums every galaxy, the historical evaluation: an
+    explicit (strict) window is refused, an ``"auto"`` one dropped.
+    """
+
+    window = getattr(catalog, "kernel_window", None)
+    if window is None:
+        return catalog
+    if getattr(window, "strict", True):
+        raise ValueError(
+            "the marked host kernel does not take the kernel window: build it "
+            "from a catalog without one (catalog._replace(kernel_window=None))"
+        )
+    return catalog._replace(kernel_window=None)
+
+
 def build_marked_catalog_kernel_state(
     cosmo,
     params: CatalogParameters,
@@ -399,25 +465,24 @@ def build_marked_catalog_kernel_state(
     marks: CenteredHostMarks,
     eta,
 ):
-    """Build the marked observed-host kernel and row host amplitudes."""
+    """Build the marked observed-host kernel and row host amplitudes.
 
-    window = getattr(catalog, "kernel_window", None)
-    if window is not None:
-        if getattr(window, "strict", True):
-            raise ValueError(
-                "the marked host kernel does not take the kernel window: build it "
-                "from a catalog without one (catalog._replace(kernel_window=None))"
-            )
-        # A window attached under the kernel_window="auto" default: the
-        # marked kernel sums every galaxy, the historical evaluation.
-        catalog = catalog._replace(kernel_window=None)
+    A window attached under ``kernel_window="auto"`` is dropped and an
+    explicit one refused.  The per-sample evaluator reads the window from the
+    catalog it is handed, so evaluate the state against the catalog without
+    its window (``catalog._replace(kernel_window=None)``), as
+    :func:`darksirens.likelihood.marked.marked_dark_siren_log_likelihood`
+    does.
+    """
+
+    catalog = _without_auto_kernel_window(catalog)
     model._check_names(marks.names)
     if marks.values.shape[:2] != catalog.zgals.shape:
         raise ValueError(
             f"mark table rows {marks.values.shape[:2]} do not match catalog "
             f"{catalog.zgals.shape}"
         )
-    log_h = jnp.clip(model.log_h(marks, eta), -LOG_H_CLIP, LOG_H_CLIP)
+    log_h = _aligned_log_h(model, marks, catalog, eta)
     log_g_grid = log_galaxy_measure_grid(cosmo, params)
     z, dz, w, ng = catalog.zgals, catalog.dzgals, catalog.wgals, catalog.ngals
     log_kw, sig_eff, log_N_host, log_depth_mass = _map_rows(
@@ -452,7 +517,12 @@ def build_marked_catalog_kernel_state(
 
 
 def _mu_miss_from_flat(zs, h, real):
-    """Legacy 40-bin empirical ``E_obs[h|z]`` missing-host efficiency."""
+    """Legacy 40-bin empirical ``E_obs[h|z]`` missing-host efficiency.
+
+    ``real`` weighs each entry: the {0, 1} real-galaxy mask (the legacy count
+    mean) or, under ``mu_miss_estimator="weighted"``, each real galaxy's base
+    weight (zero on padding).
+    """
 
     z_hi = zgrid[-1]
     edges = jnp.linspace(0.0, z_hi, MU_MISS_NBINS + 1)
@@ -462,11 +532,15 @@ def _mu_miss_from_flat(zs, h, real):
         0,
         MU_MISS_NBINS - 1,
     )
-    sum_h = jnp.zeros(MU_MISS_NBINS).at[b].add(h * real)
+    # where, not ``h * real``: a non-finite h in a padded slot times 0 is NaN.
+    sum_h = jnp.zeros(MU_MISS_NBINS).at[b].add(jnp.where(real > 0.0, h * real, 0.0))
     cnt = jnp.zeros(MU_MISS_NBINS).at[b].add(real)
+    # A count total is >= 1 when positive, so this is the legacy
+    # ``maximum(total, 1)`` for counts; base weights may sum below 1.
+    total = jnp.sum(cnt)
     mu_global = jnp.where(
-        jnp.sum(cnt) > 0.0,
-        jnp.sum(sum_h) / jnp.maximum(jnp.sum(cnt), 1.0),
+        total > 0.0,
+        jnp.sum(sum_h) / jnp.where(total > 0.0, total, 1.0),
         1.0,
     )
     mu_bin = jnp.where(
@@ -484,6 +558,7 @@ def missing_host_efficiency_grid(
     eta,
     *,
     aligned_log_h=None,
+    mu_miss_estimator: str = "count",
 ):
     """Return ``mu_miss(z|eta)=E_obs[h|z]`` on the shared redshift grid.
 
@@ -491,10 +566,33 @@ def missing_host_efficiency_grid(
     and selection compact views receive the same missing-host modulation.
     Otherwise the aligned catalog rows provide the empirical reference, matching
     the frozen K=1 conditional implementation.
+
+    ``mu_miss_estimator="count"`` (the default, legacy) is the count mean of
+    ``h`` per redshift bin.  The observed branch carries ``N_obs <h>_w``, the
+    mean weighted by the catalog base weights, so when the base weights
+    correlate with the mark (luminosity weights with a stellar-mass mark) a
+    redshift-independent mark still moves the catalog:missing odds by
+    ``<h>_w / <h>``.  The opt-in ``"weighted"`` takes ``sum w h / sum w`` per
+    bin over the aligned rows, so the two branches cancel for such a mark.  It
+    needs the aligned rows' base weights and refuses a reference table, which
+    carries none.
     """
 
     model._check_names(marks.names)
+    if mu_miss_estimator not in MU_MISS_ESTIMATORS:
+        raise ValueError(
+            f"mu_miss_estimator must be one of {MU_MISS_ESTIMATORS}, got "
+            f"{mu_miss_estimator!r}"
+        )
+    weighted = mu_miss_estimator == "weighted"
     if marks.reference_values is not None:
+        if weighted:
+            raise ValueError(
+                'mu_miss_estimator="weighted" needs the base weight of every '
+                "galaxy it averages, and the survey-wide reference table "
+                "(CenteredHostMarks.reference_z / reference_values) carries "
+                'none: use the aligned rows (no reference table) or "count"'
+            )
         log_h = jnp.clip(
             model.log_h_values(marks.reference_values, eta),
             -LOG_H_CLIP,
@@ -506,12 +604,14 @@ def missing_host_efficiency_grid(
         return _mu_miss_from_flat(zs, h, real)
 
     if aligned_log_h is None:
-        aligned_log_h = jnp.clip(
-            model.log_h(marks, eta), -LOG_H_CLIP, LOG_H_CLIP
-        )
+        aligned_log_h = _aligned_log_h(model, marks, catalog, eta)
     zs = jnp.asarray(catalog.zgals).reshape(-1)
     h = jnp.exp(jnp.asarray(aligned_log_h)).reshape(-1)
     real = _real_mask(catalog).reshape(-1).astype(h.dtype)
+    if weighted:
+        real = jnp.where(
+            real > 0.0, jnp.asarray(catalog.wgals, dtype=h.dtype).reshape(-1), 0.0
+        )
     return _mu_miss_from_flat(zs, h, real)
 
 
@@ -523,9 +623,27 @@ def build_marked_incomplete_catalog_prior_state(
     model: LogLinearHostModel,
     marks: CenteredHostMarks,
     eta,
+    *,
+    mu_miss_estimator: str = "count",
 ) -> IncompleteCatalogPriorState:
-    """Build the ordinary conditional marked-host dark-siren prior state."""
+    """Build the ordinary conditional marked-host dark-siren prior state.
 
+    The completeness is the count ratio read from ``observed_cache``; a
+    magnitude-selection model on ``params.selection``
+    (``completeness="selection"``) is refused, not ignored.
+    ``mu_miss_estimator`` is passed to :func:`missing_host_efficiency_grid`
+    (``"count"``, the default, or the opt-in ``"weighted"``).  The kernel
+    window convention is that of :func:`build_marked_catalog_kernel_state`:
+    evaluate the state against the catalog without its window.
+    """
+
+    if getattr(params, "selection", None) is not None:
+        raise ValueError(
+            "the marked-host prior takes only the count-ratio completeness: "
+            "CatalogParameters.selection carries a magnitude-selection model "
+            "(completeness='selection'), which is not implemented for host "
+            "marks. Set selection=None, or use the unmarked likelihood."
+        )
     # Eager, once per catalog view: an uncentered table pins log h to the clip
     # rail across the whole eta prior and the eta posterior comes back flat with
     # nothing downstream reporting a fault.
@@ -535,7 +653,8 @@ def build_marked_incomplete_catalog_prior_state(
     )
     curves = completion_curves(cosmo, params, catalog, observed_cache)
     mu_miss = missing_host_efficiency_grid(
-        catalog, model, marks, eta, aligned_log_h=log_h
+        catalog, model, marks, eta, aligned_log_h=log_h,
+        mu_miss_estimator=mu_miss_estimator,
     )
     dN_miss = curves.dN_miss * mu_miss[None, :]
     N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)
@@ -549,7 +668,13 @@ def build_marked_incomplete_catalog_prior_state(
         jnp.isfinite(log_N_host_depth), jnp.exp(log_N_host_depth), 0.0
     )
     Z = N_host_obs + N_host_miss
-    log_Z = jnp.where(Z > 0.0, jnp.log(jnp.maximum(Z, 1.0e-300)), 0.0)
+    # A NaN normaliser poisons its row (NaN, which the sample weights turn into
+    # -inf) instead of reading as log_Z = 0 and dropping the normalisation.
+    log_Z = jnp.where(
+        Z > 0.0,
+        jnp.log(jnp.maximum(Z, 1.0e-300)),
+        jnp.where(jnp.isnan(Z), jnp.nan, 0.0),
+    )
     return IncompleteCatalogPriorState(
         kernels=kernels,
         log_Nobs=log_N_host_depth,
@@ -563,6 +688,7 @@ __all__ = [
     "LOG_H_CLIP",
     "LogLinearHostModel",
     "MARK_SATURATION_MAX_FRACTION",
+    "MU_MISS_ESTIMATORS",
     "build_marked_catalog_kernel_state",
     "build_marked_incomplete_catalog_prior_state",
     "check_centered_marks",
