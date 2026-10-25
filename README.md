@@ -21,10 +21,18 @@ pip install ".[dynesty]"
 
 Without the extra, `ds.infer` with the default sampler raises an `ImportError`
 that names the extra; `ds.infer(..., sampler="tinyns")` runs on the base
-install with the isotropic TinyNS presets. The base install pins TinyNS 0.1.0
-(the validated reconstruction stack); the live-cov presets (`livecov`,
-`bounded_single`, `bounded_multi`, `fused_bounded_multi`) need TinyNS >= 0.2.0
-and are refused before sampling on the pin, with the TinyNS commit the
+install, which pins TinyNS 1.0.0. TinyNS 1.x has no presets: it runs with its
+own defaults (`num_delete = nlive // 10` live points replaced per step, walks
+set by the dimension), which `tinyns_walks` and `tinyns_num_delete` override,
+and every other `tinyns_*` sampler option or preset of TinyNS 0.x is refused
+before sampling. Its `logZerr` is TinyNS's first-order prior-volume error, a
+run that reaches a likelihood of `+inf` or finds no finite one raises, and a
+checkpoint is resumed only when `tinyns_resume_from` (or
+`resume_from_resolved`) names it: a fresh run refuses to start over an
+existing checkpoint file, which TinyNS 1.x would otherwise resume. A TinyNS
+0.x installed in its place still runs the presets; there the live-cov presets
+(`livecov`, `bounded_single`, `bounded_multi`, `fused_bounded_multi`) need
+TinyNS >= 0.2.0 and are refused on 0.1.0, with the TinyNS 0.x commit the
 real-backends CI job validates as the remedy. Optional integrations are
 explicit:
 

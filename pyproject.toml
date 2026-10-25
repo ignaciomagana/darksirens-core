@@ -18,7 +18,9 @@ dependencies = [
   "numpy==1.26.4",
   "scipy==1.12.0",
   "h5py==3.12.1",
-  "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@3f9e1b2537f32b59f17ee9ce68b2d725681a024c",
+  # TinyNS 1.0.0 (the v1.0.0 tag). Pinned by commit: the tag was moved once,
+  # from 8851058 to this commit, before the release was uploaded.
+  "tinyns @ git+https://github.com/ignaciomagana/tinyns.git@a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd",
 ]
 
 [project.optional-dependencies]

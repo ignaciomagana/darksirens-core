@@ -1493,6 +1493,96 @@ target that exposes what the report reads from a binding.
   importable, a real lss `fixed_table_target`.
   `tests/test_guard_report.py` pins the ordinary analysis's advice text.
 
+### TinyNS 1.0.0 (the base pin moves; TinyNS results change; no likelihood change)
+
+TinyNS 1.0.0 (tag `v1.0.0`, commit `a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd`)
+is a rewrite with a new algorithm and API and no compatibility with 0.x. The
+base install now pins it in place of 3f9e1b2 (TinyNS 0.1.0), and
+`run_tinyns` hands a run to `darksirens.inference.tinyns_v1_adapter` whenever
+the installed TinyNS is 1.x. The default sampler stays Dynesty; Dynesty and
+NumPyro runs are unchanged.
+
+- **What TinyNS runs.** `NestedSampler(loglike, prior_transform, ndim,
+  nlive, *, num_delete, walks)` and `run(key, *, dlogz, maxiter, progress,
+  checkpoint)`. `nlive`, `dlogz`, `max_samples` (as `maxiter`), `seed` and
+  `show_progress` map onto them; `tinyns_walks` and the new
+  `tinyns_num_delete` (listed in `public._BACKEND_OPTIONS`; the 0.x branch
+  refuses it) are passed only when set, so TinyNS's defaults apply otherwise
+  (`num_delete = max(1, nlive // 10)`, `walks = max(25, 6 * ndim, ndim**2 //
+  6)`). The likelihood goes in as a pytree callable whenever it offers one, as
+  on TinyNS 0.2. The seed is split into the run and resampling streams as
+  before. A TinyNS run's samples, evidence and error differ from a 0.x run of
+  the same options: no result is bit-identical across the two.
+- **Refused on 1.x.** Every other explicitly set `tinyns_<setting>` of 0.x
+  (`step_scale`, `rwalk_proposal`, `replacement_chains`, the bound options,
+  ...) and every preset but the default (`recommended`, `custom` or none)
+  raise `ValueError` before sampling: TinyNS 1.x cannot honour them, and
+  running without them would change the analysis. The cadence options
+  `tinyns_checkpoint_interval` and `tinyns_progress_interval` are accepted and
+  not used.
+- **`logZerr`** is TinyNS 1.0.0's `logzerr`: the first-order spread of logZ
+  over the prior-volume path, from the live count at every death. It is not
+  the 0.x estimate.
+- **Invalid runs raise.** TinyNS 1.0.0 ends a run whose live points have no
+  finite likelihood, or reach `+inf`, with the status `"invalid"` (`success`
+  false, logZ not finite) and returns it with a `RuntimeWarning`. The adapter
+  prints TinyNS's summary and raises `RuntimeError` with its message (and the
+  checkpoint path, which is kept). The stop reasons are `"convergence"`,
+  `"maxiter"`, `"maxcall"` and `"plateau"`.
+- **One checkpoint file, resumed only when asked.** TinyNS 1.x writes one
+  `.npz` (at most every 10 minutes and at the end) and resumes it whenever
+  it exists. A resume names it with `tinyns_resume_from` or
+  `resume_from_resolved` (which `ds.infer`'s fingerprint gate checks); a
+  resume source that differs from the checkpoint target is refused, as is a
+  resume of a missing file (`FileNotFoundError`) and a fresh run whose
+  checkpoint path already holds a file (`FileExistsError`: TinyNS 1.x would
+  resume it without the gate). On resume TinyNS 1.0.0 itself evaluates 32
+  stored points again and refuses (`ValueError`) a checkpoint of another
+  likelihood, prior, dataset, config, key or x64 setting; it warns when the
+  checkpoint was written by another JAX build or device. 0.x checkpoints are
+  refused (TinyNS 1.0.0 reads `tinyns-ckpt-7` only). `CheckpointPlan.summary()`
+  still describes the 0.x cadence ("every N iterations"); the checkpoint-plan
+  parity probe pins its text.
+- **Result mapping.** The keys are unchanged (`samples`, `logZ`, `logZerr`,
+  `dead_points`, `tinyns_diagnostics`, `tinyns_summary`,
+  `tinyns_runtime_diagnostics`, the termination fields) and gain
+  `tinyns_modes`, TinyNS's per-mode table. The runtime diagnostics are
+  TinyNS's `diagnostics()` without the modes, plus `seconds`, `walks`,
+  `unmoved_fraction`, `resumed`, `calls_per_iter` and `ncall_per_sec`.
+- **JAX.** TinyNS 1.0.0 supports JAX from 0.4.31 and registers the batching
+  rule that JAX 0.4.34 lacks for `optimization_barrier`, so the pinned JAX
+  0.4.34 runs it unchanged.
+- **The pin.** `pyproject.toml`, `tests/test_packaging_contract.py`
+  (`TINYNS_COMMIT`), `phase8-regression.yml` and the wheel gate
+  (`phase8d-final-freeze.yml`, which now also asserts `tinyns.__version__ ==
+  "1.0.0"`) name the commit, not the tag (the tag moved once, from 8851058,
+  before the release was uploaded). `real-backends.yml` keeps TinyNS 0.2.3,
+  so the 0.x branch of `run_tinyns` (`tinyns_config.py`, the presets and the
+  live-cov refusal on 0.1.0, whose remedy names 0.2.3) still runs for real
+  there; under the base pin (`phase8-regression`) the same tests run the
+  pytree hand-off without a preset and check that the livecov preset is
+  refused. The 0.x branch can go, with the 0.x parity probes, once nothing
+  installs TinyNS 0.x.
+- **Unchanged.** No likelihood, prior transform or Dynesty/NumPyro path
+  changes. The parity probes run no real sampler (their TinyNS is a recording
+  fake, which takes the 0.x branch), and their candidate outputs are
+  byte-identical to main's (all 36 candidate probes the workflows run, on
+  main at fddba76 and on this change; `probe_gw_io`, which needs a generated
+  fixture directory, was not run). The legacy reference files and the
+  golden files are untouched.
+- **Tests.** `tests/test_tinyns_v1_adapter.py`: the option mapping, the
+  refusal of 0.x options and presets, the checkpoint rules, the stop reasons,
+  the 0.x branch's refusal of `tinyns_num_delete`, an end-to-end 2-D Gaussian
+  run (evidence, `num_delete` reaching TinyNS, the refused fresh rerun over
+  its checkpoint, the asked-for resume to the same result, TinyNS's refusal of
+  the checkpoint under another dataset) and an invalid run that raises.
+  `tests/test_real_backends.py` runs its TinyNS tests under either major
+  version. Local run of the full suite with the CI install line of
+  `phase8-regression` (tinyns at the pin, JAX 0.4.34, CPU): 2057 passed,
+  8 skipped (gwcat and darksirens-lss not installed, the golden-regeneration
+  guard), 1 xfailed. The real-backends job's test list with TinyNS 0.2.3:
+  126 passed, none skipped.
+
 ## Review fixes (2026-10-20)
 
 A multi-agent review on 2026-10-20 confirmed 130 findings against this tree

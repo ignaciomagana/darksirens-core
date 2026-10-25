@@ -529,7 +529,10 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   check), `"maxcall"` (more than `max_samples` calls in this sampling call),
   `"plateau"` or `"unknown"`; `ncall` and `niter` are dynesty's call counter
   and iteration count. TinyNS reports its own final dlogz, call and iteration
-  counts with `"convergence"`, `"maxiter"`, `"callback"`,
+  counts: TinyNS 1.x (the base pin) with `"convergence"`, `"maxiter"`,
+  `"maxcall"` or `"plateau"` (a run TinyNS reports `"invalid"`, with a
+  likelihood of `+inf` or none finite, raises `RuntimeError` instead), and
+  TinyNS 0.x with `"convergence"`, `"maxiter"`, `"callback"`,
   `"replacement_failure"` or `"unknown"`. NumPyro and a target with no free
   parameter set all four to `None`. The names and the value `"convergence"`
   are a downstream contract: convergence checks read them as they are.
@@ -799,8 +802,9 @@ sets defaults for `XLA_PYTHON_CLIENT_PREALLOCATE` and
 
 ## Packaging contract
 
-The base distribution includes the validated numerical stack plus the pinned
-TinyNS commit used by the legacy campaign. SciPy is a base dependency because
+The base distribution includes the validated numerical stack plus TinyNS
+1.0.0, pinned by commit (`a3c77c4`, tag `v1.0.0`; it was 3f9e1b2, TinyNS
+0.1.0, the legacy campaign's). SciPy is a base dependency because
 ordinary completeness evaluation uses `scipy.special` at runtime.
 
 GP models, Dynesty, NumPyro and gwcat prior support are explicit extras; the

@@ -90,10 +90,11 @@ PRESETS = {
 TINYNS_LIVECOV_MIN_VERSION = "0.2.0"
 
 #: The TinyNS the real-backends CI job installs (0.2.3) and runs the livecov
-#: preset against. The base install pins 3f9e1b2 (0.1.0), the validated
-#: reconstruction stack, which runs the isotropic presets only; the refusal
-#: below names this commit as the remedy (MIGRATION.md, "Review fixes
-#: (2026-10-20)", "Packaging").
+#: preset against. TinyNS 0.1.0 (3f9e1b2, the base pin until TinyNS 1.0.0)
+#: runs the isotropic presets only; the refusal below names this commit as
+#: the remedy (MIGRATION.md, "Review fixes (2026-10-20)", "Packaging"). The
+#: base install now pins TinyNS 1.0.0, which has no presets: run_tinyns hands
+#: a 1.x run to tinyns_v1_adapter before any setting here is resolved.
 TINYNS_LIVECOV_VALIDATED_COMMIT = "5b6da641c4d72b309778afdb0aea133b5de8c9e5"
 
 BASE_DEFAULTS = dict(
@@ -490,11 +491,12 @@ def require_tinyns_for_config(config, tinyns_module) -> None:
         raise ValueError(
             f"TinyNS rwalk_proposal={config.rwalk_proposal!r} / walks={config.walks!r} needs "
             f"tinyns >= {TINYNS_LIVECOV_MIN_VERSION}; installed tinyns is {version or 'unversioned'}. "
-            "The base install pins tinyns 0.1.0, which runs the isotropic presets but "
+            "TinyNS 0.1.0 runs the isotropic presets but "
             f"not the live-cov ones ({', '.join(_livecov_presets())}). Install the "
-            "TinyNS the real-backends CI job validates: python -m pip install "
+            "TinyNS 0.x the real-backends CI job validates them on: python -m pip install "
             "'tinyns @ git+https://github.com/ignaciomagana/tinyns.git@"
-            f"{TINYNS_LIVECOV_VALIDATED_COMMIT}'"
+            f"{TINYNS_LIVECOV_VALIDATED_COMMIT}' (the base install's TinyNS 1.0.0 "
+            "has no presets)."
         )
 
 

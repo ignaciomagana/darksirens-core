@@ -427,32 +427,40 @@ def test_custom_target_example_runs_and_prints_a_finite_evidence():
 
 # --- TinyNS >= 0.2.0: the livecov preset and the pytree hand-off ------------
 # The real-backends job pins tinyns 0.2.3 and fails on any skip, so these always
-# run there; the full-suite regression job still pins tinyns 0.1.0, where they
-# skip (the live-cov proposal and the pytree hand-off start at 0.2.0).
+# run there on the 0.x branch of run_tinyns. The full-suite regression job pins
+# the base install's tinyns 1.0.0, which has no presets: there the pytree tests
+# run without one, and the livecov preset must be refused.
 _TINYNS_02 = "0.2.0"
+
+
+def _livecov_preset(tinyns):
+    """``tinyns_preset="livecov"`` on TinyNS 0.x; nothing on 1.x."""
+    from darksirens.inference.tinyns_v1_adapter import is_tinyns_v1
+
+    return {} if is_tinyns_v1(tinyns) else {"tinyns_preset": "livecov"}
 
 
 def test_tinyns_livecov_recovers_the_analytic_evidence_and_posterior():
     tinyns = pytest.importorskip("tinyns", minversion=_TINYNS_02)
     from darksirens.inference.tinyns_adapter import tinyns_supports_pytree_loglike
+    from darksirens.inference.tinyns_v1_adapter import is_tinyns_v1
 
     assert tinyns_supports_pytree_loglike(tinyns), tinyns.__version__
-    result = ds.infer(
-        _target(),
-        sampler="tinyns",
-        tinyns_preset="livecov",
-        nlive=200,
-        dlogz=0.5,
-        show_progress=False,
-        seed=1,
-    )
+    options = dict(nlive=200, dlogz=0.5, show_progress=False, seed=1)
+    if is_tinyns_v1(tinyns):
+        # TinyNS 1.x runs with its own defaults
+        # (test_tinyns_recovers_the_analytic_evidence_and_posterior).
+        with pytest.raises(ValueError, match="TinyNS 1.x has no presets"):
+            ds.infer(_target(), sampler="tinyns", tinyns_preset="livecov", **options)
+        return
+    result = ds.infer(_target(), sampler="tinyns", tinyns_preset="livecov", **options)
     _assert_evidence(result)
     _assert_standard_normal_posterior(result["samples"])
     assert result["stop_reason"] == "convergence"
 
 
 def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
-    pytest.importorskip("tinyns", minversion=_TINYNS_02)
+    tinyns = pytest.importorskip("tinyns", minversion=_TINYNS_02)
     from test_partial_fixing import COSMOLOGY, MODEL, TAIL, _stores
 
     events, injections = _stores()
@@ -462,7 +470,7 @@ def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
         events=events,
         injections=injections,
         sampler="tinyns",
-        tinyns_preset="livecov",
+        **_livecov_preset(tinyns),
         nlive=50,
         dlogz=1.0,
         show_progress=False,
@@ -476,7 +484,7 @@ def test_tinyns_gets_the_pytree_form_for_an_ordinary_analysis(capsys):
 
 
 def test_tinyns_takes_a_jax_partial_target_as_is(capsys):
-    pytest.importorskip("tinyns", minversion=_TINYNS_02)
+    tinyns = pytest.importorskip("tinyns", minversion=_TINYNS_02)
     import jax
     import jax.numpy as jnp
 
@@ -488,7 +496,7 @@ def test_tinyns_takes_a_jax_partial_target_as_is(capsys):
         log_likelihood=jax.tree_util.Partial(_scaled_gaussian, jnp.ones(2)),
         parameters=target.parameters,
     )
-    result = ds.infer(target, sampler="tinyns", tinyns_preset="livecov", nlive=200, dlogz=0.5,
-                      show_progress=False, seed=3)
+    result = ds.infer(target, sampler="tinyns", **_livecov_preset(tinyns), nlive=200,
+                      dlogz=0.5, show_progress=False, seed=3)
     assert "[*] tinyns log-likelihood form: pytree" in capsys.readouterr().out
     _assert_evidence(result)

@@ -4,6 +4,10 @@ name: real-backends
 # the end-to-end TinyNS/Dynesty/NumPyro tests, the real Dynesty checkpoint
 # round-trip and the healpy parity suite are exercised by CI rather than
 # skipped for a missing package. A skip anywhere in this job is a failure.
+#
+# TinyNS here is 0.2.3, the 0.x release the presets (livecov included) are
+# validated on, so run_tinyns's 0.x branch keeps running for real. The base
+# pin, TinyNS 1.0.0 (tinyns_v1_adapter), runs for real in phase8-regression.
 
 on:
   push:

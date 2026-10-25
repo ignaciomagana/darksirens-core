@@ -41,7 +41,10 @@ PINNED_RUNTIME = (
     "scipy==1.12.0",
     "h5py==3.12.1",
 )
-TINYNS_COMMIT = "3f9e1b2537f32b59f17ee9ce68b2d725681a024c"
+# TinyNS 1.0.0 (tag v1.0.0). It was 3f9e1b2 (0.1.0) until the 1.x adapter
+# (tinyns_v1_adapter); phase8-regression.yml and phase8d-final-freeze.yml
+# install and check the same commit.
+TINYNS_COMMIT = "a3c77c46ef1d3e248d5b4ba3a558221e0bb817bd"
 # The first gwcat pin (3184bdb) predates ChiEffPrior.support, which the chi_eff
 # prior hook requires, so every load that needed the prior raised ImportError.
 # The release job installs the extra and calls the hook; this freezes the pin
@@ -105,9 +108,11 @@ def test_runtime_dependencies_are_pinned():
 
 
 def test_the_live_cov_remedy_names_the_tinyns_ci_validates():
-    # The base pin (TINYNS_COMMIT, tinyns 0.1.0) runs the isotropic presets;
-    # the live-cov presets' refusal names the TinyNS the real-backends job
-    # installs and runs them against, so the remedy cannot go stale.
+    # TinyNS 0.1.0 runs the isotropic presets only; the live-cov presets'
+    # refusal names the TinyNS 0.x the real-backends job installs and runs
+    # them against, so the remedy cannot go stale. The base pin
+    # (TINYNS_COMMIT, tinyns 1.0.0) has no presets; the full-suite
+    # regression job installs it.
     from darksirens.inference.tinyns_config import TINYNS_LIVECOV_VALIDATED_COMMIT
 
     workflow = (REPO_ROOT / ".github" / "workflows" / "real-backends.yml").read_text()
