@@ -663,7 +663,7 @@ def infer(
     when left unset. ``compute_dtype`` is the opt-in per-sample precision of
     :func:`darksirens.runtime_binding.bind_analysis` (``None``/``'float64'``
     default, or ``'float32'``). ``selection_mc_correction`` is the form of the
-    selection Monte-Carlo term, ``'farr'`` (what ``None`` gives), ``'none'`` or
+    selection Monte-Carlo term, ``'none'`` (what ``None`` gives), ``'farr'`` or
     ``'heinzel_vitale'``
     (:func:`darksirens.selection.gw.selection_log_correction`). These six names
     are likelihood options, not sampler options, and never enter the sampler

@@ -344,7 +344,10 @@ def likelihood_options_semantic(source) -> dict:
     any object with the same attributes) or a mapping of
     :func:`~darksirens.runtime_binding.bind_analysis` keyword names to their
     values (e.g. the options a companion passed to a core likelihood seam).
-    Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
+    A default binding returns only ``selection_mc_correction``, ``"none"``:
+    checkpoints written before that default changed have no such entry and ran
+    ``"farr"``, so they must not resume under it, and an explicit ``"farr"``
+    binding still resumes them.  ``compute_dtype`` enters when it
     is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
     the default cap, ``selection_mc_correction`` when it is not ``"farr"``,
     and ``selection_neff_soft_guard`` when it is ``True``; a binding of a
@@ -366,6 +369,7 @@ def likelihood_options_semantic(source) -> dict:
     from darksirens.selection.gw import (
         DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         DEFAULT_SELECTION_MC_CORRECTION,
+        FARR_SELECTION_MC_CORRECTION,
         check_selection_mc_correction,
     )
 
@@ -399,7 +403,7 @@ def likelihood_options_semantic(source) -> dict:
     if cap is not None and float(cap) != float(DEFAULT_MAX_LIKELIHOOD_VARIANCE):
         out["max_likelihood_variance"] = float(cap)
     correction = _get("selection_mc_correction", DEFAULT_SELECTION_MC_CORRECTION)
-    if check_selection_mc_correction(correction) != DEFAULT_SELECTION_MC_CORRECTION:
+    if check_selection_mc_correction(correction) != FARR_SELECTION_MC_CORRECTION:
         out["selection_mc_correction"] = correction
     soft = _get("selection_neff_soft_guard", False)
     if not isinstance(soft, (bool, np.bool_)):
