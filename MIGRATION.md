@@ -1583,6 +1583,54 @@ NumPyro runs are unchanged.
   guard), 1 xfailed. The real-backends job's test list with TinyNS 0.2.3:
   126 passed, none skipped.
 
+### Selection Monte-Carlo term (opt-in, default unchanged)
+
+`selection_log_correction` takes `selection_mc_correction`, and so do every
+likelihood that calls it (`host_density_log_likelihood`, the field mixture
+and the marked hierarchy included), `bind_analysis`,
+`make_host_density_target`, `make_catalog_mixture_target`, `ds.infer` and
+`ds.log_likelihood`.
+
+| Value | Selection term | Source |
+|---|---|---|
+| `"farr"` (default) | `-N log mu + N(N+3)/(2 N_eff)` | arXiv:1904.10879 Eq. 15, what core has always done |
+| `"none"` | `-N log mu` | the point estimate: arXiv:2204.00461 Sec. VI, gwpopulation's default |
+| `"heinzel_vitale"` | `-N log mu - N(N+1)/(2 N_eff)` | arXiv:2509.07221 Eq. 24 |
+
+- **Default.** The default call is the program it was: the form is chosen in
+  Python when the likelihood is traced, with no new operation on the
+  `"farr"` path, and a default binding passes the likelihood the keywords it
+  always did. `tests/test_selection_mc_correction.py` compares the traced
+  program (`jax.make_jaxpr`) and the values, bit for bit, with a copy of the
+  function at 7457025 under both guards, the edge cases included. The default
+  fingerprint, guard report and existing digests are unchanged.
+- **The guards.** The hard wall, the soft wall and their threshold are the same
+  in all three forms. `"heinzel_vitale"` reads the selection `N_eff` only,
+  never the total variance, and is not frozen at the threshold under the soft
+  guard: it gives no reward below the threshold, so there is nothing to
+  freeze. It is `0` at `N_eff = +inf` and carries the double-where discipline.
+  The opt-in forms do not read `Neff_taylor`, which is how a NaN `N_eff` or
+  threshold reaches the soft path's collapse, so they carry it there
+  explicitly.
+- **Fingerprint and report.** `selection_mc_correction` is a likelihood value
+  option, recorded when it is not `"farr"`, so a `"none"` run refuses a
+  `"farr"` checkpoint. The guard report records it when a binding or target
+  states a form other than `"farr"`. It is deliberately not in
+  `TARGET_GUARD_REPORT_ATTRIBUTES`: a target that does not state it keeps its
+  report. `ds.infer` refuses it for an `InferenceTarget`, whose builder
+  takes it.
+- **Docstrings.** `selection/gw.py` and the header of
+  `tests/test_selection_correction_coefficient.py` corrected: N_eff is
+  arXiv:1904.10879 Eq. 9 and the term his Eq. 15 (not 15 and 11); that
+  equation is stated under a flat-in-log R prior, which gives N(N+1) through
+  the local maximum, and the 1/mu route is core's own; at the guard's threshold
+  the term equals `(1 + 3/N)(V - sum_i sigma_i^2)/2`, which is not small at a
+  cap of 4; discarding proposals is credited to arXiv:2204.00461 Sec. I; and
+  the source of the 5 N floor is unknown. The messages that name the "Vitale
+  floor" (`inference/preflight.py`) are frozen legacy text and keep it.
+- **Tests.** `tests/test_selection_mc_correction.py`; the soft-guard and
+  gradient-safety files run under all three forms.
+
 ## Review fixes (2026-10-20)
 
 A multi-agent review on 2026-10-20 confirmed 130 findings against this tree

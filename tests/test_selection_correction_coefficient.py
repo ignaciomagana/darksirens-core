@@ -3,8 +3,14 @@
 This coefficient looks like a typo and has been "corrected" to
 N_obs(N_obs+1)/(2 N_eff) by readers before. It is not a typo: the two forms
 are two different PRIOR CONVENTIONS on the selection integral mu, and
-N_obs(N_obs+3) is the one Farr (2019) eq. 11 states and the one the reference
-implementation (``gwpopulation.vt.ResamplingVT.vt_factor``) uses.
+N_obs(N_obs+3) is the one Farr (2019) eq. 15 prints and the one the reference
+implementation (``gwpopulation.vt.ResamplingVT.vt_factor``) uses. Farr states
+eq. 15 under a flat-in-log prior on R, which gives N_obs(N_obs+1) instead when
+his eq. 11 is evaluated through the local maximum (the full integral diverges):
+the 1/mu route below is core's own.
+
+These tests pin the default form, ``selection_mc_correction="farr"``;
+``tests/test_selection_mc_correction.py`` covers the others.
 
 Marginalising the rate with the scale-free prior p(R) ∝ 1/R leaves
 L ∝ mu^{-N}; Monte-Carlo error makes mu uncertain, mu ~ N(mu_hat, sigma^2)

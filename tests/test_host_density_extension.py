@@ -442,6 +442,8 @@ def test_target_fingerprint_records_the_base_analysis_sizes_and_options():
         _volume_target(n_draw=2560.0),
         _volume_target(max_likelihood_variance=20.0),
         _volume_target(selection_neff_soft_guard=True),
+        _volume_target(selection_mc_correction="none"),
+        _volume_target(selection_mc_correction="heinzel_vitale"),
         _volume_target(provenance={"state": "abc"}),
         _volume_target(identity={"package": "companion"}),
     ):

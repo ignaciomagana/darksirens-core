@@ -309,7 +309,9 @@ def parameter_plan_semantic(plan) -> dict:
 #     reference (before, n_1 alone, and the soft wall read log mu offset by
 #     +log Z_1), so a checkpoint from before that change is not resumed on the
 #     new likelihood.  The mapping form cannot tell the analysis and records
-#     the guard alone.
+#     the guard alone;
+#   * selection_mc_correction chooses the Monte-Carlo term of the selection
+#     correction, so a "none" run must not resume a "farr" checkpoint.
 # sel_batch_size and pe_event_block are layout only.  A selection batch is a
 # log-sum-exp over a disjoint slice of the injections, combined by another
 # log-sum-exp (log-sum-exp is additive over disjoint index sets); the padding
@@ -331,6 +333,7 @@ _LIKELIHOOD_VALUE_OPTIONS = (
     "compute_dtype",
     "max_likelihood_variance",
     "selection_neff_soft_guard",
+    "selection_mc_correction",
 )
 
 
@@ -343,9 +346,10 @@ def likelihood_options_semantic(source) -> dict:
     values (e.g. the options a companion passed to a core likelihood seam).
     Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
     is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
-    the default cap, and ``selection_neff_soft_guard`` when it is ``True``;
-    a binding of a one-catalog field analysis under the soft guard also
-    records ``"one_catalog_field_density": "normalised"`` (its density is
+    the default cap, ``selection_mc_correction`` when it is not ``"farr"``,
+    and ``selection_neff_soft_guard`` when it is ``True``; a binding of a
+    one-catalog field analysis under the soft guard also records
+    ``"one_catalog_field_density": "normalised"`` (its density is
     ``n_1 / Z_1`` there since 2026-10-20; see the note above
     ``_LIKELIHOOD_LAYOUT_OPTIONS``).
     ``sel_batch_size`` and ``pe_event_block`` never enter: they change the
@@ -359,7 +363,11 @@ def likelihood_options_semantic(source) -> dict:
     not empty, so every default run's digest is unchanged.
     """
 
-    from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+    from darksirens.selection.gw import (
+        DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+        DEFAULT_SELECTION_MC_CORRECTION,
+        check_selection_mc_correction,
+    )
 
     if isinstance(source, Mapping):
         unknown = sorted(
@@ -390,6 +398,9 @@ def likelihood_options_semantic(source) -> dict:
     cap = _get("max_likelihood_variance", None)
     if cap is not None and float(cap) != float(DEFAULT_MAX_LIKELIHOOD_VARIANCE):
         out["max_likelihood_variance"] = float(cap)
+    correction = _get("selection_mc_correction", DEFAULT_SELECTION_MC_CORRECTION)
+    if check_selection_mc_correction(correction) != DEFAULT_SELECTION_MC_CORRECTION:
+        out["selection_mc_correction"] = correction
     soft = _get("selection_neff_soft_guard", False)
     if not isinstance(soft, (bool, np.bool_)):
         raise TypeError(

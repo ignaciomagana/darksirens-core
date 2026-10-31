@@ -1,8 +1,8 @@
 """Run-fingerprint coverage: likelihood options and InferenceTarget runs.
 
 * Likelihood options that can change the likelihood value (compute_dtype,
-  max_likelihood_variance, the selection N_eff soft guard) enter the core
-  numerics block only when set; the layout options (sel_batch_size,
+  max_likelihood_variance, the selection N_eff soft guard, the selection
+  Monte-Carlo term) enter the core numerics block only when set; the layout options (sel_batch_size,
   pe_event_block) never do, because they compute the same sums.
 * ds.infer fingerprints an InferenceTarget run that writes or resumes a
   checkpoint, gates the resume on it, and lets the target contribute its own
@@ -179,12 +179,13 @@ def _check_pre_change_goldens():
         analysis, events=events, injections=injections,
         compute_dtype="float64", max_likelihood_variance=1.0,
         selection_neff_soft_guard=False, sel_batch_size=48, pe_event_block=2,
+        selection_mc_correction="farr",
     )
     assert _digest(core_numerics_semantic(explicit)) == GOLDEN_NUMERICS
     mapping = {
         "compute_dtype": None, "max_likelihood_variance": 1.0,
         "selection_neff_soft_guard": False, "sel_batch_size": 64,
-        "pe_event_block": 1,
+        "pe_event_block": 1, "selection_mc_correction": "farr",
     }
     assert _digest(core_numerics_semantic(mapping)) == GOLDEN_NUMERICS
 
@@ -208,6 +209,8 @@ def test_default_binding_adds_no_key_in_any_environment():
         ("max_likelihood_variance", 0.5, 0.5),
         ("max_likelihood_variance", float("inf"), {"__float__": "inf"}),
         ("selection_neff_soft_guard", True, True),
+        ("selection_mc_correction", "none", "none"),
+        ("selection_mc_correction", "heinzel_vitale", "heinzel_vitale"),
     ],
 )
 def test_each_value_option_enters_only_when_set(option, value, recorded):

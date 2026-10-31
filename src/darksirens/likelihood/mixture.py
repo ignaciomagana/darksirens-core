@@ -97,7 +97,10 @@ from darksirens.catalog.settings import catalog_evaluation_settings
 from darksirens.cosmology._grid import zgrid
 from darksirens.selection.catalog import selection_curve
 from darksirens.selection.footprint import selection_missing_host_curves
-from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+from darksirens.selection.gw import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
+)
 
 from .hierarchical import _ordinary_hierarchical_likelihood, _resolve_compute_dtype
 
@@ -395,6 +398,7 @@ def field_mixture_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
     compute_dtype: str | None = None,
     extension=None,
@@ -700,6 +704,7 @@ def field_mixture_log_likelihood(
             pe_event_block=pe_event_block,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
+            selection_mc_correction=selection_mc_correction,
             return_diagnostics=return_diagnostics,
             angular_model=angular_model,
             angular_params=angular_params,
@@ -729,6 +734,7 @@ def make_catalog_mixture_target(
     extension=None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
     compute_dtype: str | None = None,
@@ -778,6 +784,7 @@ def make_catalog_mixture_target(
         injections=injections,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
+        selection_mc_correction=selection_mc_correction,
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
@@ -806,6 +813,7 @@ def make_catalog_mixture_target(
         pe_event_block=bound.pe_event_block,
         selection_neff_soft_guard=bound.selection_neff_soft_guard,
         max_likelihood_variance=bound.max_likelihood_variance,
+        selection_mc_correction=bound.selection_mc_correction,
         angular_model=analysis.angular_model,
         completeness=redshift.completeness,
         normalizer=redshift.normalizer,

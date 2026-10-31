@@ -21,7 +21,11 @@ from darksirens.inference.run_fingerprint import (
     parameter_plan_semantic,
 )
 from darksirens.inference.target import InferenceTarget, combine_parameter_plans
-from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+from darksirens.selection.gw import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
+    check_selection_mc_correction,
+)
 
 from .hierarchical import _ordinary_hierarchical_likelihood, _require_ndraw_covers_injections
 
@@ -95,6 +99,7 @@ def host_density_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
 ):
     """Evaluate an external redshift model with the frozen ordinary reducer.
@@ -148,6 +153,7 @@ def host_density_log_likelihood(
         pe_event_block=pe_event_block,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
+        selection_mc_correction=selection_mc_correction,
         return_diagnostics=return_diagnostics,
         angular_model=angular_model,
         angular_params=angular_params,
@@ -193,6 +199,7 @@ def make_host_density_target(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     identity=None,
     provenance=None,
 ) -> InferenceTarget:
@@ -227,6 +234,7 @@ def make_host_density_target(
         raise ValueError("base_analysis must be catalog-free SpectralRedshift")
     if not isinstance(gw_pe, GWEvent) or not isinstance(gw_selection, GWEvent):
         raise TypeError("gw_pe and gw_selection must be darksirens.gw.GWEvent objects")
+    selection_mc_correction = check_selection_mc_correction(selection_mc_correction)
     # The target's jit traces the injections, where the reducer cannot count
     # them; they are concrete here.
     _require_ndraw_covers_injections(gw_selection, n_draw)
@@ -279,6 +287,7 @@ def make_host_density_target(
             pe_event_block=pe_event_block,
             selection_neff_soft_guard=selection_neff_soft_guard,
             max_likelihood_variance=max_likelihood_variance,
+            selection_mc_correction=selection_mc_correction,
             return_diagnostics=False,
         )
 
@@ -309,6 +318,7 @@ def make_host_density_target(
             "likelihood_options": likelihood_options_semantic({
                 "selection_neff_soft_guard": selection_neff_soft_guard,
                 "max_likelihood_variance": max_likelihood_variance,
+                "selection_mc_correction": selection_mc_correction,
             }),
         }
         if provenance is not None:

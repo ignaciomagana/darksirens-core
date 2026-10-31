@@ -76,6 +76,7 @@ _INFER_KEYWORDS = (
     "sampler",
     "selection_neff_guard",
     "max_likelihood_variance",
+    "selection_mc_correction",
     "sel_batch_size",
     "pe_event_block",
     "compute_dtype",
@@ -256,6 +257,12 @@ class _OneRecordPerDraw:
     @property
     def selection_neff_soft_guard(self):
         return self._target.selection_neff_soft_guard
+
+    @property
+    def selection_mc_correction(self):
+        # Optional, unlike the attributes above: not part of the capability
+        # marker, so a target that does not state it keeps its report.
+        return _optional_target_value(self._target, "selection_mc_correction")
 
     def diagnostics(self, theta):
         import numpy as np
@@ -552,6 +559,7 @@ def _bind_ordinary(
     sel_batch_size,
     pe_event_block,
     compute_dtype,
+    selection_mc_correction=None,
 ):
     """Bind an ordinary analysis with the likelihood options of :func:`infer`."""
     from darksirens.runtime_binding import bind_analysis
@@ -565,6 +573,8 @@ def _bind_ordinary(
         likelihood_options["max_likelihood_variance"] = float(max_likelihood_variance)
     if compute_dtype is not None:
         likelihood_options["compute_dtype"] = compute_dtype
+    if selection_mc_correction is not None:
+        likelihood_options["selection_mc_correction"] = selection_mc_correction
 
     return bind_analysis(
         analysis,
@@ -584,12 +594,13 @@ def log_likelihood(
     sel_batch_size=None,
     pe_event_block=None,
     compute_dtype=None,
+    selection_mc_correction=None,
 ):
     """Bind an ordinary analysis to its stores: the log-likelihood :func:`infer` samples.
 
     Returns a callable ``theta -> log L`` (a
     :class:`~darksirens.runtime_binding.BoundAnalysis`), bound exactly as
-    :func:`infer` binds it, with the same five likelihood options. ``theta``
+    :func:`infer` binds it, with the same six likelihood options. ``theta``
     has one value per ``analysis.parameters.labels`` entry, in that order;
     the call is jitted and returns a JAX scalar. With no sampler to resolve
     against, ``selection_neff_guard="auto"`` is the hard guard (``-inf``
@@ -612,6 +623,7 @@ def log_likelihood(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
+        selection_mc_correction=selection_mc_correction,
     )
 
 
@@ -626,6 +638,7 @@ def infer(
     sel_batch_size=None,
     pe_event_block=None,
     compute_dtype=None,
+    selection_mc_correction=None,
     guard_report=True,
     **sampler_options,
 ):
@@ -633,7 +646,7 @@ def infer(
 
     Ordinary analyses retain the existing API and require both standardized GW
     stores. An :class:`InferenceTarget` already owns its likelihood, so stores
-    and the five likelihood options below must be omitted. Backend-specific
+    and the six likelihood options below must be omitted. Backend-specific
     options keep their existing names. A keyword that neither ``infer`` nor
     any sampler backend reads (a misspelling, or another surface's name such
     as ``bind_analysis``'s ``selection_neff_soft_guard``) raises
@@ -649,8 +662,12 @@ def infer(
     remaining likelihood options fall back to the accepted likelihood defaults
     when left unset. ``compute_dtype`` is the opt-in per-sample precision of
     :func:`darksirens.runtime_binding.bind_analysis` (``None``/``'float64'``
-    default, or ``'float32'``). These five names are likelihood options, not
-    sampler options, and never enter the sampler namespace.
+    default, or ``'float32'``). ``selection_mc_correction`` is the form of the
+    selection Monte-Carlo term, ``'farr'`` (what ``None`` gives), ``'none'`` or
+    ``'heinzel_vitale'``
+    (:func:`darksirens.selection.gw.selection_log_correction`). These six names
+    are likelihood options, not sampler options, and never enter the sampler
+    namespace.
 
     Ordinary results also carry ``log_prior_volume_fraction`` and, when the
     sampler reports a finite ``logZ``, ``logZ_corrected`` (``logZ`` minus
@@ -737,13 +754,18 @@ def infer(
         if selection_neff_guard != "auto" or any(
             value is not None
             for value in (
-                max_likelihood_variance, sel_batch_size, pe_event_block, compute_dtype
+                max_likelihood_variance,
+                sel_batch_size,
+                pe_event_block,
+                compute_dtype,
+                selection_mc_correction,
             )
         ):
             raise TypeError(
                 "selection_neff_guard, max_likelihood_variance, sel_batch_size, "
-                "pe_event_block and compute_dtype must be omitted for an "
-                "InferenceTarget; build the target's likelihood with them instead"
+                "pe_event_block, compute_dtype and selection_mc_correction must be "
+                "omitted for an InferenceTarget; build the target's likelihood with "
+                "them instead"
             )
         sampler = _resolve_sampler(sampler, plan)
         if len(plan.labels):
@@ -833,6 +855,7 @@ def infer(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
+        selection_mc_correction=selection_mc_correction,
     )
 
     prior_transform = None

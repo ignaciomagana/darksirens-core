@@ -20,6 +20,7 @@ from darksirens.population import pop_model_parser
 from darksirens.population.angular import get_angular_model
 from darksirens.selection.gw import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
     compute_selection_term,
     selection_log_correction,
 )
@@ -103,6 +104,7 @@ def spectral_siren_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
     compute_dtype: str | None = None,
 ):
@@ -221,6 +223,7 @@ def spectral_siren_log_likelihood(
         soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
         pe_variance_sum=jnp.sum(event_vars),
+        selection_mc_correction=selection_mc_correction,
     )
     raw = selection_ll + jnp.sum(event_lls)
     total = jnp.where(jnp.isfinite(raw), raw, -jnp.inf)
@@ -319,6 +322,7 @@ def _ordinary_hierarchical_likelihood(
     angular_model: str = "isotropic",
     angular_params=None,
     compute_dtype: str | None = None,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     log_prior_pe_lowp=None,
     log_prior_sel_lowp=None,
     branch_populations=None,
@@ -476,6 +480,7 @@ def _ordinary_hierarchical_likelihood(
         soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
         pe_variance_sum=jnp.sum(event_vars),
+        selection_mc_correction=selection_mc_correction,
     )
     raw = selection_ll + jnp.sum(event_lls)
     total = jnp.where(jnp.isfinite(raw), raw, -jnp.inf)
@@ -515,6 +520,7 @@ def dark_siren_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
     pinned_kernel_pe=None,
     pinned_kernel_sel=None,
@@ -619,6 +625,7 @@ def dark_siren_log_likelihood(
         pe_event_block=pe_event_block,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
+        selection_mc_correction=selection_mc_correction,
         return_diagnostics=return_diagnostics,
         angular_model=angular_model,
         angular_params=angular_params,
@@ -649,6 +656,7 @@ def complete_catalog_siren_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
 ):
     """Complete-catalog conditional siren likelihood with explicit empty policy."""
@@ -684,6 +692,7 @@ def complete_catalog_siren_log_likelihood(
         pe_event_block=pe_event_block,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
+        selection_mc_correction=selection_mc_correction,
         return_diagnostics=return_diagnostics,
         angular_model=angular_model,
         angular_params=angular_params,
@@ -730,6 +739,7 @@ def bright_siren_log_likelihood(
     sel_batch_size: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
 ):
     """Bright-siren likelihood with one explicit counterpart per GW event.
@@ -828,6 +838,7 @@ def bright_siren_log_likelihood(
         soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
         pe_variance_sum=jnp.sum(event_vars),
+        selection_mc_correction=selection_mc_correction,
     )
     raw = selection_ll + jnp.sum(event_lls)
     total = jnp.where(jnp.isfinite(raw), raw, -jnp.inf)

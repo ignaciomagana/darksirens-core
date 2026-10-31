@@ -146,6 +146,7 @@ def log_likelihood(
     sel_batch_size=None,
     pe_event_block=None,
     compute_dtype=None,
+    selection_mc_correction=None,
 ):
     """Bind an ordinary analysis to its stores: a callable ``theta -> log L``.
 
@@ -167,6 +168,7 @@ def log_likelihood(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
+        selection_mc_correction=selection_mc_correction,
     )
 
 
@@ -181,6 +183,7 @@ def infer(
     sel_batch_size=None,
     pe_event_block=None,
     compute_dtype=None,
+    selection_mc_correction=None,
     guard_report=True,
     **sampler_options,
 ):
@@ -203,6 +206,7 @@ def infer(
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         compute_dtype=compute_dtype,
+        selection_mc_correction=selection_mc_correction,
         guard_report=guard_report,
         **sampler_options,
     )
