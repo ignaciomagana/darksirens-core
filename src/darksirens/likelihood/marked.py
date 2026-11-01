@@ -8,7 +8,10 @@ from darksirens.catalog.hosts import (
     require_shared_host_view,
 )
 from darksirens.catalog.models import eval_incomplete_catalog_prior_state_vmap
-from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+from darksirens.selection.gw import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
+)
 
 from .hierarchical import _ordinary_hierarchical_likelihood
 
@@ -39,6 +42,7 @@ def marked_dark_siren_log_likelihood(
     pe_event_block: int | None = None,
     selection_neff_soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
     mu_miss_estimator: str = "count",
 ):
@@ -110,6 +114,7 @@ def marked_dark_siren_log_likelihood(
         pe_event_block=pe_event_block,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=max_likelihood_variance,
+        selection_mc_correction=selection_mc_correction,
         return_diagnostics=return_diagnostics,
     )
 

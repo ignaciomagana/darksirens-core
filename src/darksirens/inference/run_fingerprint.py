@@ -28,7 +28,10 @@ plan, core numerics, sampler settings and the target's ``identity`` and
 ``provenance`` hook), and gates/stamps it with
 ``gate_and_stamp_checkpoint_fingerprint``.  Every block records an optional
 setting only when it differs from its default, so a fingerprint built
-without the new options is unchanged.
+without the new options is unchanged; the one exception is
+``selection_mc_correction``, recorded unless it is ``"farr"``, so a default run
+does not match a checkpoint from before its default became ``"none"``
+(:func:`likelihood_options_semantic`).
 
 Semantic values are canonicalised before hashing (``canonical_semantic``):
 numbers are hashed at full precision, never at their printed precision, and
@@ -295,7 +298,8 @@ def parameter_plan_semantic(plan) -> dict:
 
 # Likelihood options of bind_analysis / infer and whether each can change the
 # likelihood VALUE.  Only those that can are fingerprinted, and each only when
-# it differs from its default, so a default binding adds nothing:
+# it differs from its value in every earlier run, so a binding at those values
+# adds nothing.  That is each default but selection_mc_correction's:
 #   * compute_dtype="float32" evaluates the per-sample weights in float32 (the
 #     values move at the float32 rounding level);
 #   * max_likelihood_variance is the cap of the Monte-Carlo variance guard (a
@@ -309,7 +313,11 @@ def parameter_plan_semantic(plan) -> dict:
 #     reference (before, n_1 alone, and the soft wall read log mu offset by
 #     +log Z_1), so a checkpoint from before that change is not resumed on the
 #     new likelihood.  The mapping form cannot tell the analysis and records
-#     the guard alone.
+#     the guard alone;
+#   * selection_mc_correction chooses the Monte-Carlo term of the selection
+#     correction, so a "none" run must not resume a "farr" checkpoint.  It is
+#     recorded unless it is "farr", the default until 2026-10-31, so a default
+#     binding records "none" and a binding under "farr" keeps its old digest.
 # sel_batch_size and pe_event_block are layout only.  A selection batch is a
 # log-sum-exp over a disjoint slice of the injections, combined by another
 # log-sum-exp (log-sum-exp is additive over disjoint index sets); the padding
@@ -331,6 +339,7 @@ _LIKELIHOOD_VALUE_OPTIONS = (
     "compute_dtype",
     "max_likelihood_variance",
     "selection_neff_soft_guard",
+    "selection_mc_correction",
 )
 
 
@@ -341,11 +350,15 @@ def likelihood_options_semantic(source) -> dict:
     any object with the same attributes) or a mapping of
     :func:`~darksirens.runtime_binding.bind_analysis` keyword names to their
     values (e.g. the options a companion passed to a core likelihood seam).
-    Returns ``{}`` for a default binding.  ``compute_dtype`` enters when it
+    A default binding returns only ``selection_mc_correction``, ``"none"``:
+    checkpoints written before that default changed have no such entry and ran
+    ``"farr"``, so they must not resume under it, and an explicit ``"farr"``
+    binding still resumes them.  ``compute_dtype`` enters when it
     is not ``None``/``"float64"``, ``max_likelihood_variance`` when it is not
-    the default cap, and ``selection_neff_soft_guard`` when it is ``True``;
-    a binding of a one-catalog field analysis under the soft guard also
-    records ``"one_catalog_field_density": "normalised"`` (its density is
+    the default cap, ``selection_mc_correction`` when it is not ``"farr"``,
+    and ``selection_neff_soft_guard`` when it is ``True``; a binding of a
+    one-catalog field analysis under the soft guard also records
+    ``"one_catalog_field_density": "normalised"`` (its density is
     ``n_1 / Z_1`` there since 2026-10-20; see the note above
     ``_LIKELIHOOD_LAYOUT_OPTIONS``).
     ``sel_batch_size`` and ``pe_event_block`` never enter: they change the
@@ -356,10 +369,16 @@ def likelihood_options_semantic(source) -> dict:
     The result belongs inside the fingerprint's numerics block: pass the
     binding to :func:`core_numerics_semantic` (``core_numerics_semantic(
     bound)``), which adds it under ``"likelihood_options"`` only when it is
-    not empty, so every default run's digest is unchanged.
+    not empty, so a run under ``"farr"`` and the other defaults keeps the digest
+    it has always had.
     """
 
-    from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+    from darksirens.selection.gw import (
+        DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+        DEFAULT_SELECTION_MC_CORRECTION,
+        FARR_SELECTION_MC_CORRECTION,
+        check_selection_mc_correction,
+    )
 
     if isinstance(source, Mapping):
         unknown = sorted(
@@ -390,6 +409,9 @@ def likelihood_options_semantic(source) -> dict:
     cap = _get("max_likelihood_variance", None)
     if cap is not None and float(cap) != float(DEFAULT_MAX_LIKELIHOOD_VARIANCE):
         out["max_likelihood_variance"] = float(cap)
+    correction = _get("selection_mc_correction", DEFAULT_SELECTION_MC_CORRECTION)
+    if check_selection_mc_correction(correction) != FARR_SELECTION_MC_CORRECTION:
+        out["selection_mc_correction"] = correction
     soft = _get("selection_neff_soft_guard", False)
     if not isinstance(soft, (bool, np.bool_)):
         raise TypeError(
@@ -498,8 +520,10 @@ def core_numerics_semantic(likelihood=None) -> dict:
     a mapping of its likelihood options, see
     :func:`likelihood_options_semantic`).  Its non-default value-changing
     options (``compute_dtype``, ``max_likelihood_variance``,
-    ``selection_neff_soft_guard``) are added under ``"likelihood_options"``;
-    a default binding, or none, adds no key, so the block is then exactly
+    ``selection_neff_soft_guard``) and any ``selection_mc_correction`` other
+    than ``"farr"`` are added under ``"likelihood_options"``; a default binding
+    adds only ``selection_mc_correction``, ``"none"``.  With no binding, or a
+    default one under ``"farr"``, there is no key, so the block is then exactly
     the one ``core_numerics_semantic()`` has always returned.  With the
     opt-in pairing m1 grid on, a binding's ``normalization_grids`` are the
     grid sized for its own population model (what its likelihood traces
@@ -513,8 +537,8 @@ def core_numerics_semantic(likelihood=None) -> dict:
     extra = {}
     if likelihood is not None:
         options = likelihood_options_semantic(likelihood)
-        # Only a non-default option enters, so every existing fingerprint is
-        # unchanged.
+        # Only an option other than the value every earlier run had enters, so
+        # every existing fingerprint is unchanged under those values.
         if options:
             extra["likelihood_options"] = options
 
@@ -1007,6 +1031,17 @@ def _historical_setting_hints(stored, current, out=None):
                 "catalog_model.count_ratio: if the checkpointed run used the default "
                 "count ratio of a darksirens before 2026-10-10 (the legacy per-row "
                 "estimator), pass ds.model(..., count_ratio=\"row\") to resume it"
+            )
+    # The selection Monte-Carlo term defaults to "none" since 2026-10-31, which
+    # is recorded; a run made before ran "farr" and records none.
+    options = current.get("likelihood_options")
+    if isinstance(options, dict) and "selection_mc_correction" in options:
+        old_options = stored.get("likelihood_options")
+        if not (isinstance(old_options, dict) and "selection_mc_correction" in old_options):
+            out.append(
+                "likelihood_options.selection_mc_correction: if the checkpointed run "
+                "used the default Monte-Carlo term of a darksirens before 2026-10-31, "
+                "pass selection_mc_correction=\"farr\" to resume it"
             )
     for key, value in current.items():
         if key not in ("normalization_grids", "catalog_evaluation", "catalog_model"):

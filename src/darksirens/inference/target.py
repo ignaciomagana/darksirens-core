@@ -255,8 +255,10 @@ class InferenceTarget:
     ``guard_report(prior_transform, labels, *, n_draws, seed)`` method
     returning its own report, and a target may record the sampler it was
     built for as ``built_for_sampler``. See
-    :func:`darksirens.inference.public.infer`. None of these is a field of
-    this class; a target without them runs as before.
+    :func:`darksirens.inference.public.infer`. A target may state its
+    ``selection_mc_correction`` too, which the report records when it is not
+    ``"farr"``. None of these is a field of this class; a target without them
+    runs as before.
     """
 
     log_likelihood: Callable

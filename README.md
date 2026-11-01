@@ -412,7 +412,14 @@ user typed them rather than as a silent `-inf`:
 - `ds.infer(..., selection_neff_guard="auto"|"hard"|"soft")` selects the
   sparse-selection guard; `auto` uses the soft penalized wall for NumPyro and
   the hard `-inf` wall otherwise. `max_likelihood_variance`, `sel_batch_size`,
-  `pe_event_block` and `compute_dtype` are likelihood options on the same call.
+  `pe_event_block`, `compute_dtype` and `selection_mc_correction` are
+  likelihood options on the same call.
+- `ds.infer(..., selection_mc_correction="none"|"farr"|"heinzel_vitale")`
+  selects the selection Monte-Carlo term. The default, `"none"`, keeps the
+  point estimate `-N log mu`, `"farr"` adds `N(N+3)/(2 N_eff)` to it, which
+  reproduces results made before 2026-10-31 and the frozen reference, and
+  `"heinzel_vitale"` subtracts `N(N+1)/(2 N_eff)`. The guards are the same in
+  all three.
   A keyword that neither `ds.infer` nor any sampler backend reads (a
   misspelling, or another surface's name such as `bind_analysis`'s
   `selection_neff_soft_guard`) raises `TypeError` with the right spelling or

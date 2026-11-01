@@ -681,7 +681,7 @@ def test_fingerprint_tells_the_normalised_one_catalog_soft_guard_from_before(tmp
     )
 
     one, two = _model(A), _model([A, B])
-    soft_one = _bind(one, selection_neff_soft_guard=True)
+    soft_one = _bind(one, selection_neff_soft_guard=True, selection_mc_correction="farr")
     assert likelihood_options_semantic(soft_one) == {
         "max_likelihood_variance": CAP,
         "one_catalog_field_density": "normalised",
@@ -692,9 +692,9 @@ def test_fingerprint_tells_the_normalised_one_catalog_soft_guard_from_before(tmp
     assert "one_catalog_field_density" not in likelihood_options_semantic(
         _bind(two, selection_neff_soft_guard=True)
     )
-    assert likelihood_options_semantic({"selection_neff_soft_guard": True}) == {
-        "selection_neff_soft_guard": True
-    }
+    assert likelihood_options_semantic(
+        {"selection_neff_soft_guard": True, "selection_mc_correction": "farr"}
+    ) == {"selection_neff_soft_guard": True}
     # The mixture target's provenance carries the same entry.
     target = make_catalog_mixture_target(one, events=EVENTS, injections=INJECTIONS,
                                          selection_neff_soft_guard=True,

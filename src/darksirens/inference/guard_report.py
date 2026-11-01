@@ -56,7 +56,9 @@ GUARD_WARN_FRACTION = 0.05
 #: the likelihood's diagnostics record, ``n_events``,
 #: ``max_likelihood_variance`` and ``selection_neff_soft_guard``), and records
 #: it in ``result["guard_report"]``. A companion that runs its own report when
-#: it builds a target can skip that report when this name exists.
+#: it builds a target can skip that report when this name exists. A target may
+#: also state ``selection_mc_correction``, which the report records; it is not
+#: part of the marker, so a target that omits it keeps its report.
 TARGET_GUARD_REPORT_ATTRIBUTES = (
     "diagnostics",
     "n_events",
@@ -242,7 +244,9 @@ def guard_report(
     an RNG of their own derived from ``seed``. Returns a JSON-native dict:
 
     - ``n_draws``, ``guard_mode`` (``"hard"``: ``-inf``; ``"soft"``:
-      penalised), ``max_likelihood_variance``;
+      penalised), ``max_likelihood_variance``, and
+      ``selection_mc_correction`` when ``bound`` states a form other than
+      ``"farr"``, so that a report without it is an earlier ``"farr"`` run;
     - ``guarded`` and ``guarded_fraction``: the draws where a guard fired;
     - ``fired``: for each guard that fired (``"selection_neff"``,
       ``"pe_mc_variance"``, see :func:`classify_guard`), its ``count``,
@@ -270,6 +274,8 @@ def guard_report(
     target. ``for_target`` changes only that sentence, never the report.
     """
     import jax.numpy as jnp
+
+    from darksirens.selection.gw import FARR_SELECTION_MC_CORRECTION
 
     labels = tuple(str(label) for label in labels)
     n_draws = int(n_draws)
@@ -308,6 +314,9 @@ def guard_report(
         "fired": fired,
         "probed_ranges": _ranges(points, labels),
     }
+    correction = getattr(bound, "selection_mc_correction", None)
+    if correction is not None and correction != FARR_SELECTION_MC_CORRECTION:
+        report["selection_mc_correction"] = correction
     if other is not None:
         report["non_finite_other"] = other
     coverage = _coverage_report(bound, prior_transform, labels, points, log_mus)

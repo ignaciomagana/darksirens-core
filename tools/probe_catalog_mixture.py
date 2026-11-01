@@ -307,6 +307,7 @@ def _candidate(soft_cap=None):
         if fixed_kernel is not None:
             assert analysis.parameters.kernel_pin_active
         bound = bind_analysis(analysis, events=events, injections=injections,
+                              selection_mc_correction="farr",  # the reference's only form
                               **_guard(soft_cap))
         values = []
         for per_catalog, (H0, *sticks) in _cell_points(cell):

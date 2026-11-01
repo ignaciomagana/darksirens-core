@@ -230,6 +230,7 @@ def _spectral_of_H0(pe, sel, n_events=N_EVENTS, nsamp=NSAMP):
             N_DRAW,
             pop_model=POP_MODEL,
             max_likelihood_variance=1e6,
+            selection_mc_correction="farr",  # the form DLNL_DH0 was pinned under
         )
 
     return log_likelihood

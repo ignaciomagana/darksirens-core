@@ -181,6 +181,7 @@ def _candidate():
             pop_model=POP_MODEL,
             max_likelihood_variance=MAX_VARIANCE,
             return_diagnostics=True,
+            selection_mc_correction="farr",  # the frozen reference's only form
         )
         rows[point_name] = _record(d._asdict())
     return {"marks": rows}

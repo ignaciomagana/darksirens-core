@@ -18,15 +18,18 @@ injection samples:
     μ = (1/N_draw) Σ_{det inj}  p_pop(d_i|λ) / p_draw(d_i)
 
 and N_eff is the effective sample size of the selection integral
-(Farr 2019, arXiv:1904.10879, eq. 15):
+(Farr 2019, arXiv:1904.10879, eq. 9):
 
     N_eff = μ² / Var(μ)   ≈   [Σ w_i]² / Σ w_i²
 
 The coefficient N_obs(N_obs+3)/(2 N_eff) is the leading-order correction
-from the uncertainty in μ on the log-likelihood (Farr 2019, eq. 11).
+from the uncertainty in μ on the log-likelihood (Farr 2019, eq. 15).
 The "+3" is a PRIOR CONVENTION on μ, not a higher-order Taylor term —
 see the derivation below, and ``tests/test_selection_correction_coefficient.py``
-which pins it numerically.
+which pins it numerically.  The ``selection_mc_correction`` option of
+:func:`selection_log_correction` chooses the term (see "The Monte-Carlo
+term" below): the default, ``"none"``, drops this term, and ``"farr"`` is the
+expression above, kept to reproduce earlier results.
 
 Derivation.  Marginalising the rate R out of the Poisson likelihood with
 the scale-free prior p(R) ∝ 1/R leaves L ∝ μ^{-N}.  Monte-Carlo error
@@ -40,25 +43,55 @@ that uncertainty under a scale-invariant prior p(μ) ∝ 1/μ,
 
 using ⟨μ^{-k}⟩_G/μ̂^{-k} ≈ 1 + k(k+1)σ²/(2μ̂²) for a Gaussian.  A FLAT
 prior on μ would instead give N(N+1)/(2 N_eff); the two differ at O(1/N)
-and the N(N+3) form is the one Farr (2019) states and that the reference
-implementation uses (``gwpopulation.vt.ResamplingVT.vt_factor``:
+and the N(N+3) form is the one Farr (2019) prints in eq. 15 and that the
+reference implementation uses (``gwpopulation.vt.ResamplingVT.vt_factor``:
 ``vt_factor = mu / exp((3 + n_events) / (2 n_effective))``, whose
 ``-N log vt_factor`` is exactly the expression above).  The N_obs²/(2 N_eff)
-form sometimes quoted is the leading term only.
+form sometimes quoted is the leading term only.  The 1/μ route above is this
+module's own: Farr states eq. 15 under a flat-in-log prior on R, which does
+not give it.  His eq. 11 integrated with p(R) ∝ 1/R, through the local
+maximum because the full integral diverges, gives N(N+1).
 
 CAUTION: gwpopulation deprecates this marginalisation ("we recommend not
 to use this as it is not completely understood if this uncertainty
 marginalization is correct") in favour of bounding the variance of the
 TOTAL log-likelihood — which is exactly the criterion this module already
-enforces as its primary guard (next section).  The correction below is
-kept because it is the community-standard closed form and is O(1/N_eff)
-inside the region the guard admits, but the guard, not the correction, is
-what protects the inference.
+enforces as its primary guard (next section).  Essick & Farr (2022, Sec. VI)
+advise the point estimate as well, so the term is off by default here since
+October 2026.  It stays available as ``"farr"``, but the guard, not the
+correction, is what protects the inference.  It is not small next to
+the guard: at the threshold of the guard (the "Reliability criterion" below)
+it equals (1 + 3/N_obs)(max_likelihood_variance − Σ_i σ²_i)/2, so at most
+about half a nat for a cap of 1 and about 2 nats for a cap of 4.
+
+The Monte-Carlo term
+~~~~~~~~~~~~~~~~~~~~
+Three forms, chosen by ``selection_mc_correction``.  The first term of each is
+the same; the guard, its threshold and the soft wall are the same in all of
+them.
+
+* ``"farr"``: -N_obs log μ + N_obs(N_obs+3)/(2 N_eff), as above.
+* ``"none"`` (default): -N_obs log μ, the point estimate of Essick & Farr (2022,
+  Sec. VI) and gwpopulation's default.
+* ``"heinzel_vitale"``: -N_obs log μ - N_obs(N_obs+1)/(2 N_eff), Heinzel &
+  Vitale (2025, arXiv:2509.07221, eq. 24), which subtracts the leading bias of
+  the likelihood estimate (exp(-N_obs log μ̂) is high by about
+  N_obs(N_obs+1)/(2 N_eff) in the log).  It reads the selection N_eff only,
+  never the total variance (their eqs. 24-25), and it is not frozen at the
+  threshold under the soft guard: it lowers the likelihood where N_eff is
+  small, so it offers no reward there for the freeze to remove.
+
+The added term of ``"farr"`` has the sign of that bias, so in the expectation of
+the likelihood it about doubles it, and at the guard's threshold it rewards a
+noisier point by the amount above.
 
 Reliability criterion
 ~~~~~~~~~~~~~~~~~~~~~
-Farr (2019) recommends discarding proposals where N_eff < 4 N_obs
-(equivalently returning -inf); Vitale et al. (2022) use 5 N_obs.  Both
+Farr (2019) requires N_eff > 4 N_obs and asks for more injections when it
+fails; discarding the proposal instead (equivalently returning -inf) is the
+practice arXiv:2204.00461 Sec. I describes.  This module's floor is 5 N_obs.
+It was credited to Vitale et al. (2022), but neither that paper nor
+arXiv:2204.00968 states an N_eff rule, so its source is unknown.  Both floors
 control the MEAN correction only.  The state-of-the-art criterion
 (Essick & Farr 2022; Talbot & Golomb 2023; adopted by the GWTC-4.0 and
 GWTC-5.0 population analyses) instead bounds the Monte-Carlo variance of
@@ -78,7 +111,8 @@ controlling it needs ``N_eff >> N_obs^2``, strictly stronger than
     N_eff > max(5 N_obs, N_obs² / (max_likelihood_variance − Σ_i σ²_i))
 
 with ``max_likelihood_variance = 1`` by default (σ(lnL) <= 1 nat, the
-GWTC-4.0/5.0 threshold), keeping the Vitale mean floor.  With
+GWTC-4.0/5.0 threshold), keeping the 5 N_obs mean floor (it binds only when
+the remaining budget exceeds N_obs/5).  With
 ``Σ_i σ²_i = 0`` this reduces exactly to the selection-only variance
 criterion ``N_eff > N_obs² / max_likelihood_variance``.
 
@@ -88,7 +122,8 @@ References
 - Thrane & Talbot (2019). PASA 36, e010
 - Essick & Farr (2022). arXiv:2204.00461
 - Talbot & Golomb (2023). MNRAS 526, 3495. arXiv:2304.06138
-- Vitale et al. (2022). arXiv:2007.05579
+- Vitale et al. (2022). arXiv:2007.05579 (states no N_eff rule; see above)
+- Heinzel & Vitale (2025). arXiv:2509.07221
 - GWTC-4.0 populations: arXiv:2508.18083; GWTC-5.0: arXiv:2605.27226
 """
 
@@ -129,6 +164,15 @@ _MIN_VARIANCE_BUDGET = 1e-12
 # to it leaves those values bit-identical and keeps the wall at full depth
 # when Neff is +inf or larger still.
 _EXHAUSTED_GATE_X = 1e-3
+
+# The forms of the Monte-Carlo term (module docstring, "The Monte-Carlo term").
+FARR_SELECTION_MC_CORRECTION = "farr"
+DEFAULT_SELECTION_MC_CORRECTION = "none"
+SELECTION_MC_CORRECTIONS = (
+    DEFAULT_SELECTION_MC_CORRECTION,
+    FARR_SELECTION_MC_CORRECTION,
+    "heinzel_vitale",
+)
 
 
 # ============================================================
@@ -275,6 +319,34 @@ def log_evidence_and_mc_variance(
     return -jnp.log(nsamp) + lse, variance
 
 
+def check_selection_mc_correction(value) -> str:
+    """``selection_mc_correction`` as given; an unknown value raises ``ValueError``."""
+    if not isinstance(value, str) or value not in SELECTION_MC_CORRECTIONS:
+        raise ValueError(
+            f"selection_mc_correction must be one of {list(SELECTION_MC_CORRECTIONS)}, "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _opt_in_mc_term(n: float, Neff: jnp.ndarray, selection_mc_correction: str):
+    """The Monte-Carlo term of the two opt-in forms: 0 or -n(n+1)/(2 Neff).
+
+    The ``"heinzel_vitale"`` term is 0 at ``Neff = +inf`` (no Monte-Carlo
+    noise) and -inf at ``Neff = 0`` (its limit) and at a NaN ``Neff``.
+    Double-where, as in ``_lse_to_log_mu_neff``: the dead branch divides finite
+    operands, because a ``where`` cannot erase the NaN that a division's VJP
+    makes of a zero cotangent and an infinite slope.
+    """
+    if selection_mc_correction == "none":
+        return 0.0
+    positive = Neff > 0.0  # False for a NaN Neff
+    usable = positive & jnp.isfinite(Neff)
+    neff_safe = jnp.where(usable, Neff, 1.0)
+    term = -n * (n + 1.0) / (2.0 * neff_safe)
+    return jnp.where(usable, term, jnp.where(positive, 0.0, -jnp.inf))
+
+
 def selection_log_correction(
     log_mu: jnp.ndarray,
     Neff: jnp.ndarray,
@@ -282,6 +354,7 @@ def selection_log_correction(
     soft_guard: bool = False,
     max_likelihood_variance: float = DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     pe_variance_sum: jnp.ndarray | float = 0.0,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
 ) -> jnp.ndarray:
     """
     Log selection correction term (Farr 2019 / Talbot & Golomb 2023).
@@ -289,8 +362,8 @@ def selection_log_correction(
     Returns ``-inf`` when the Monte-Carlo estimate of the log-likelihood
     is too noisy to trust, under BOTH criteria:
 
-    * ``N_eff <= 5 N_obs`` — the Vitale et al. (2022) floor on the MEAN
-      correction;
+    * ``N_eff <= 5 N_obs`` — a floor on the MEAN correction (source unknown,
+      see the module docstring);
     * ``σ²_lnL = pe_variance_sum + N_obs²/N_eff > max_likelihood_variance``
       — the GWTC-4.0/5.0 bound on the VARIANCE of the TOTAL log-likelihood
       estimator (Essick & Farr 2022; Talbot & Golomb 2023).
@@ -324,17 +397,25 @@ def selection_log_correction(
     whatever ``Neff`` is, ``+inf`` included: no selection term can bring such
     a total variance under the cap.
 
-    The correction is:
+    The correction is, at the default ``selection_mc_correction="none"``:
+
+        -N_obs * log μ
+
+    the standard Poisson selection factor.  ``"farr"`` is:
 
         -N_obs * log μ  +  N_obs * (N_obs + 3) / (2 * N_eff)
 
-    The first term is the standard Poisson selection factor.  The second is
-    the leading Monte-Carlo uncertainty correction of Farr (2019) eq. 11,
+    The second term is
+    the leading Monte-Carlo uncertainty correction of Farr (2019) eq. 15,
     matching ``gwpopulation.vt.ResamplingVT.vt_factor``.  The ``+3`` follows
     from marginalising μ under a scale-invariant p(μ) ∝ 1/μ — a flat prior
     would give N_obs(N_obs+1) instead — NOT from a higher-order Taylor term;
     the module docstring carries the derivation and
     ``tests/test_selection_correction_coefficient.py`` pins it numerically.
+
+    ``"heinzel_vitale"`` replaces the second term by
+    ``-N_obs (N_obs + 1) / (2 N_eff)``; the module docstring has the three.
+    Both guards apply the same in every form.
 
     Parameters
     ----------
@@ -350,11 +431,20 @@ def selection_log_correction(
         selection-only bound.  Both the standard core and the
         cluster/lensing stack (per-event, lensed-singleton, and per-pair
         variances) thread it.
+    selection_mc_correction : the form of the Monte-Carlo term, one of
+        ``SELECTION_MC_CORRECTIONS``: ``"none"`` (default), ``"farr"`` or
+        ``"heinzel_vitale"``; anything else raises ``ValueError``.
 
     Returns
     -------
     Scalar log-likelihood contribution from the selection term.
     """
+    # Python-level, once per trace, never a jnp.where: the "farr" expressions
+    # below are the program this function has always traced, and they stay
+    # bit-identical only if no other form puts an operation in it (see the note
+    # on ``exhausted``: a second use of an operand moves admitted values by an
+    # ulp).
+    selection_mc_correction = check_selection_mc_correction(selection_mc_correction)
     n = float(nEvents)
     # Remaining budget for the selection term after the per-event MC
     # variances; jnp.maximum (not Python max): the threshold is traced
@@ -385,7 +475,8 @@ def selection_log_correction(
         # there. Above ~1.05x threshold the gate underflows and the branch is
         # numerically identical to the hard guard's valid branch. The 1/Neff
         # Taylor term is frozen at the threshold so it cannot blow up
-        # (positively) in the regime the wall is pushing away from.  NOTE:
+        # (positively) in the regime the wall is pushing away from (the opt-in
+        # forms have nothing to freeze: see _opt_in_mc_term).  NOTE:
         # with nonzero pe_variance_sum the threshold is the TOTAL-variance
         # boundary, inflated beyond the pure selection boundary N^2/max_var
         # (up to N^2/1e-12 once the budget is exhausted) — the gate turn-on
@@ -407,10 +498,19 @@ def selection_log_correction(
         reward_mag = n * jax.nn.softplus(-log_mu)
         wall = -gate * (100.0 + 2.0 * reward_mag)
         Neff_taylor = jnp.maximum(Neff, threshold)
-        correction = (
-            -n * log_mu
-            + n * (3.0 + n) / (2.0 * Neff_taylor)
-        )
+        if selection_mc_correction == FARR_SELECTION_MC_CORRECTION:
+            correction = (
+                -n * log_mu
+                + n * (3.0 + n) / (2.0 * Neff_taylor)
+            )
+        else:
+            # The opt-in terms do not read Neff_taylor, which is how a NaN
+            # Neff or threshold reaches the collapse below; carry it there.
+            correction = (
+                -n * log_mu
+                + _opt_in_mc_term(n, Neff, selection_mc_correction)
+                + jnp.where(jnp.isnan(Neff_taylor), jnp.nan, 0.0)
+            )
         total = correction + wall
         # This collapse -- not the hard branch's ``too_sparse`` -- is the soft
         # path's NaN guarantee: mu == 0 exactly (all-invalid injections) makes
@@ -421,10 +521,13 @@ def selection_log_correction(
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
     too_sparse = ~(Neff > threshold) | exhausted
-    correction = (
-        -n * log_mu
-        + n * (3.0 + n) / (2.0 * Neff)
-    )
+    if selection_mc_correction == FARR_SELECTION_MC_CORRECTION:
+        correction = (
+            -n * log_mu
+            + n * (3.0 + n) / (2.0 * Neff)
+        )
+    else:
+        correction = -n * log_mu + _opt_in_mc_term(n, Neff, selection_mc_correction)
     return jnp.where(too_sparse, -jnp.inf, correction)
 
 

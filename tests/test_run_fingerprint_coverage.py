@@ -1,14 +1,19 @@
 """Run-fingerprint coverage: likelihood options and InferenceTarget runs.
 
 * Likelihood options that can change the likelihood value (compute_dtype,
-  max_likelihood_variance, the selection N_eff soft guard) enter the core
-  numerics block only when set; the layout options (sel_batch_size,
+  max_likelihood_variance, the selection N_eff soft guard, the selection
+  Monte-Carlo term) enter the core numerics block only when set; the layout options (sel_batch_size,
   pe_event_block) never do, because they compute the same sums.
 * ds.infer fingerprints an InferenceTarget run that writes or resumes a
   checkpoint, gates the resume on it, and lets the target contribute its own
   identity and provenance block (the companion hook).
 * Every fingerprint built without the new options is unchanged: the goldens
   below were computed on main at 611eaff, before this change.
+* The selection Monte-Carlo term is recorded unless it is ``"farr"``, which
+  every run made before the default became ``"none"`` (2026-10-31) used and none
+  of them recorded. So the goldens are the digests of an explicit ``"farr"``
+  binding, a default run's digest differs from them, and a checkpoint of such a
+  run is refused by a default run and resumed by an explicit ``"farr"``.
 * The evaluation defaults of 2026-10-02 (``pairing_norm="auto"``,
   ``kernel_layout="galaxy_list"``, ``missing_density="auto"``,
   ``kernel_window="auto"``) are recorded, so the goldens hold under the
@@ -110,11 +115,11 @@ def _stores(n_events=3, nsamp=4, n_sel=128):
 
 
 # ---------------------------------------------------------------------------
-# Default fingerprints are unchanged
+# Fingerprints under "farr" are unchanged
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(not _golden_environment(), reason="goldens assume default DARKSIRENS_* settings")
-def test_default_digests_equal_the_pre_change_goldens():
+def test_farr_digests_equal_the_pre_change_goldens():
     # The goldens predate the 2026-10-02 evaluation defaults, which are
     # recorded: they hold under the historical values, set explicitly.
     with historical_evaluation():
@@ -170,31 +175,50 @@ def _check_pre_change_goldens():
     assert _digest(core_numerics_semantic()) == GOLDEN_NUMERICS
     assert _digest({"parameters": plan, "core_numerics": core_numerics_semantic()}) == GOLDEN_RUN
 
-    # A default binding, and every option spelled out at its default or as a
-    # layout-only value, adds nothing.
+    # A binding under "farr", and every other option spelled out at its default
+    # or as a layout-only value, adds nothing.
     events, injections = _stores()
-    bound = bind_analysis(analysis, events=events, injections=injections)
+    bound = bind_analysis(
+        analysis, events=events, injections=injections, selection_mc_correction="farr",
+    )
     assert _digest(core_numerics_semantic(bound)) == GOLDEN_NUMERICS
     explicit = bind_analysis(
         analysis, events=events, injections=injections,
         compute_dtype="float64", max_likelihood_variance=1.0,
         selection_neff_soft_guard=False, sel_batch_size=48, pe_event_block=2,
+        selection_mc_correction="farr",
     )
     assert _digest(core_numerics_semantic(explicit)) == GOLDEN_NUMERICS
     mapping = {
         "compute_dtype": None, "max_likelihood_variance": 1.0,
         "selection_neff_soft_guard": False, "sel_batch_size": 64,
-        "pe_event_block": 1,
+        "pe_event_block": 1, "selection_mc_correction": "farr",
     }
     assert _digest(core_numerics_semantic(mapping)) == GOLDEN_NUMERICS
 
+    # A default binding does not: it records "none", by design.
+    default = bind_analysis(analysis, events=events, injections=injections)
+    assert _digest(core_numerics_semantic(default)) != GOLDEN_NUMERICS
 
-def test_default_binding_adds_no_key_in_any_environment():
+
+def test_a_farr_binding_adds_no_key_in_any_environment():
     events, injections = _stores()
-    bound = bind_analysis(_analysis(), events=events, injections=injections)
+    bound = bind_analysis(
+        _analysis(), events=events, injections=injections, selection_mc_correction="farr",
+    )
     assert likelihood_options_semantic(bound) == {}
     assert core_numerics_semantic(bound) == core_numerics_semantic()
     assert "likelihood_options" not in core_numerics_semantic(bound)
+
+
+def test_a_default_binding_records_the_selection_form_and_nothing_else():
+    events, injections = _stores()
+    bound = bind_analysis(_analysis(), events=events, injections=injections)
+    assert likelihood_options_semantic(bound) == {"selection_mc_correction": "none"}
+    numerics = core_numerics_semantic(bound)
+    assert numerics["likelihood_options"] == {"selection_mc_correction": "none"}
+    del numerics["likelihood_options"]
+    assert numerics == core_numerics_semantic()
 
 
 # ---------------------------------------------------------------------------
@@ -208,15 +232,21 @@ def test_default_binding_adds_no_key_in_any_environment():
         ("max_likelihood_variance", 0.5, 0.5),
         ("max_likelihood_variance", float("inf"), {"__float__": "inf"}),
         ("selection_neff_soft_guard", True, True),
+        ("selection_mc_correction", "none", "none"),
+        ("selection_mc_correction", "heinzel_vitale", "heinzel_vitale"),
     ],
 )
 def test_each_value_option_enters_only_when_set(option, value, recorded):
     events, injections = _stores()
     analysis = _analysis()
+    # "farr" records nothing, so each option is seen alone.
+    farr = {"selection_mc_correction": "farr"}
     default = core_numerics_semantic(
-        bind_analysis(analysis, events=events, injections=injections)
+        bind_analysis(analysis, events=events, injections=injections, **farr)
     )
-    bound = bind_analysis(analysis, events=events, injections=injections, **{option: value})
+    bound = bind_analysis(
+        analysis, events=events, injections=injections, **{**farr, option: value},
+    )
     numerics = core_numerics_semantic(bound)
     assert numerics["likelihood_options"] == {option: recorded}
     without = dict(numerics)
@@ -224,7 +254,7 @@ def test_each_value_option_enters_only_when_set(option, value, recorded):
     assert without == default
     assert _digest(numerics) != _digest(default)
     # The mapping form (a companion's options) records the same entry.
-    assert likelihood_options_semantic({option: value}) == {option: recorded}
+    assert likelihood_options_semantic({**farr, option: value}) == {option: recorded}
 
 
 def test_options_combine_and_distinct_values_have_distinct_digests():
@@ -232,7 +262,7 @@ def test_options_combine_and_distinct_values_have_distinct_digests():
     b = core_numerics_semantic({"max_likelihood_variance": 0.25})
     both = core_numerics_semantic(
         {"max_likelihood_variance": 0.5, "compute_dtype": np.float32,
-         "selection_neff_soft_guard": np.bool_(True)}
+         "selection_neff_soft_guard": np.bool_(True), "selection_mc_correction": "farr"}
     )
     assert _digest(a) != _digest(b)
     assert both["likelihood_options"] == {
@@ -251,7 +281,7 @@ def test_layout_options_never_enter(option):
     )
     bound = bind_analysis(analysis, events=events, injections=injections, **{option: 2})
     assert core_numerics_semantic(bound) == default
-    assert likelihood_options_semantic({option: 7}) == {}
+    assert likelihood_options_semantic({option: 7, "selection_mc_correction": "farr"}) == {}
 
 
 def test_layout_options_compute_the_same_likelihood():
@@ -288,6 +318,7 @@ def test_resume_gate_refuses_a_checkpoint_with_other_likelihood_options(tmp_path
     plan = parameter_plan_semantic(analysis.parameters)
 
     def fingerprint(**options):
+        options.setdefault("selection_mc_correction", "farr")
         bound = bind_analysis(analysis, events=events, injections=injections, **options)
         return fingerprint_from_semantic(
             {"parameters": plan, "core_numerics": core_numerics_semantic(bound)}
@@ -305,6 +336,35 @@ def test_resume_gate_refuses_a_checkpoint_with_other_likelihood_options(tmp_path
     save_run_fingerprint(str(tmp_path), fingerprint(max_likelihood_variance=0.5))
     with pytest.raises(ResumeFingerprintError, match=r"likelihood_options\.max_likelihood_variance: 0\.5"):
         check_resume_fingerprint(str(tmp_path), fingerprint(max_likelihood_variance=0.25))
+
+
+def test_a_checkpoint_of_the_old_default_is_refused_by_a_default_run(tmp_path):
+    """A run made before the default became ``"none"`` ran ``"farr"`` and recorded
+    nothing, which is what an explicit ``"farr"`` binding records today."""
+    events, injections = _stores()
+    analysis = _analysis()
+    plan = parameter_plan_semantic(analysis.parameters)
+
+    def fingerprint(**options):
+        bound = bind_analysis(analysis, events=events, injections=injections, **options)
+        return fingerprint_from_semantic(
+            {"parameters": plan, "core_numerics": core_numerics_semantic(bound)}
+        )
+
+    old = fingerprint(selection_mc_correction="farr")
+    assert "likelihood_options" not in old["semantic"]["core_numerics"]
+    save_run_fingerprint(str(tmp_path), old)
+
+    with pytest.raises(ResumeFingerprintError) as info:
+        check_resume_fingerprint(str(tmp_path), fingerprint())
+    message = str(info.value)
+    assert "core_numerics.likelihood_options: '<absent>' (checkpointed run)" in message
+    assert "'selection_mc_correction': 'none'" in message
+    assert "A default changed since the checkpoint was written" in message
+    assert 'selection_mc_correction="farr"' in message
+
+    again = fingerprint(selection_mc_correction="farr")
+    assert check_resume_fingerprint(str(tmp_path), again)["digest"] == old["digest"]
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +589,9 @@ def test_provenance_hook_fingerprints_companion_artifacts(tmp_path, fake_sampler
         calls.append(1)
         return {
             "q_artifact": file_identity(artifact),
-            "likelihood_options": likelihood_options_semantic({"max_likelihood_variance": 0.5}),
+            "likelihood_options": likelihood_options_semantic(
+                {"max_likelihood_variance": 0.5, "selection_mc_correction": "farr"}
+            ),
         }
 
     target = _target(provenance=provenance)

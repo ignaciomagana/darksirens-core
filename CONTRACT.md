@@ -109,7 +109,7 @@ on the root surface: it is for companions and diagnostics that need the
 physical parameters behind a coordinate vector (see "Parameter decoding"
 below). `log_likelihood(analysis, *, events, injections, ...)` returns the
 bound likelihood `infer` samples (a callable `theta -> log L`, a
-`BoundAnalysis`), bound through the same code path with the same five
+`BoundAnalysis`), bound through the same code path with the same six
 likelihood options; `selection_neff_guard="auto"` is the hard guard there.
 `save_result(path, result, *, labels=None)` writes an `infer` result through
 `atomic_result_hdf5` and `write_dead_point_datasets`
@@ -417,16 +417,24 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `guard_mode`, `max_likelihood_variance`, `guarded`, `guarded_fraction`,
   `fired` (per guard, `"selection_neff"` or `"pe_mc_variance"`: `count`,
   `fraction` and the `ranges` `{label: [min, max]}` of the draws where it
-  fired), `probed_ranges` and, when some draw is non-finite with no guard
-  firing, `non_finite_other`. One `UserWarning` is emitted when more than 5%
+  fired), `probed_ranges`, `selection_mc_correction` when the likelihood
+  states a form other than `"farr"`, and, when some draw is non-finite with no
+  guard firing, `non_finite_other`. One `UserWarning` is emitted when more than 5%
   of the draws are guarded. The bound likelihood, its program and the
   sampler's RNG streams are unchanged; `guard_report` never enters the
   sampler options or the run fingerprint.
 - `infer(..., selection_neff_guard="auto"|"hard"|"soft",
   max_likelihood_variance=None, sel_batch_size=None, pe_event_block=None,
-  compute_dtype=None)` are likelihood options, never sampler options. `auto`
-  resolves to `soft` for NumPyro and `hard` otherwise. They are refused for an
-  `InferenceTarget`. Every other keyword must be a sampler option some core
+  compute_dtype=None, selection_mc_correction=None)` are likelihood options,
+  never sampler options. `auto` resolves to `soft` for NumPyro and `hard`
+  otherwise. They are refused for an `InferenceTarget`.
+  `selection_mc_correction` is the form of the selection Monte-Carlo term:
+  `"none"` (what `None` gives, the point estimate), `"farr"`
+  (`+N(N+3)/(2 N_eff)`, the default before 2026-10-31 and the frozen
+  reference's only form) or `"heinzel_vitale"` (`-N(N+1)/(2 N_eff)`, selection
+  `N_eff` only, not frozen under the soft guard). The guards are the same in
+  all three. An
+  unknown value raises `ValueError` at bind time. Every other keyword must be a sampler option some core
   backend reads (`_SAMPLER_DEFAULTS`, the backend options and TinyNS's
   `tinyns_<setting>`); anything else, `bind_analysis`'s
   `selection_neff_soft_guard` and the command-line names `resume` and
@@ -466,13 +474,17 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
 - Run fingerprints record the likelihood options that can change the
   likelihood value: `core_numerics_semantic(bound)` (in
   `darksirens.inference.run_fingerprint`) adds a `"likelihood_options"`
-  entry with a non-default `compute_dtype`, `max_likelihood_variance` and
-  `selection_neff_soft_guard=True`, and no entry for a default binding, so
-  every existing digest is unchanged. A binding of a one-catalog field
+  entry with a non-default `compute_dtype`, `max_likelihood_variance`,
+  `selection_neff_soft_guard=True`, and a `selection_mc_correction` other
+  than `"farr"`. So a default binding records
+  `{"selection_mc_correction": "none"}` since 2026-10-31, and a checkpoint
+  from before is not resumed by it; a binding under `"farr"` and the other
+  defaults has no entry, so
+  every existing digest is unchanged under it. A binding of a one-catalog field
   analysis under the soft guard also records
   `"one_catalog_field_density": "normalised"` (its density is `n_1 / Z_1`
-  there since 2026-10-20). For a binding without a catalog view
-  `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
+  there since 2026-10-20). For a binding without a catalog view and with no
+  entry, `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
   catalog binding always records the kernel window it was bound with (the
   tolerance, or no entry when `"auto"` attached none) in place of the
   setting `"auto"`, so for it the two blocks differ even under the
@@ -594,7 +606,8 @@ A target may expose what the guard report reads from a binding:
 (`log_likelihood`, `event_mc_variance`, `n_eff`, ...) and the attributes
 `n_events`, `max_likelihood_variance` and `selection_neff_soft_guard`. They are
 looked up without being evaluated; a target missing any of them runs exactly
-as before (same sampler call, same result, no report). With all four,
+as before (same sampler call, same result, no report). A target may also state
+`selection_mc_correction`, which is not part of that list. With all four,
 `ds.infer(target, guard_report=...)` calls
 `guard_report(target, prior_transform, plan.labels, n_draws=, seed=,
 for_target=True)` with the plan's prior transform (the one the sampler then

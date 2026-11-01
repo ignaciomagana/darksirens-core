@@ -26,11 +26,14 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from functools import partial
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from darksirens.selection.gw import (
+    SELECTION_MC_CORRECTIONS,
     _lse_to_log_mu_neff,
     selection_log_correction,
     selection_reduce_from_ldw_provider,
@@ -53,6 +56,12 @@ WEIGHT_CASES = {
     # Ordinary spread-out weights: the reference case, must be untouched.
     "ordinary": jnp.array([0.0, 1.0, -0.5, 2.0]),
 }
+
+
+@pytest.fixture(params=SELECTION_MC_CORRECTIONS)
+def log_correction(request):
+    """``selection_log_correction`` under each form of the Monte-Carlo term."""
+    return partial(selection_log_correction, selection_mc_correction=request.param)
 
 
 def _reduce(log_weights, sel_batch_size=None):
@@ -89,13 +98,13 @@ def test_estimator_jacobian_is_finite(case):
 
 
 @pytest.mark.parametrize("case", sorted(WEIGHT_CASES))
-def test_selection_log_correction_gradient_is_finite(case):
+def test_selection_log_correction_gradient_is_finite(log_correction, case):
     """jax.grad through the full public correction, the NUTS-facing path."""
     w = WEIGHT_CASES[case]
 
     def correction(x):
         log_mu, neff, _ = _reduce(x)
-        return selection_log_correction(log_mu, neff, nEvents=1)
+        return log_correction(log_mu, neff, nEvents=1)
 
     value = correction(w)
     grad = jax.grad(correction)(w)
@@ -106,22 +115,22 @@ def test_selection_log_correction_gradient_is_finite(case):
         assert bool(jnp.all(jnp.isfinite(grad))), f"{case}: non-finite grad {grad}"
 
 
-def test_uniform_weights_are_a_perfect_estimate_not_a_sparse_one():
+def test_uniform_weights_are_a_perfect_estimate_not_a_sparse_one(log_correction):
     """Zero variance means INFINITE effective sample size, so the guard passes."""
     log_mu, neff, log_sigma2 = _reduce(WEIGHT_CASES["uniform"])
     assert float(log_mu) == pytest.approx(0.0)          # mu = 4/4 = 1
     assert bool(jnp.isposinf(neff))
     assert bool(jnp.isneginf(log_sigma2))
     # ... and the correction is the pure Poisson term, with no Farr inflation.
-    assert float(selection_log_correction(log_mu, neff, nEvents=1)) == pytest.approx(0.0)
+    assert float(log_correction(log_mu, neff, nEvents=1)) == pytest.approx(0.0)
 
 
-def test_uniform_weights_gradient_is_the_analytic_one():
+def test_uniform_weights_gradient_is_the_analytic_one(log_correction):
     """-N_obs * d(log mu)/d(log w_i) = -1/4 for four equal weights."""
 
     def correction(x):
         log_mu, neff, _ = _reduce(x)
-        return selection_log_correction(log_mu, neff, nEvents=1)
+        return log_correction(log_mu, neff, nEvents=1)
 
     grad = jax.grad(correction)(WEIGHT_CASES["uniform"])
     np.testing.assert_allclose(np.asarray(grad), -0.25 * np.ones(4), rtol=0, atol=1e-12)
@@ -140,21 +149,21 @@ def test_ordinary_weights_statistics_are_unchanged():
     assert float(neff) == pytest.approx(mu_ref**2 / sigma2_ref, rel=1e-13)
 
 
-def test_all_invalid_still_rejects():
+def test_all_invalid_still_rejects(log_correction):
     """The NaN-free path must not have turned an empty campaign into a live one."""
     log_mu, neff, log_sigma2 = _reduce(WEIGHT_CASES["all_invalid"])
     assert bool(jnp.isneginf(log_mu))
     assert float(neff) == 0.0
     assert bool(jnp.isneginf(log_sigma2))
-    assert bool(jnp.isneginf(selection_log_correction(log_mu, neff, nEvents=1)))
+    assert bool(jnp.isneginf(log_correction(log_mu, neff, nEvents=1)))
 
 
-def test_nan_weight_is_not_silently_dropped():
+def test_nan_weight_is_not_silently_dropped(log_correction):
     """A poisoned weight must still reach the guard, not be sanitized away."""
     w = jnp.array([0.0, jnp.nan, 0.0, 0.0])
     log_mu, neff, _ = _reduce(w)
     assert bool(jnp.isnan(log_mu))
     assert float(neff) == 0.0
-    assert bool(jnp.isneginf(selection_log_correction(log_mu, neff, nEvents=1)))
+    assert bool(jnp.isneginf(log_correction(log_mu, neff, nEvents=1)))
 
 

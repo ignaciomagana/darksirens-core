@@ -1583,6 +1583,112 @@ NumPyro runs are unchanged.
   guard), 1 xfailed. The real-backends job's test list with TinyNS 0.2.3:
   126 passed, none skipped.
 
+### Selection Monte-Carlo term (the keyword and its three forms)
+
+`selection_log_correction` takes `selection_mc_correction`, and so do every
+likelihood that calls it (`host_density_log_likelihood`, the field mixture
+and the marked hierarchy included), `bind_analysis`,
+`make_host_density_target`, `make_catalog_mixture_target`, `ds.infer` and
+`ds.log_likelihood`.
+
+| Value | Selection term | Source |
+|---|---|---|
+| `"none"` (default, see the next section) | `-N log mu` | the point estimate: arXiv:2204.00461 Sec. VI, gwpopulation's default |
+| `"farr"` | `-N log mu + N(N+3)/(2 N_eff)` | arXiv:1904.10879 Eq. 15, what core did until 2026-10-31 |
+| `"heinzel_vitale"` | `-N log mu - N(N+1)/(2 N_eff)` | arXiv:2509.07221 Eq. 24 |
+
+- **`"farr"` is the program it was.** The form is chosen in Python when the
+  likelihood is traced, with no new operation on the `"farr"` path.
+  `tests/test_selection_mc_correction.py` compares the traced program
+  (`jax.make_jaxpr`) and the values, bit for bit, with a copy of the function
+  at 7457025 under both guards, the edge cases included. The fingerprint, guard
+  report and digests of a run under `"farr"` are the ones it always had.
+- **The guards.** The hard wall, the soft wall and their threshold are the same
+  in all three forms. `"heinzel_vitale"` reads the selection `N_eff` only,
+  never the total variance, and is not frozen at the threshold under the soft
+  guard: it gives no reward below the threshold, so there is nothing to
+  freeze. It is `0` at `N_eff = +inf` and carries the double-where discipline.
+  The other two forms do not read `Neff_taylor`, which is how a NaN `N_eff` or
+  threshold reaches the soft path's collapse, so they carry it there
+  explicitly.
+- **Fingerprint and report.** `selection_mc_correction` is a likelihood value
+  option, recorded when it is not `"farr"`, so a `"none"` run refuses a
+  `"farr"` checkpoint. The guard report records it when a binding or target
+  states a form other than `"farr"`. It is deliberately not in
+  `TARGET_GUARD_REPORT_ATTRIBUTES`: a target that does not state it keeps its
+  report. `ds.infer` refuses it for an `InferenceTarget`, whose builder
+  takes it.
+- **Docstrings.** `selection/gw.py` and the header of
+  `tests/test_selection_correction_coefficient.py` corrected: N_eff is
+  arXiv:1904.10879 Eq. 9 and the term his Eq. 15 (not 15 and 11); that
+  equation is stated under a flat-in-log R prior, which gives N(N+1) through
+  the local maximum, and the 1/mu route is core's own; at the guard's threshold
+  the term equals `(1 + 3/N)(V - sum_i sigma_i^2)/2`, which is not small at a
+  cap of 4; discarding proposals is credited to arXiv:2204.00461 Sec. I; and
+  the source of the 5 N floor is unknown. The messages that name the "Vitale
+  floor" (`inference/preflight.py`) are frozen legacy text and keep it.
+- **Tests.** `tests/test_selection_mc_correction.py`; the soft-guard and
+  gradient-safety files run under all three forms.
+
+### The point estimate by default (numerics change by default; declared divergence from legacy)
+
+`selection_mc_correction` now defaults to `"none"`, the point estimate
+`-N log mu`, everywhere the previous section lists. Core used to add
+`+N(N+3)/(2 N_eff)` unconditionally, on top of the variance guard. That term
+stays available, unchanged, as `selection_mc_correction="farr"`.
+
+- **Why.** Essick & Farr (arXiv:2204.00461 Sec. VI) advise the point estimate,
+  gwpopulation has the term off and deprecates it, and the variance guard, not
+  the term, is what protects the inference. The term has the sign of the
+  estimator's bias, so it about doubles that bias in the expectation of the
+  likelihood, and at the guard's threshold it rewards a noisier point by
+  `(1 + 3/N)(V - sum_i sigma_i^2)/2`, not small at a cap of 4.
+- **What changes.** For every likelihood that does not state a form:
+  - the log-likelihood drops by `N(N+3)/(2 N_eff)` at each point (the soft
+    guard's term reads the larger of `N_eff` and the threshold), so the
+    posterior and the evidence change, and more where `N_eff` is small. The
+    first term, `log_mu`, `n_eff`, the hard wall, the soft wall and their
+    threshold are the same;
+  - the run fingerprint: a default binding or target records
+    `likelihood_options: {"selection_mc_correction": "none"}`, so its digest
+    changes. A fingerprinted resume of a checkpoint written before the change
+    (an `InferenceTarget` run, or a fingerprint its caller gates) is refused as
+    a settings change, and the refusal names the fix; an ordinary `ds.infer`
+    resume is not fingerprinted and only warns. `likelihood_options_semantic`
+    of a mapping without the key records `"none"` too, because that is what a
+    likelihood given no keyword now runs;
+  - the guard report of a default run records `selection_mc_correction`.
+- **Who is affected.** Anyone calling a likelihood, `bind_analysis`, `ds.infer`,
+  `ds.log_likelihood`, `make_host_density_target` or
+  `make_catalog_mixture_target` without the keyword, including
+  `selection_log_correction` itself. `darksirens-lss` (at 6d5fc59) calls
+  `host_density_log_likelihood` and `make_catalog_mixture_target` without it, so
+  its targets take the new default, and its fingerprint hook does not record the
+  form: a checkpoint of such a target is **not** refused. Recording it, and
+  stating the form, is a separate change in that repository.
+- **Getting the old behaviour.** Pass `selection_mc_correction="farr"`. It
+  reproduces the program of 7457025 bit for bit: the traced program and the
+  values, the run fingerprint (a binding under `"farr"` records nothing, as
+  every earlier run did, so it resumes their checkpoints) and the guard report.
+  The fingerprint stays keyed to `"farr"` on purpose, not to the default.
+- **Legacy parity (declared divergence).** The frozen reference has only the
+  Farr term, so the new default has no reference counterpart. The parity probes
+  that reach the term ask for it explicitly (`probe_spectral_likelihood`,
+  `probe_catalog_likelihood`, `probe_catalog_marks`,
+  `probe_selection_completeness`, `probe_catalog_mixture`,
+  `probe_catalog_population_blocks`), and their candidate outputs are
+  byte-identical to those of 7457025. The tests that pin the Farr formula or a
+  number pinned under it pass `"farr"` and keep their assertions and numbers
+  (`test_selection_correction_coefficient`, `test_likelihood_anchors`,
+  `test_catalog_hosts`, and the fingerprint checks of
+  `test_run_fingerprint_coverage`, `test_catalog_mixture` and
+  `test_host_density_extension`, whose goldens are now the digests of an
+  explicit `"farr"`). `test_selection_mc_correction` pins that the default is
+  `"none"` and that `"farr"` is the program of 7457025 (traced program and value
+  bytes), and `test_run_fingerprint_coverage` that a checkpoint of an earlier run
+  is refused by a default run, with the fix named, and resumed by an explicit
+  `"farr"`.
+
 ## Review fixes (2026-10-20)
 
 A multi-agent review on 2026-10-20 confirmed 130 findings against this tree

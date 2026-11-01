@@ -177,6 +177,7 @@ def test_marked_hierarchy_diagnostics_recompose_total():
         pop_model="powerlaw+peak",
         max_likelihood_variance=1.0e6,
         return_diagnostics=True,
+        selection_mc_correction="farr",  # the form the number below was pinned under
     )
     assembled = d.selection_log_correction + jnp.sum(d.event_log_evidence)
     np.testing.assert_allclose(d.log_likelihood, assembled, rtol=1e-14, atol=0.0)

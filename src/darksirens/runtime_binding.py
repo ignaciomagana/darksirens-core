@@ -62,7 +62,11 @@ from darksirens.likelihood.hierarchical import (
     spectral_siren_log_likelihood,
 )
 from darksirens.population import ensure_pairing_grid_covers, get_model
-from darksirens.selection.gw import DEFAULT_MAX_LIKELIHOOD_VARIANCE
+from darksirens.selection.gw import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
+    check_selection_mc_correction,
+)
 
 _CHIEFF_FIT_COLUMNS = ("m1det", "q", "dL", "chieff")
 _COMPONENT_FIT_COLUMNS = ("m1det", "q", "dL") + tuple(COMPONENT_SPIN_DATASETS)
@@ -537,6 +541,8 @@ class BoundAnalysis:
     # compact rows' coverage fraction of completeness="selection"); None for
     # every other binding, whose call and program are then unchanged.
     model_operands: Any = None
+    # The form of the selection Monte-Carlo term (selection_log_correction).
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION
     _log_likelihood: Any = field(init=False, repr=False, compare=False)
     # The settings a trace of the likelihood reads, as they were when the
     # binding was made (see _require_trace_settings).
@@ -548,6 +554,7 @@ class BoundAnalysis:
             "selection_neff_soft_guard",
             _soft_guard_flag(self.selection_neff_soft_guard),
         )
+        check_selection_mc_correction(self.selection_mc_correction)
         if isinstance(self.analysis.redshift, FieldCatalogMixtureRedshift):
             _require_admissible_mixture_pins(self.analysis, self.model_operands)
         _require_bound_operands(self)
@@ -745,6 +752,10 @@ class BoundAnalysis:
             selection_neff_soft_guard=self.selection_neff_soft_guard,
             max_likelihood_variance=self.max_likelihood_variance,
         )
+        if self.selection_mc_correction != DEFAULT_SELECTION_MC_CORRECTION:
+            # Every likelihood below takes it; the default call is left exactly
+            # as it was.
+            bright_common["selection_mc_correction"] = self.selection_mc_correction
         ordinary_common = dict(
             **bright_common,
             pe_event_block=self.pe_event_block,
@@ -1589,6 +1600,7 @@ def bind_analysis(
     sel_batch_size: int | None = None,
     pe_event_block: int | None = None,
     compute_dtype: str | None = None,
+    selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
 ) -> BoundAnalysis:
     """Bind an analysis to its GW stores and return the jitted log-likelihood.
 
@@ -1608,6 +1620,11 @@ def bind_analysis(
     ``selection_neff_soft_guard`` is the resolved guard, a bool (``True``: the
     soft penalty); anything else raises ``TypeError``. ``ds.infer`` and
     ``ds.log_likelihood`` take the mode, ``selection_neff_guard``.
+
+    ``selection_mc_correction`` is the form of the selection Monte-Carlo term:
+    ``"none"`` (default), ``"farr"`` or ``"heinzel_vitale"``
+    (:func:`darksirens.selection.gw.selection_log_correction`); anything else
+    raises ``ValueError``.
     """
     if not isinstance(analysis, Analysis):
         raise TypeError("analysis must be the Analysis returned by ds.model")
@@ -1618,6 +1635,7 @@ def bind_analysis(
             "injections must be the SelectionStore returned by ds.load_injections"
         )
     selection_neff_soft_guard = _soft_guard_flag(selection_neff_soft_guard)
+    selection_mc_correction = check_selection_mc_correction(selection_mc_correction)
 
     required = required_fit_columns(analysis)
     if compute_dtype is not None:
@@ -1786,6 +1804,7 @@ def bind_analysis(
         z_depth=z_depth,
         selection_neff_soft_guard=selection_neff_soft_guard,
         max_likelihood_variance=float(max_likelihood_variance),
+        selection_mc_correction=selection_mc_correction,
         sel_batch_size=sel_batch_size,
         pe_event_block=pe_event_block,
         kernel_pin=kernel_pin,
