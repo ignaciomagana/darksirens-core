@@ -170,6 +170,7 @@ def _candidate():
                     cosmo, params, theta, pe, catalog, cache, sel, catalog, cache,
                     N_EVENTS, NSAMP, N_DRAW, pop_model=POP_MODEL,
                     max_likelihood_variance=MAX_VARIANCE, return_diagnostics=True,
+                    selection_mc_correction="farr",  # the frozen reference's only form
                 )
             elif cell in ("complete_volume", "complete_zero"):
                 d = complete_catalog_siren_log_likelihood(
@@ -177,6 +178,7 @@ def _candidate():
                     N_EVENTS, NSAMP, N_DRAW, pop_model=POP_MODEL,
                     empty_policy="volume" if cell == "complete_volume" else "zero",
                     max_likelihood_variance=MAX_VARIANCE, return_diagnostics=True,
+                    selection_mc_correction="farr",  # the frozen reference's only form
                 )
             else:
                 d = bright_siren_log_likelihood(
@@ -184,6 +186,7 @@ def _candidate():
                     (Counterpart(z=0.10, dz=0.02, pixel=7, sky_marginalized=False),),
                     sel, N_EVENTS, NSAMP, N_DRAW, pop_model=POP_MODEL,
                     max_likelihood_variance=MAX_VARIANCE, return_diagnostics=True,
+                    selection_mc_correction="farr",  # the frozen reference's only form
                 )
             cell_rows[point_name] = _record(d._asdict())
         rows[cell] = cell_rows

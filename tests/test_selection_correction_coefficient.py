@@ -9,8 +9,9 @@ eq. 15 under a flat-in-log prior on R, which gives N_obs(N_obs+1) instead when
 his eq. 11 is evaluated through the local maximum (the full integral diverges):
 the 1/mu route below is core's own.
 
-These tests pin the default form, ``selection_mc_correction="farr"``;
-``tests/test_selection_mc_correction.py`` covers the others.
+These tests pin that form, ``selection_mc_correction="farr"``, which has not
+been the default since 2026-10-31; ``tests/test_selection_mc_correction.py``
+covers the others.
 
 Marginalising the rate with the scale-free prior p(R) ∝ 1/R leaves
 L ∝ mu^{-N}; Monte-Carlo error makes mu uncertain, mu ~ N(mu_hat, sigma^2)
@@ -82,6 +83,7 @@ def test_matches_gwpopulation_closed_form(N, Neff):
     got = float(selection_log_correction(
         jnp.asarray(np.log(mu)), jnp.asarray(float(Neff)), N,
         max_likelihood_variance=1e9,   # keep the guard out of the way here
+        selection_mc_correction="farr",
     ))
     assert got == pytest.approx(want, rel=1e-12)
 
@@ -97,6 +99,7 @@ def test_selection_log_correction_uses_n_times_n_plus_three(soft_guard):
     got = float(selection_log_correction(
         jnp.asarray(np.log(mu)), jnp.asarray(Neff), N,
         soft_guard=soft_guard, max_likelihood_variance=1e9,
+        selection_mc_correction="farr",
     ))
     want = -N * np.log(mu) + N * (N + 3.0) / (2.0 * Neff)
     assert got == pytest.approx(want, rel=1e-10)
