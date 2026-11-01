@@ -1644,7 +1644,8 @@ stays available, unchanged, as `selection_mc_correction="farr"`.
   likelihood, and at the guard's threshold it rewards a noisier point by
   `(1 + 3/N)(V - sum_i sigma_i^2)/2`, not small at a cap of 4.
 - **What changes.** For every likelihood that does not state a form:
-  - the log-likelihood drops by `N(N+3)/(2 N_eff)` at each point, so the
+  - the log-likelihood drops by `N(N+3)/(2 N_eff)` at each point (the soft
+    guard's term reads the larger of `N_eff` and the threshold), so the
     posterior and the evidence change, and more where `N_eff` is small. The
     first term, `log_mu`, `n_eff`, the hard wall, the soft wall and their
     threshold are the same;
@@ -1676,7 +1677,17 @@ stays available, unchanged, as `selection_mc_correction="farr"`.
   `probe_catalog_likelihood`, `probe_catalog_marks`,
   `probe_selection_completeness`, `probe_catalog_mixture`,
   `probe_catalog_population_blocks`), and their candidate outputs are
-  byte-identical to those of 7457025.
+  byte-identical to those of 7457025. The tests that pin the Farr formula or a
+  number pinned under it pass `"farr"` and keep their assertions and numbers
+  (`test_selection_correction_coefficient`, `test_likelihood_anchors`,
+  `test_catalog_hosts`, and the fingerprint checks of
+  `test_run_fingerprint_coverage`, `test_catalog_mixture` and
+  `test_host_density_extension`, whose goldens are now the digests of an
+  explicit `"farr"`). `test_selection_mc_correction` pins that the default is
+  `"none"` and that `"farr"` is the program of 7457025 (traced program and value
+  bytes), and `test_run_fingerprint_coverage` that a checkpoint of an earlier run
+  is refused by a default run, with the fix named, and resumed by an explicit
+  `"farr"`.
 
 ## Review fixes (2026-10-20)
 

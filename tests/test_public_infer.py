@@ -540,7 +540,7 @@ def test_likelihood_options_are_refused_for_an_inference_target(monkeypatch):
     )
     with pytest.raises(TypeError, match="must be omitted for an InferenceTarget"):
         infer(target, max_likelihood_variance=0.005)
-    with pytest.raises(TypeError, match="compute_dtype must be omitted"):
+    with pytest.raises(TypeError, match="compute_dtype and selection_mc_correction must be omitted"):
         infer(target, compute_dtype="float32")
 
 
