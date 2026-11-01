@@ -494,8 +494,9 @@ def _warn_unverified_resume(sampler, opts):
         f"ds.infer resumes the checkpoint in {resume_dir!r} without checking "
         "that it was written under this run's settings: ds.infer fingerprints "
         "InferenceTarget runs only, not ordinary analyses. A setting that "
-        "changed in between (for example a default: the pooled count ratio "
-        "since 2026-10-10, pairing_norm and kernel_window since 2026-10-02) "
+        "changed in between (for example a default: the selection Monte-Carlo "
+        "term since 2026-10-31, the pooled count ratio since 2026-10-10, "
+        "pairing_norm and kernel_window since 2026-10-02) "
         "makes the resumed run mix two likelihoods. To gate it, build a "
         "fingerprint from parameter_plan_semantic(analysis.parameters), "
         "core_numerics_semantic(ds.log_likelihood(...)) and your data "
@@ -663,7 +664,7 @@ def infer(
     when left unset. ``compute_dtype`` is the opt-in per-sample precision of
     :func:`darksirens.runtime_binding.bind_analysis` (``None``/``'float64'``
     default, or ``'float32'``). ``selection_mc_correction`` is the form of the
-    selection Monte-Carlo term, ``'farr'`` (what ``None`` gives), ``'none'`` or
+    selection Monte-Carlo term, ``'none'`` (what ``None`` gives), ``'farr'`` or
     ``'heinzel_vitale'``
     (:func:`darksirens.selection.gw.selection_log_correction`). These six names
     are likelihood options, not sampler options, and never enter the sampler

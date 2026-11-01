@@ -1622,7 +1622,7 @@ def bind_analysis(
     ``ds.log_likelihood`` take the mode, ``selection_neff_guard``.
 
     ``selection_mc_correction`` is the form of the selection Monte-Carlo term:
-    ``"farr"`` (default), ``"none"`` or ``"heinzel_vitale"``
+    ``"none"`` (default), ``"farr"`` or ``"heinzel_vitale"``
     (:func:`darksirens.selection.gw.selection_log_correction`); anything else
     raises ``ValueError``.
     """

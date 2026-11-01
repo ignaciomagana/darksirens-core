@@ -429,9 +429,11 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   never sampler options. `auto` resolves to `soft` for NumPyro and `hard`
   otherwise. They are refused for an `InferenceTarget`.
   `selection_mc_correction` is the form of the selection Monte-Carlo term:
-  `"farr"` (what `None` gives, `+N(N+3)/(2 N_eff)`), `"none"` (the point
-  estimate) or `"heinzel_vitale"` (`-N(N+1)/(2 N_eff)`, selection `N_eff` only,
-  not frozen under the soft guard). The guards are the same in all three. An
+  `"none"` (what `None` gives, the point estimate), `"farr"`
+  (`+N(N+3)/(2 N_eff)`, the default before 2026-10-31 and the frozen
+  reference's only form) or `"heinzel_vitale"` (`-N(N+1)/(2 N_eff)`, selection
+  `N_eff` only, not frozen under the soft guard). The guards are the same in
+  all three. An
   unknown value raises `ValueError` at bind time. Every other keyword must be a sampler option some core
   backend reads (`_SAMPLER_DEFAULTS`, the backend options and TinyNS's
   `tinyns_<setting>`); anything else, `bind_analysis`'s
@@ -473,13 +475,16 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   likelihood value: `core_numerics_semantic(bound)` (in
   `darksirens.inference.run_fingerprint`) adds a `"likelihood_options"`
   entry with a non-default `compute_dtype`, `max_likelihood_variance`,
-  `selection_mc_correction` and `selection_neff_soft_guard=True`, and no
-  entry for a default binding, so
-  every existing digest is unchanged. A binding of a one-catalog field
+  `selection_neff_soft_guard=True`, and a `selection_mc_correction` other
+  than `"farr"`. So a default binding records
+  `{"selection_mc_correction": "none"}` since 2026-10-31, and a checkpoint
+  from before is not resumed by it; a binding under `"farr"` and the other
+  defaults has no entry, so
+  every existing digest is unchanged under it. A binding of a one-catalog field
   analysis under the soft guard also records
   `"one_catalog_field_density": "normalised"` (its density is `n_1 / Z_1`
-  there since 2026-10-20). For a binding without a catalog view
-  `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
+  there since 2026-10-20). For a binding without a catalog view and with no
+  entry, `core_numerics_semantic(bound)` then equals `core_numerics_semantic()`; a
   catalog binding always records the kernel window it was bound with (the
   tolerance, or no entry when `"auto"` attached none) in place of the
   setting `"auto"`, so for it the two blocks differ even under the

@@ -246,7 +246,7 @@ def guard_report(
     - ``n_draws``, ``guard_mode`` (``"hard"``: ``-inf``; ``"soft"``:
       penalised), ``max_likelihood_variance``, and
       ``selection_mc_correction`` when ``bound`` states a form other than
-      the default ``"farr"``;
+      ``"farr"``, so that a report without it is an earlier ``"farr"`` run;
     - ``guarded`` and ``guarded_fraction``: the draws where a guard fired;
     - ``fired``: for each guard that fired (``"selection_neff"``,
       ``"pe_mc_variance"``, see :func:`classify_guard`), its ``count``,
@@ -275,7 +275,7 @@ def guard_report(
     """
     import jax.numpy as jnp
 
-    from darksirens.selection.gw import DEFAULT_SELECTION_MC_CORRECTION
+    from darksirens.selection.gw import FARR_SELECTION_MC_CORRECTION
 
     labels = tuple(str(label) for label in labels)
     n_draws = int(n_draws)
@@ -315,7 +315,7 @@ def guard_report(
         "probed_ranges": _ranges(points, labels),
     }
     correction = getattr(bound, "selection_mc_correction", None)
-    if correction is not None and correction != DEFAULT_SELECTION_MC_CORRECTION:
+    if correction is not None and correction != FARR_SELECTION_MC_CORRECTION:
         report["selection_mc_correction"] = correction
     if other is not None:
         report["non_finite_other"] = other

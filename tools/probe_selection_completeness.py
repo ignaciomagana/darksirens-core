@@ -165,7 +165,8 @@ def _candidate():
         )
         assert analysis.parameters.labels == ("H0", "log10n0", "delta", "sigma_kde") + names
         bound = bind_analysis(analysis, events=events, injections=injections,
-                              max_likelihood_variance=MAX_VARIANCE)
+                              max_likelihood_variance=MAX_VARIANCE,
+                              selection_mc_correction="farr")  # the reference's only form
         rows[name] = [float(bound(np.asarray(point, dtype=np.float64))) for point in points]
     return rows, population
 

@@ -246,7 +246,8 @@ def _require_ndraw_covers_injections(gw_sel, n_draw):
     ``1/N_eff = S2/S^2 - 1/n_draw`` is clamped at zero for round-off, so a
     draw count smaller than the detected set turns a materially negative value
     into ``N_eff = +inf``, which passes every reliability guard and drops the
-    Farr correction. Checked when the inputs are concrete (not traced).
+    Monte-Carlo term of the forms that have one. Checked when the inputs are
+    concrete (not traced).
     """
     valid, prior_wt = gw_sel.valid, gw_sel.prior_wt
     if any(isinstance(v, jax.core.Tracer) for v in (valid, prior_wt, n_draw)):

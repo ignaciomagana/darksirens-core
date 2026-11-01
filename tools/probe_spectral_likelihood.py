@@ -135,6 +135,7 @@ def _candidate():
             pe_event_block=None,
             max_likelihood_variance=MAX_VARIANCE,
             return_diagnostics=True,
+            selection_mc_correction="farr",  # the frozen reference's only form
         )
         rows[name] = _as_record({
             "event_log_evidence": d.event_log_evidence,

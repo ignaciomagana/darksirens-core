@@ -28,7 +28,8 @@ The "+3" is a PRIOR CONVENTION on μ, not a higher-order Taylor term —
 see the derivation below, and ``tests/test_selection_correction_coefficient.py``
 which pins it numerically.  The ``selection_mc_correction`` option of
 :func:`selection_log_correction` chooses the term (see "The Monte-Carlo
-term" below); the default, ``"farr"``, is the expression above.
+term" below): the default, ``"none"``, drops this term, and ``"farr"`` is the
+expression above, kept to reproduce earlier results.
 
 Derivation.  Marginalising the rate R out of the Poisson likelihood with
 the scale-free prior p(R) ∝ 1/R leaves L ∝ μ^{-N}.  Monte-Carlo error
@@ -55,9 +56,10 @@ CAUTION: gwpopulation deprecates this marginalisation ("we recommend not
 to use this as it is not completely understood if this uncertainty
 marginalization is correct") in favour of bounding the variance of the
 TOTAL log-likelihood — which is exactly the criterion this module already
-enforces as its primary guard (next section).  The correction below is
-kept because it is the community-standard closed form, but the guard, not
-the correction, is what protects the inference.  It is not small next to
+enforces as its primary guard (next section).  Essick & Farr (2022, Sec. VI)
+advise the point estimate as well, so the term is off by default here since
+October 2026.  It stays available as ``"farr"``, but the guard, not the
+correction, is what protects the inference.  It is not small next to
 the guard: at the threshold of the guard (the "Reliability criterion" below)
 it equals (1 + 3/N_obs)(max_likelihood_variance − Σ_i σ²_i)/2, so at most
 about half a nat for a cap of 1 and about 2 nats for a cap of 4.
@@ -68,8 +70,8 @@ Three forms, chosen by ``selection_mc_correction``.  The first term of each is
 the same; the guard, its threshold and the soft wall are the same in all of
 them.
 
-* ``"farr"`` (default): -N_obs log μ + N_obs(N_obs+3)/(2 N_eff), as above.
-* ``"none"``: -N_obs log μ, the point estimate of Essick & Farr (2022,
+* ``"farr"``: -N_obs log μ + N_obs(N_obs+3)/(2 N_eff), as above.
+* ``"none"`` (default): -N_obs log μ, the point estimate of Essick & Farr (2022,
   Sec. VI) and gwpopulation's default.
 * ``"heinzel_vitale"``: -N_obs log μ - N_obs(N_obs+1)/(2 N_eff), Heinzel &
   Vitale (2025, arXiv:2509.07221, eq. 24), which subtracts the leading bias of
@@ -164,8 +166,13 @@ _MIN_VARIANCE_BUDGET = 1e-12
 _EXHAUSTED_GATE_X = 1e-3
 
 # The forms of the Monte-Carlo term (module docstring, "The Monte-Carlo term").
-DEFAULT_SELECTION_MC_CORRECTION = "farr"
-SELECTION_MC_CORRECTIONS = (DEFAULT_SELECTION_MC_CORRECTION, "none", "heinzel_vitale")
+FARR_SELECTION_MC_CORRECTION = "farr"
+DEFAULT_SELECTION_MC_CORRECTION = "none"
+SELECTION_MC_CORRECTIONS = (
+    DEFAULT_SELECTION_MC_CORRECTION,
+    FARR_SELECTION_MC_CORRECTION,
+    "heinzel_vitale",
+)
 
 
 # ============================================================
@@ -390,11 +397,15 @@ def selection_log_correction(
     whatever ``Neff`` is, ``+inf`` included: no selection term can bring such
     a total variance under the cap.
 
-    The correction is, at the default ``selection_mc_correction="farr"``:
+    The correction is, at the default ``selection_mc_correction="none"``:
+
+        -N_obs * log μ
+
+    the standard Poisson selection factor.  ``"farr"`` is:
 
         -N_obs * log μ  +  N_obs * (N_obs + 3) / (2 * N_eff)
 
-    The first term is the standard Poisson selection factor.  The second is
+    The second term is
     the leading Monte-Carlo uncertainty correction of Farr (2019) eq. 15,
     matching ``gwpopulation.vt.ResamplingVT.vt_factor``.  The ``+3`` follows
     from marginalising μ under a scale-invariant p(μ) ∝ 1/μ — a flat prior
@@ -402,8 +413,7 @@ def selection_log_correction(
     the module docstring carries the derivation and
     ``tests/test_selection_correction_coefficient.py`` pins it numerically.
 
-    ``selection_mc_correction="none"`` keeps the first term only, and
-    ``"heinzel_vitale"`` replaces the second by
+    ``"heinzel_vitale"`` replaces the second term by
     ``-N_obs (N_obs + 1) / (2 N_eff)``; the module docstring has the three.
     Both guards apply the same in every form.
 
@@ -422,7 +432,7 @@ def selection_log_correction(
         cluster/lensing stack (per-event, lensed-singleton, and per-pair
         variances) thread it.
     selection_mc_correction : the form of the Monte-Carlo term, one of
-        ``SELECTION_MC_CORRECTIONS``: ``"farr"`` (default), ``"none"`` or
+        ``SELECTION_MC_CORRECTIONS``: ``"none"`` (default), ``"farr"`` or
         ``"heinzel_vitale"``; anything else raises ``ValueError``.
 
     Returns
@@ -488,7 +498,7 @@ def selection_log_correction(
         reward_mag = n * jax.nn.softplus(-log_mu)
         wall = -gate * (100.0 + 2.0 * reward_mag)
         Neff_taylor = jnp.maximum(Neff, threshold)
-        if selection_mc_correction == DEFAULT_SELECTION_MC_CORRECTION:
+        if selection_mc_correction == FARR_SELECTION_MC_CORRECTION:
             correction = (
                 -n * log_mu
                 + n * (3.0 + n) / (2.0 * Neff_taylor)
@@ -511,7 +521,7 @@ def selection_log_correction(
         return jnp.where(jnp.isfinite(total), total, -jnp.inf)
     # ~(>) not (<=): a NaN Neff or threshold must guard, never admit.
     too_sparse = ~(Neff > threshold) | exhausted
-    if selection_mc_correction == DEFAULT_SELECTION_MC_CORRECTION:
+    if selection_mc_correction == FARR_SELECTION_MC_CORRECTION:
         correction = (
             -n * log_mu
             + n * (3.0 + n) / (2.0 * Neff)

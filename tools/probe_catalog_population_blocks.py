@@ -256,7 +256,8 @@ def _candidate():
         # The reference's per-row count ratio (DECLARED_COUNT_RATIO_DEFAULT).
         analysis = ds.model(**model_kwargs, count_ratio="row")
         bound = bind_analysis(analysis, events=events, injections=injections,
-                              max_likelihood_variance=MAX_VARIANCE)
+                              max_likelihood_variance=MAX_VARIANCE,
+                              selection_mc_correction="farr")  # the reference's only form
         plan_labels = list(analysis.parameters.labels)
         label_rows[name] = plan_labels
 

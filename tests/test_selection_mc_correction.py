@@ -2,13 +2,14 @@
 
 The likelihood carries ``-N log mu`` plus one of
 
-* ``"farr"`` (the default): ``+N(N+3)/(2 N_eff)``, arXiv:1904.10879 Eq. 15;
-* ``"none"``: nothing, the point estimate;
+* ``"none"`` (the default): nothing, the point estimate;
+* ``"farr"``: ``+N(N+3)/(2 N_eff)``, arXiv:1904.10879 Eq. 15;
 * ``"heinzel_vitale"``: ``-N(N+1)/(2 N_eff)``, arXiv:2509.07221 Eq. 24.
 
-The default must stay the program it has always been (the file's own warning: a
-second use of an operand moves admitted values by an ulp), so the forms are
-chosen at trace time. These tests pin that, the exact value of each form under
+``"farr"`` must stay the program it has always been, which reproduces earlier
+results (the file's own warning: a second use of an operand moves admitted values
+by an ulp), so the forms are chosen at trace time. These tests pin that, that the
+default is exactly ``"none"``, the exact value of each form under
 both guards, the sign of each by Monte Carlo, that the guards are the same in all
 three, the gradients at the edges of the estimator, the fingerprint, and that the
 option reaches every likelihood, a host-density target included.
@@ -29,15 +30,19 @@ import darksirens as ds
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.inference.public import infer
 from darksirens.inference.run_fingerprint import (
+    ResumeFingerprintError,
+    check_resume_fingerprint,
     core_numerics_semantic,
     fingerprint_from_semantic,
     inference_target_semantic,
     likelihood_options_semantic,
+    save_run_fingerprint,
 )
 from darksirens.likelihood.host_density import host_density_log_likelihood
 from darksirens.runtime_binding import bind_analysis
 from darksirens.selection.gw import (
     DEFAULT_SELECTION_MC_CORRECTION,
+    FARR_SELECTION_MC_CORRECTION,
     SELECTION_MC_CORRECTIONS,
     check_selection_mc_correction,
     selection_log_correction,
@@ -55,7 +60,9 @@ from test_host_density_extension import (
 from test_run_fingerprint_coverage import _analysis, _stores
 
 MODES = SELECTION_MC_CORRECTIONS
-OPT_IN = tuple(mode for mode in MODES if mode != DEFAULT_SELECTION_MC_CORRECTION)
+# Explicit: "farr" stays out, it is the reference these two are read against and
+# keeps the known NaN of a direct gradient at N_eff = 0 (below).
+NOT_FARR = ("none", "heinzel_vitale")
 
 
 def _term(mode, n, neff):
@@ -99,16 +106,15 @@ def _frozen_selection_log_correction(
 
 
 # ---------------------------------------------------------------------------
-# The default is the program it was
+# "farr" is the program it was; the default is "none"
 
 
 @pytest.mark.parametrize("soft_guard", [False, True])
-@pytest.mark.parametrize("default", [dict(), dict(selection_mc_correction="farr")])
-def test_the_default_is_bit_identical_to_main(soft_guard, default):
+def test_farr_is_bit_identical_to_main(soft_guard):
     def current(log_mu, neff, pe):
         return selection_log_correction(
             log_mu, neff, 259, soft_guard=soft_guard, max_likelihood_variance=4.0,
-            pe_variance_sum=pe, **default,
+            pe_variance_sum=pe, selection_mc_correction="farr",
         )
 
     def frozen(log_mu, neff, pe):
@@ -134,9 +140,37 @@ def test_the_default_is_bit_identical_to_main(soft_guard, default):
     assert a.tobytes() == b.tobytes()
 
 
+@pytest.mark.parametrize("soft_guard", [False, True])
+def test_the_default_is_the_point_estimate(soft_guard):
+    def default(log_mu, neff, pe):
+        return selection_log_correction(
+            log_mu, neff, 259, soft_guard=soft_guard, max_likelihood_variance=4.0,
+            pe_variance_sum=pe,
+        )
+
+    def explicit(log_mu, neff, pe):
+        return selection_log_correction(
+            log_mu, neff, 259, soft_guard=soft_guard, max_likelihood_variance=4.0,
+            pe_variance_sum=pe, selection_mc_correction="none",
+        )
+
+    args = (jnp.asarray(-1.5), jnp.asarray(3.0e4), jnp.asarray(1.2))
+    assert str(jax.make_jaxpr(default)(*args)) == str(jax.make_jaxpr(explicit)(*args))
+    grid = np.array(
+        [[lm, neff, pe]
+         for lm in (-30.0, -3.3, 0.0, 0.7)
+         for neff in (0.0, 1295.0, 2.3e4, 3.0e4, 4.0e6, np.inf, np.nan)
+         for pe in (0.0, 1.2, 3.9, 4.0, 5.0, np.nan)]
+    )
+    a = np.asarray(jax.jit(jax.vmap(default))(*grid.T))
+    b = np.asarray(jax.jit(jax.vmap(explicit))(*grid.T))
+    assert a.tobytes() == b.tobytes()
+
+
 def test_the_forms_and_their_default():
-    assert DEFAULT_SELECTION_MC_CORRECTION == "farr"
-    assert MODES == ("farr", "none", "heinzel_vitale")
+    assert DEFAULT_SELECTION_MC_CORRECTION == "none"
+    assert FARR_SELECTION_MC_CORRECTION == "farr"
+    assert MODES == ("none", "farr", "heinzel_vitale")
 
 
 # ---------------------------------------------------------------------------
@@ -337,16 +371,21 @@ def test_gradients_through_the_reduction_at_the_edges(mode, soft_guard, weights)
         assert bool(jnp.all(jnp.isfinite(grad))), grad
 
 
-@pytest.mark.parametrize("mode", OPT_IN)
+@pytest.mark.parametrize("mode", NOT_FARR)
 @pytest.mark.parametrize("soft_guard", [False, True])
 @pytest.mark.parametrize(
     "log_mu, neff",
     [(-1.0, np.inf), (-1.0, 0.0), (-np.inf, 0.0)],
     ids=["neff-inf", "neff-zero", "mu-zero"],
 )
-def test_direct_gradients_of_the_opt_in_forms_at_the_edges(mode, soft_guard, log_mu, neff):
+def test_direct_gradients_of_the_other_forms_at_the_edges(mode, soft_guard, log_mu, neff):
     """The double-where: no NaN cotangent in any operand, ``pe_variance_sum`` and
-    the cap included, whatever the value (the term divides by ``N_eff``)."""
+    the cap included, whatever the value (the term divides by ``N_eff``).
+
+    Not ``"farr"``: it is the frozen program, whose hard path has no double-where,
+    so its direct gradient at ``N_eff = 0`` is NaN as on main; through the
+    reduction above (``test_gradients_through_the_reduction_at_the_edges``) it is
+    clean, and that is the route a likelihood takes."""
 
     def correction(lm, ne, pe, cap):
         return selection_log_correction(
@@ -411,7 +450,7 @@ def test_an_unknown_form_is_refused_everywhere(value):
 def test_replace_is_checked_too():
     events, injections = _stores()
     bound = bind_analysis(_analysis(), events=events, injections=injections)
-    assert bound.selection_mc_correction == "farr"
+    assert bound.selection_mc_correction == "none"
     with pytest.raises(ValueError, match="selection_mc_correction must be one of"):
         dataclasses.replace(bound, selection_mc_correction="Farr")
 
@@ -424,24 +463,31 @@ def _digest(semantic):
     return fingerprint_from_semantic(semantic)["digest"]
 
 
-def test_the_fingerprint_is_unchanged_at_the_default_and_differs_otherwise():
+def test_the_fingerprint_is_unchanged_under_farr_and_records_the_others():
+    """``"farr"`` records nothing, as every run before the default changed did,
+    so an explicit ``"farr"`` keeps their digests and a default run does not."""
     events, injections = _stores()
     analysis = _analysis()
     plain = bind_analysis(analysis, events=events, injections=injections)
-    explicit = bind_analysis(
+    farr = bind_analysis(
         analysis, events=events, injections=injections, selection_mc_correction="farr",
     )
-    assert likelihood_options_semantic(explicit) == {}
+    assert likelihood_options_semantic(farr) == {}
     assert likelihood_options_semantic({"selection_mc_correction": "farr"}) == {}
-    assert _digest(core_numerics_semantic(explicit)) == _digest(core_numerics_semantic(plain))
-    digests = {_digest(core_numerics_semantic(plain))}
-    for mode in OPT_IN:
+    assert likelihood_options_semantic(plain) == {"selection_mc_correction": "none"}
+    assert likelihood_options_semantic({}) == {"selection_mc_correction": "none"}
+    digests = {_digest(core_numerics_semantic(farr))}
+    for mode in NOT_FARR:
         bound = bind_analysis(
             analysis, events=events, injections=injections, selection_mc_correction=mode,
         )
         assert likelihood_options_semantic(bound) == {"selection_mc_correction": mode}
         digests.add(_digest(core_numerics_semantic(bound)))
     assert len(digests) == 3
+    none = bind_analysis(
+        analysis, events=events, injections=injections, selection_mc_correction="none",
+    )
+    assert _digest(core_numerics_semantic(plain)) == _digest(core_numerics_semantic(none))
 
 
 def test_a_target_fingerprint_records_the_form():
@@ -449,12 +495,28 @@ def test_a_target_fingerprint_records_the_form():
         return inference_target_semantic(target, sampler="dynesty", options={})
 
     default = block(_volume_target())
-    assert block(_volume_target(selection_mc_correction="farr")) == default
-    changed = block(_volume_target(selection_mc_correction="none"))
-    assert changed != default
-    assert changed["inference_target"]["provenance"]["likelihood_options"] == {
+    assert block(_volume_target(selection_mc_correction="none")) == default
+    assert default["inference_target"]["provenance"]["likelihood_options"] == {
         "selection_mc_correction": "none"
     }
+    farr = block(_volume_target(selection_mc_correction="farr"))
+    assert farr != default
+    assert farr["inference_target"]["provenance"]["likelihood_options"] == {}
+
+
+def test_a_target_checkpoint_of_the_old_default_is_refused_by_a_default_target(tmp_path):
+    def fingerprint(target):
+        return fingerprint_from_semantic(
+            inference_target_semantic(target, sampler="dynesty", options={})
+        )
+
+    old = fingerprint(_volume_target(selection_mc_correction="farr"))
+    save_run_fingerprint(str(tmp_path), old)
+    with pytest.raises(ResumeFingerprintError) as info:
+        check_resume_fingerprint(str(tmp_path), fingerprint(_volume_target()))
+    assert 'selection_mc_correction="farr"' in str(info.value)
+    again = fingerprint(_volume_target(selection_mc_correction="farr"))
+    assert check_resume_fingerprint(str(tmp_path), again)["digest"] == old["digest"]
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +535,7 @@ def _check_shifts(make_bound, theta):
     assert np.isfinite(base)
     neff = float(record.n_eff)
     assert np.isfinite(neff) and neff > 0.0
-    for mode in OPT_IN:
+    for mode in NOT_FARR:
         bound = make_bound(mode)
         assert bound.selection_mc_correction == mode
         assert float(bound(jnp.asarray(theta))) - base == pytest.approx(
@@ -546,8 +608,8 @@ def test_the_option_reaches_a_host_density_target():
     neff = float(farr.n_eff)
     assert np.isfinite(float(farr.log_likelihood))
     theta = jnp.asarray([0.0])
-    target_farr = _volume_target(max_likelihood_variance=MAX_VAR)
-    for mode in OPT_IN:
+    target_farr = _volume_target(max_likelihood_variance=MAX_VAR, selection_mc_correction="farr")
+    for mode in NOT_FARR:
         other = direct(mode)
         shift = _expected_shift(mode, 1, neff)
         assert float(other.log_likelihood) - float(farr.log_likelihood) == pytest.approx(
@@ -565,7 +627,7 @@ def test_ds_log_likelihood_takes_the_option_and_none_means_the_default():
     bound = ds.log_likelihood(
         analysis, events=events, injections=injections, max_likelihood_variance=1.0e6,
     )
-    assert bound.selection_mc_correction == "farr"
+    assert bound.selection_mc_correction == "none"
     bound = ds.log_likelihood(
         analysis, events=events, injections=injections, max_likelihood_variance=1.0e6,
         selection_mc_correction="heinzel_vitale",
@@ -580,7 +642,7 @@ def test_infer_refuses_the_option_for_a_target():
         infer(_volume_target(), sampler="dynesty", selection_mc_correction="farr")
 
 
-def test_the_guard_report_records_a_form_other_than_the_default():
+def test_the_guard_report_records_a_form_other_than_farr():
     from darksirens.inference.guard_report import guard_report
 
     events, injections = _stores()
