@@ -1689,6 +1689,46 @@ stays available, unchanged, as `selection_mc_correction="farr"`.
   is refused by a default run, with the fix named, and resumed by an explicit
   `"farr"`.
 
+### Selection stores without sky positions (a refusal at load moves to bind; no likelihood change)
+
+`load_injections` (`load_selection_store`) accepts a selection store with
+neither `ra` nor `dec`. LVK publishes the O1 and O2 rows of its cumulative
+O1-O4 injection mixture without sky positions, so gwcat exports that mixture
+without them (and records `sky_position_available=[False]`); core used to
+refuse it at load ("missing datasets: ra, dec") although a spectral analysis
+never reads them.
+
+- **Who can use it.** A spectral or bright-siren analysis with an isotropic
+  angular model: neither reads where an injection lies (every injection sits
+  in pixel 0, and the direction vectors are read only by an anisotropic
+  angular model). Its selection event carries `make_gw_event`'s zeros
+  placeholder for the directions.
+- **Who refuses it, at bind.** `bind_analysis` (and so `ds.infer`,
+  `ds.log_likelihood`, `make_catalog_mixture_target`) refuses the store for
+  every catalog analysis (incomplete, complete, field mixture) and every
+  anisotropic angular model, naming the missing datasets and what needs them
+  (`require_selection_sky` in `darksirens.gw.samples`). The tuple loader
+  `load_selection_samples`, which returns `ra` and `dec`, refuses it too.
+  `make_host_density_target` takes GW events its caller builds; a caller that
+  pixelises injections calls `require_selection_sky` first.
+- **Checks kept.** A PE store still requires `ra` and `dec`. A selection
+  store carries both or neither: one alone is refused at load, naming the
+  other, and so is a store that declares `sky_position_available` true for
+  every campaign but carries neither. A store that carries them is read and
+  checked exactly as before: finite values, ranges, and the refusal of
+  `sky_position_available=False` (NaN placeholder positions).
+- **Values.** No likelihood changes. A store with `ra` and `dec` binds the
+  same selection event, so every value is the one it was. A spectral or
+  bright-siren analysis gives bit-identical values on a store and on the same
+  store without its sky positions.
+- **Tests.** `tests/test_gw_store_contract.py` (loading with and without sky
+  positions, one alone, a contradicting declaration, the stored-position
+  checks, the PE store), `tests/test_runtime_binding.py` (the directions of a
+  store with sky positions; the bit-identical spectral value with and without
+  them, batched and not; the refusal by the incomplete, complete and field
+  catalog analyses and by the dipole) and `tests/test_public_bright.py` (the
+  bit-identical bright value).
+
 ## Review fixes (2026-10-20)
 
 A multi-agent review on 2026-10-20 confirmed 130 findings against this tree

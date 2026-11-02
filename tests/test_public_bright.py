@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -213,6 +215,27 @@ def test_bright_binding_matches_accepted_low_level_likelihood_exactly():
         pop_model=analysis.population.model_name,
     )
     actual = bound(theta)
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    assert np.isfinite(float(actual))
+
+
+def test_bright_binding_without_injection_sky_is_bit_identical():
+    # The bright selection term places every injection in pixel 0 and takes no
+    # angular model, so a selection store without ra and dec gives one value.
+    events, injections = _stores()
+    analysis = ds.model(
+        cosmology=ds.Cosmology(H0=(60.0, 80.0), Om0=0.3075),
+        population=_fixed_pop(),
+        counterparts=(_counterpart(events, sky_marginalized=True),),
+        counterpart_nside=1,
+    )
+    skyless = replace(
+        injections,
+        columns={k: v for k, v in injections.columns.items() if k not in ("ra", "dec")},
+    )
+    theta = np.array([67.74])
+    expected = bind_analysis(analysis, events=events, injections=injections)(theta)
+    actual = bind_analysis(analysis, events=events, injections=skyless)(theta)
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
     assert np.isfinite(float(actual))
 

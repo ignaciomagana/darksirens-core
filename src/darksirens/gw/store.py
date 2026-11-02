@@ -25,6 +25,9 @@ SKY_RANGES: dict[str, RangeSpec] = {
     "ra": RangeSpec(0.0, 2.0 * np.pi, hi_open=True),
     "dec": RangeSpec(-np.pi / 2.0, np.pi / 2.0),
 }
+#: The sky-position datasets. A PE store always carries both; a selection
+#: store carries both or neither (:func:`skyless_variant`).
+SKY_DATASETS = tuple(SKY_RANGES)
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ class StoreContract:
     nonnegative: tuple[str, ...] = ()
     ranges: Mapping[str, RangeSpec] = field(default_factory=dict)
     ordered_masses: tuple[tuple[str, str], ...] = ()
+    #: Whether the store carries sky positions (``ra``, ``dec``).
+    sky: bool = True
 
 
 _PE_CONTRACT = StoreContract(
@@ -111,6 +116,37 @@ def _component_variant(base: StoreContract) -> StoreContract:
         nonnegative=base.nonnegative,
         ranges={**base.ranges, **_COMPONENT_RANGES},
         ordered_masses=base.ordered_masses,
+        sky=base.sky,
+    )
+
+
+def skyless_variant(base: StoreContract) -> StoreContract:
+    """``base`` for a selection store that carries no sky positions.
+
+    LVK publishes some injection campaigns without sky positions (the O1 and
+    O2 rows of its cumulative O1-O4 mixture), and gwcat then exports neither
+    ``ra`` nor ``dec``. Every other dataset, attribute and check of ``base``
+    stays. ``sky_position_available`` is not a problem for such a store: it
+    has no placeholder positions to misuse. An analysis that reads injection
+    positions refuses the store when it binds
+    (:func:`darksirens.gw.samples.require_selection_sky`).
+    """
+    if base.kind != "selection":
+        raise ValueError(f"only a selection store may lack sky positions, not a {base.kind!r} store")
+
+    def keep(names):
+        return tuple(name for name in names if name not in SKY_DATASETS)
+
+    return StoreContract(
+        kind=base.kind,
+        datasets=keep(base.datasets),
+        attrs=base.attrs,
+        finite=keep(base.finite),
+        positive=keep(base.positive),
+        nonnegative=keep(base.nonnegative),
+        ranges={name: spec for name, spec in base.ranges.items() if name not in SKY_DATASETS},
+        ordered_masses=base.ordered_masses,
+        sky=False,
     )
 
 
@@ -415,7 +451,7 @@ def quality_problems(f: Any, contract: StoreContract) -> list[str]:
             problems.append(
                 f"dataset {secondary!r} exceeds {primary!r} in {n_bad} row(s) (largest q = {worst:.6g} > 1); the pairing models normalise p(q|m1) over q <= 1"
             )
-    sky_problem = sky_availability_problem(f.attrs)
+    sky_problem = sky_availability_problem(f.attrs) if contract.sky else None
     if sky_problem is not None:
         problems.append(sky_problem)
     return problems

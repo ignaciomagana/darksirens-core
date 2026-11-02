@@ -261,6 +261,26 @@ def _require_hdf5_members(f, datasets=(), attrs=(), conversion_hint=""):
         )
 
 
+def _selection_sky_contract(f, contract, path, conversion_hint=""):
+    """``contract``, or its skyless variant for a selection file with neither ``ra`` nor ``dec``.
+
+    A file carrying one of the two keeps the full contract, which names the
+    other as missing. A file carrying neither, but declaring every campaign's
+    sky positions available, contradicts itself and is refused.
+    """
+    if any(name in f for name in store_contract.SKY_DATASETS):
+        return contract
+    if "sky_position_available" in f.attrs:
+        available = np.atleast_1d(np.asarray(f.attrs["sky_position_available"])).astype(bool)
+        if available.all():
+            raise RuntimeError(
+                f"Selection file {path!r} declares sky_position_available="
+                f"{available.tolist()} but carries neither ra nor dec."
+                + (f" {conversion_hint}" if conversion_hint else "")
+            )
+    return store_contract.skyless_variant(contract)
+
+
 def _require_store_layout(f, contract, path, conversion_hint=""):
     problems = store_contract.count_problems(f.attrs, contract)
     if not problems:
@@ -501,7 +521,12 @@ def load_gw_samples(gw_path, fit_columns=None):
 
 
 def load_selection_store(file, allow_invalid_spin_swap=False, fit_columns=None) -> SelectionStore:
-    """Load and validate a standardized detected-injection store."""
+    """Load and validate a standardized detected-injection store.
+
+    The store may carry no sky positions (neither ``ra`` nor ``dec``); an
+    analysis that reads them refuses it when it binds
+    (:func:`require_selection_sky`).
+    """
     _require_x64("load_selection_store")
     conversion_hint = (
         "Use gwcat.SelectionSet.to_darksirens(...) or CombinedSelectionSet.to_darksirens(...)."
@@ -515,6 +540,9 @@ def load_selection_store(file, allow_invalid_spin_swap=False, fit_columns=None) 
         if basis == "chieff":
             _require_valid_spin_swap(f, file, allow_invalid=allow_invalid_spin_swap)
         contract = store_contract.contract_for(fmt, basis)
+        # Sky positions are optional here, and only here: a spectral analysis
+        # never reads them, and bind time refuses every analysis that does.
+        contract = _selection_sky_contract(f, contract, file, conversion_hint)
         _require_hdf5_members(f, contract.datasets, contract.attrs, conversion_hint)
         _require_store_layout(f, contract, file, conversion_hint)
         columns = store_contract.read_columns(f, contract)
@@ -579,12 +607,31 @@ def load_selection_store(file, allow_invalid_spin_swap=False, fit_columns=None) 
     )
 
 
+def require_selection_sky(injections: SelectionStore, use: str) -> None:
+    """Refuse a selection store without sky positions for a ``use`` that reads them.
+
+    A selection store may carry neither ``ra`` nor ``dec``
+    (:func:`darksirens.gw.store.skyless_variant`). Only an analysis that never
+    reads where an injection lies on the sky (a spectral or bright-siren
+    analysis with an isotropic angular model) can use it.
+    """
+    missing = [name for name in store_contract.SKY_DATASETS if name not in injections.columns]
+    if missing:
+        raise RuntimeError(
+            f"Selection file {injections.path!r} carries no injection sky positions "
+            f"(missing datasets: {', '.join(missing)}), but {use} needs them. Only a "
+            "spectral or bright-siren analysis with an isotropic angular model runs "
+            "without them; use an injection set with ra and dec."
+        )
+
+
 def load_selection_samples(file, allow_invalid_spin_swap=False, fit_columns=None):
     store = load_selection_store(
         file,
         allow_invalid_spin_swap=allow_invalid_spin_swap,
         fit_columns=fit_columns,
     )
+    require_selection_sky(store, "load_selection_samples (its tuple includes ra and dec)")
     return (
         jnp.array(store.columns["m1det"]),
         jnp.array(store.columns["m2det"]),
