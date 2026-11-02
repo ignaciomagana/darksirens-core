@@ -177,8 +177,11 @@ def register_ambient_jit_channel(resolve, bind):
     _AMBIENT_JIT_CHANNELS.append((resolve, bind))
 
 
-def threads_distance_table(**jit_kwargs):
-    """JIT a function with its distance table supplied as a true argument."""
+def threads_distance_table(jit=None, **jit_kwargs):
+    """JIT a function with its distance table supplied as a true argument.
+
+    ``jit`` is the transformation applied, ``jax.jit`` by default.
+    """
 
     def decorate(fn):
         signature = inspect.signature(fn)
@@ -196,7 +199,7 @@ def threads_distance_table(**jit_kwargs):
                     stack.enter_context(bind(value))
                 return fn(*args, **kwargs)
 
-        jitted = jax.jit(_bind_then_call, **jit_kwargs)
+        jitted = (jax.jit if jit is None else jit)(_bind_then_call, **jit_kwargs)
 
         @functools.wraps(fn)
         def public(*args, distance_table=None, **kwargs):
