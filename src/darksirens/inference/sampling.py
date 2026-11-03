@@ -19,7 +19,10 @@ def _checkpoint_plan(opts, method):
 
 
 def _nested_preflight(likelihood, prior_transform, ndims, opts):
-    from darksirens.inference.preflight import nested_sampler_preflight
+    from darksirens.inference.preflight import (
+        PREFLIGHT_MAX_DRAWS,
+        nested_sampler_preflight,
+    )
 
     return nested_sampler_preflight(
         likelihood,
@@ -28,6 +31,9 @@ def _nested_preflight(likelihood, prior_transform, ndims, opts):
         seed=int(getattr(opts, "seed", 0)),
         nlive=int(getattr(opts, "nlive", 0) or 0),
         enabled=getattr(opts, "sampler_preflight", "on") != "off",
+        max_draws=int(
+            getattr(opts, "sampler_preflight_max_draws", PREFLIGHT_MAX_DRAWS)
+        ),
     )
 
 
