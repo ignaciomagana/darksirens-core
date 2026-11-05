@@ -1689,6 +1689,52 @@ stays available, unchanged, as `selection_mc_correction="farr"`.
   is refused by a default run, with the fix named, and resumed by an explicit
   `"farr"`.
 
+### GWTC-5.0 Default BBH component-spin model (new preset, default unchanged)
+
+`gwtc5_bpl2peaks_component_spin` is GWTC-5.0's Default BBH model
+(arXiv:2605.27226 App. B): the mass and pairing model of
+`gwtc5_fiducial_bpl2peaks` (Eqs. B10-B14, Table 5), GWTC-5.0's component-spin
+model (Eqs. B15-B16, Table 6) and the same `(1+z)^(gamma-1)` rate law. It has
+20 parameters: the 14 mass and pairing ones, then `mu_chi`, `sigma_chi`, `mu_t`,
+`sigma_t`, `zeta`, then `gamma`.
+
+- **The spin model.** `component_spin.GWTC5DefaultSpinModel` (factory
+  `gwtc5_default_spin()`): magnitudes iid from a Gaussian truncated to [0, 1],
+  and one tilt mixture over the binary, `zeta N_[-1,1](c1 | mu_t, sigma_t)
+  N_[-1,1](c2 | mu_t, sigma_t) + (1 - zeta)/4`, with a free location `mu_t`.
+  Table 6 priors: `mu_chi` U(0, 1), `sigma_chi` U(0.005, 1), `mu_t` U(-1, 1),
+  `sigma_t` U(0.01, 4), `zeta` U(0, 1). Table 6 also lists `t_min`; Eq. B16
+  truncates at -1 and the release's Default runs carry no `t_min` column, so
+  the edge is fixed at -1. Normalised in closed form (`ndtr`), evaluated in log
+  space. In the LVK data release the five are `mu_chi`, `sigma_chi`, `mu_spin`,
+  `sigma_spin` and `xi_spin`. It differs from `ComponentSpinModel(...,
+  tilt_mixture="binary")` (the GWTC-3 Default model) in its magnitudes
+  (truncated Gaussians, not Beta) and its tilt location (free, not fixed at 1).
+- **The population model.** `GWTC5FiducialBPL2PeaksPopulationModel` takes a
+  `spin_component`, as `GWTC3PowerLawPeakPopulationModel` does, and its
+  `log_p_pop` a `spin=` block. A spin component with `consumes_spin_block`
+  multiplies the same mass and pairing product by its density, added in log
+  space, so the preset needs a component-basis gwcat pair (the basis gate
+  refuses a chi_eff store before the likelihood is built).
+- **Fiducial.** The medians of the release run `gwtc5_updated_default_mmax`
+  for every entry: the mass, pairing and gamma values of
+  `gwtc5_fiducial_bpl2peaks` unchanged, and mu_chi 0.0633, sigma_chi 0.3654,
+  mu_t 0.3193, sigma_t 1.1092, zeta 0.6706 (the run's own spin model, so its
+  medians apply, unlike the chi_eff preset's).
+- **`gwtc5_fiducial_bpl2peaks` is unchanged.** The spin branch is chosen in
+  Python when the likelihood is traced, with no new operation on the chi_eff
+  path. `tests/test_gwtc5_component_spin.py` compares the traced program
+  (`jax.make_jaxpr`) and the values, bit for bit, with a copy of that
+  model's `log_p_pop` at 16289ef, with and without the pairing state, jitted
+  and not; and pins its labels, bounds and fiducial.
+- **Checks.** The same file checks the spin density against scipy's
+  `truncnorm` (to 1e-9 relative at the Table 6 edges and 64 draws inside), its
+  normalisation by quadrature (to 1e-9), the preset's parameter table and
+  fiducial, and that its mass, pairing and rate part is the chi_eff model's.
+  `test_runtime_binding` and `test_spectral_likelihood` run it through the
+  basis gate and the spectral likelihood. No legacy counterpart: the frozen
+  reference has no such model.
+
 ## Review fixes (2026-10-20)
 
 A multi-agent review on 2026-10-20 confirmed 130 findings against this tree

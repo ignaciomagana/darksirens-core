@@ -20,13 +20,18 @@ against 0.072), so its ``zeta_spin`` and ``sigma_t`` are not the published
 model's.
 
 Everything is normalised ANALYTICALLY -- the Beta by ``betaln``, the
-truncated Gaussian by ``erf`` -- so no new quadrature enters the likelihood:
+truncated Gaussians by ``erf`` or ``ndtr`` -- so no new quadrature enters the likelihood:
 the existing 1-D ``SpinModel`` machinery integrates its chi_eff density over
 ``CHI_GRID`` per proposal, and a 4-D grid twin of that would be the exact
 cost this design avoids.
 
-The model consumes the event's ``spin`` block (``GWEvent.spin``, columns
-``(a1, a2, cost1, cost2)``) and IGNORES ``chieff``: chi_eff is a deterministic
+:class:`GWTC5DefaultSpinModel` is GWTC-5.0's Default BBH component-spin model
+(arXiv:2605.27226 Eqs. B15-B16, Table 6): iid magnitudes from a Gaussian
+truncated to [0, 1], and the binary tilt mixture above with a FREE location
+``mu_t`` for the Gaussian, ``zeta N_[-1,1](c1) N_[-1,1](c2) + (1 - zeta)/4``.
+
+The models consume the event's ``spin`` block (``GWEvent.spin``, columns
+``(a1, a2, cost1, cost2)``) and IGNORE ``chieff``: chi_eff is a deterministic
 function of the component spins and q, so a density over the components
 already fixes its distribution, and multiplying by an extra chi_eff factor
 would double-count.  It therefore only makes sense against a
@@ -42,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import jax.numpy as jnp
-from jax.scipy.special import betaln, erf
+from jax.scipy.special import betaln, erf, ndtr
 
 from .base import ParamSpec, SpinModel
 
@@ -54,6 +59,7 @@ TILT_MIXTURES = ("per_spin", "binary")
 
 _SQRT_HALF_PI = 1.2533141373155003  # sqrt(pi/2)
 _SQRT2 = 1.4142135623730951
+_LOG_SQRT_2PI = 0.9189385332046727  # log(sqrt(2 pi))
 
 
 @dataclass
@@ -208,4 +214,126 @@ def default_component_spin(tilt_mixture: str = "per_spin") -> ComponentSpinModel
         ParamSpec(r"$\zeta_{\rm spin}$", 0.0, 1.0, name="zeta_spin"),
         ParamSpec(r"$\sigma_t$", 0.1, 4.0, name="sigma_t"),
         tilt_mixture=tilt_mixture,
+    )
+
+
+def _log_truncnorm(x, mu, sigma, lo, hi):
+    """``log N_[lo, hi](x | mu, sigma)``, normalised by ``ndtr``; -inf outside ``[lo, hi]``."""
+    z = (x - mu) / sigma
+    norm = ndtr((hi - mu) / sigma) - ndtr((lo - mu) / sigma)
+    lp = -0.5 * z * z - _LOG_SQRT_2PI - jnp.log(sigma) - jnp.log(norm)
+    return jnp.where((x >= lo) & (x <= hi), lp, -jnp.inf)
+
+
+@dataclass
+class GWTC5DefaultSpinModel(SpinModel):
+    r"""GWTC-5.0 Default BBH component-spin model (arXiv:2605.27226 Eqs. B15-B16, Table 6).
+
+    Magnitudes iid from a Gaussian truncated to [0, 1] (Eq. B15)::
+
+        pi(chi_1, chi_2) = N_[0,1](chi_1 | mu_chi, sigma_chi) N_[0,1](chi_2 | mu_chi, sigma_chi)
+
+    and the cosines of the tilts from one mixture over the binary (Eq. B16)::
+
+        pi(c1, c2) = zeta N_[-1,1](c1 | mu_t, sigma_t) N_[-1,1](c2 | mu_t, sigma_t) + (1 - zeta) / 4
+
+    Parameters (in ``theta`` order, Table 6 priors in :func:`gwtc5_default_spin`): ``mu_chi``, ``sigma_chi``,
+    ``mu_t``, ``sigma_t``, ``zeta``.  In the LVK data release (``iid_spin_magnitude_gaussian`` x
+    ``iid_spin_orientation``) they are the columns ``mu_chi``, ``sigma_chi``, ``mu_spin``, ``sigma_spin`` and
+    ``xi_spin``; the magnitude ceiling is the release's ``amax`` = 1.
+
+    Two differences from :class:`ComponentSpinModel` with ``tilt_mixture="binary"`` (the GWTC-3 Default model):
+    the magnitudes are truncated Gaussians, not Beta distributions, and the tilt Gaussian has a free location
+    ``mu_t`` in place of a peak fixed at cos t = 1.  Table 6 also lists ``t_min``, the lower edge of the cos t
+    distribution; Eq. B16 truncates at -1 and the release's Default runs carry no ``t_min`` column, so the edge is
+    fixed at -1 here.
+
+    Every factor is normalised in closed form (``ndtr``) and evaluated in log space, so ``_norm`` is 1 and no
+    quadrature enters the likelihood.  Like :class:`ComponentSpinModel` it consumes the (N, 4) spin block and needs
+    a component-basis store.
+    """
+
+    mu_chi_spec: ParamSpec
+    sigma_chi_spec: ParamSpec
+    mu_t_spec: ParamSpec
+    sigma_t_spec: ParamSpec
+    zeta_spec: ParamSpec
+
+    #: Population models dispatch on this: True means __call__ requires the
+    #: event spin block and the paired store must be component-basis.
+    consumes_spin_block = True
+    spin_columns = COMPONENT_SPIN_COLUMNS
+    #: Support of each magnitude (Eq. B15; the release's ``amax``).
+    a_max = 1.0
+
+    @property
+    def param_specs(self):
+        return [
+            self.mu_chi_spec,
+            self.sigma_chi_spec,
+            self.mu_t_spec,
+            self.sigma_t_spec,
+            self.zeta_spec,
+        ]
+
+    # -- analytic pieces ---------------------------------------------------
+    @classmethod
+    def _log_p_magnitude(cls, a, mu_chi, sigma_chi):
+        """``log N_[0, a_max](a | mu_chi, sigma_chi)``; -inf outside ``[0, a_max]``."""
+        return _log_truncnorm(a, mu_chi, sigma_chi, 0.0, cls.a_max)
+
+    @staticmethod
+    def _log_p_tilt_binary(c1, c2, mu_t, sigma_t, zeta):
+        """log of Eq. B16 on [-1, 1]^2; -inf outside."""
+        gauss = _log_truncnorm(c1, mu_t, sigma_t, -1.0, 1.0) + _log_truncnorm(c2, mu_t, sigma_t, -1.0, 1.0)
+        inside = (c1 >= -1.0) & (c1 <= 1.0) & (c2 >= -1.0) & (c2 <= 1.0)
+        iso = jnp.where(inside, -jnp.log(4.0), -jnp.inf)
+        return jnp.logaddexp(jnp.log(zeta) + gauss, jnp.log1p(-zeta) + iso)
+
+    def log_prob(self, spin, theta):
+        """Normalised log density of the (..., 4) spin block ``(a1, a2, cost1, cost2)``."""
+        mu_chi, sigma_chi, mu_t, sigma_t, zeta = theta[0], theta[1], theta[2], theta[3], theta[4]
+        magnitudes = (
+            self._log_p_magnitude(spin[..., 0], mu_chi, sigma_chi)
+            + self._log_p_magnitude(spin[..., 1], mu_chi, sigma_chi)
+        )
+        return magnitudes + self._log_p_tilt_binary(spin[..., 2], spin[..., 3], mu_t, sigma_t, zeta)
+
+    # -- SpinModel interface -----------------------------------------------
+    def _eval_unnorm(self, chieff, theta):
+        raise TypeError(
+            "GWTC5DefaultSpinModel has no 1-D chi_eff density: it is a 4-D "
+            "density over (a1, a2, cost1, cost2), and its chi_eff marginal "
+            "is not analytic. Evaluate log_prob(spin, theta), or use a "
+            "chi_eff SpinModel with a chieff-basis store."
+        )
+
+    def _norm(self, theta):
+        # Analytically normalised (see the class docstring).
+        return jnp.asarray(1.0)
+
+    def __call__(self, chieff, theta, norm=None, spin=None):
+        if spin is None:
+            raise TypeError(
+                "GWTC5DefaultSpinModel requires the event spin block "
+                "(a1, a2, cost1, cost2): the paired gwcat store must be "
+                "exported in the component spin basis. chieff-basis stores "
+                "carry no component columns; use a chi_eff spin model with "
+                "them instead."
+            )
+        return jnp.exp(self.log_prob(spin, theta))
+
+
+def gwtc5_default_spin() -> GWTC5DefaultSpinModel:
+    """GWTC-5.0's Default BBH spin block with its Table 6 priors.
+
+    ``mu_chi ~ U(0, 1)``, ``sigma_chi ~ U(0.005, 1)``, ``mu_t ~ U(-1, 1)``, ``sigma_t ~ U(0.01, 4)``,
+    ``zeta ~ U(0, 1)``; the lower tilt edge is fixed at -1 (see :class:`GWTC5DefaultSpinModel`).
+    """
+    return GWTC5DefaultSpinModel(
+        ParamSpec(r"$\mu_\chi$", 0.0, 1.0, name="mu_chi"),
+        ParamSpec(r"$\sigma_\chi$", 0.005, 1.0, name="sigma_chi"),
+        ParamSpec(r"$\mu_t$", -1.0, 1.0, name="mu_t"),
+        ParamSpec(r"$\sigma_t$", 0.01, 4.0, name="sigma_t"),
+        ParamSpec(r"$\zeta$", 0.0, 1.0, name="zeta"),
     )

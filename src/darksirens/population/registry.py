@@ -595,6 +595,45 @@ register_model(
     spin_component=_component_spin_default()))
 
 
+def _gwtc5_default_spin():
+    from .component_spin import gwtc5_default_spin
+
+    return gwtc5_default_spin()
+
+
+register_model(
+    "gwtc5_bpl2peaks_component_spin",
+    latex=r"\text{GWTC-5 BPL+2G, Default BBH spin}",
+    # GWTC-5.0's Default BBH model (arXiv:2605.27226 App. B): the mass and
+    # pairing model of gwtc5_fiducial_bpl2peaks (Eqs. B10-B14, Table 5), the
+    # component-spin model of Eqs. B15-B16 with the Table 6 priors
+    # (GWTC5DefaultSpinModel), and the same (1+z)^(gamma-1) rate law.
+    #
+    # Ordering: the 14 mass and pairing parameters as in
+    # gwtc5_fiducial_bpl2peaks, then mu_chi, sigma_chi, mu_t, sigma_t, zeta,
+    # then gamma (20 parameters).
+    #
+    # Fiducial: marginal posterior MEDIANS of the LVK GWTC-5.0 data release
+    # run ``gwtc5_updated_default_mmax`` (8200 samples), the run the
+    # gwtc5_fiducial_bpl2peaks entry takes its mass, pairing and gamma values
+    # from, which are repeated here unchanged.  The spin entries are that run's
+    # mu_chi 0.0633, sigma_chi 0.3654, mu_spin 0.3193, sigma_spin 1.1092 and
+    # xi_spin 0.6706: this model is the release run's own spin model, so its
+    # medians carry over, unlike the chi_eff preset's (see the note there).
+    #
+    # This preset requires a COMPONENT-basis gwcat pair: its spin model
+    # consumes GWEvent.spin = (a1, a2, cost1, cost2) and raises against a
+    # chieff-basis store (basis negotiation, DS-09, refuses the pairing
+    # before the likelihood is ever built).
+    fiducial=(
+        1.4816, 5.4187, 37.451, 9.9109, 0.7841, 32.3273, 5.7263,
+        4.4856, 3.5302, 0.4004, 0.5457, 1.0438, 3.4633,
+        4.8128, 0.0633, 0.3654, 0.3193, 1.1092, 0.6706, 2.5439,
+    ),
+)(lambda: GWTC5FiducialBPL2PeaksPopulationModel(
+    spin_component=_gwtc5_default_spin()))
+
+
 # ============================================================
 # 3b. Gaussian-process model family (true-GP prior, mixture-decoupled)
 # ============================================================

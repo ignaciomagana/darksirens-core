@@ -120,6 +120,16 @@ def test_required_fit_columns_and_basis_guard():
     with pytest.raises(RuntimeError, match="selected population requires"):
         bind_analysis(component, events=events, injections=injections)
 
+    gwtc5 = model(
+        cosmology=Cosmology(H0=67.74),
+        population=Population("gwtc5_bpl2peaks_component_spin", fixed=True),
+    )
+    assert required_fit_columns(gwtc5) == (
+        "m1det", "q", "dL", "a1", "a2", "cost1", "cost2"
+    )
+    with pytest.raises(RuntimeError, match="selected population requires"):
+        bind_analysis(gwtc5, events=events, injections=injections)
+
 
 def test_spectral_binding_matches_direct_fixed_theta_exactly():
     events, injections = _stores()
