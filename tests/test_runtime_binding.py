@@ -409,6 +409,71 @@ def test_binding_is_quiet_when_the_pair_cosmologies_agree():
         bind_analysis(_spectral(), events=events, injections=injections)
 
 
+def _skyless(injections):
+    columns = {k: v for k, v in injections.columns.items() if k not in ("ra", "dec")}
+    return replace(injections, columns=columns)
+
+
+def test_selection_store_with_sky_binds_its_directions():
+    # A store that carries ra and dec binds as before: the selection event's
+    # direction vectors are the unit vectors of its positions.
+    events, injections = _stores()
+    bound = bind_analysis(_spectral(), events=events, injections=injections)
+    ra, dec = injections.columns["ra"], injections.columns["dec"]
+    cos_dec = np.cos(dec)
+    for got, want in zip(
+        (bound.gw_selection.nx, bound.gw_selection.ny, bound.gw_selection.nz),
+        (cos_dec * np.cos(ra), cos_dec * np.sin(ra), np.sin(dec)),
+    ):
+        np.testing.assert_array_equal(np.asarray(got), want)
+
+
+@pytest.mark.parametrize("sel_batch_size", [None, 48])
+def test_spectral_binding_without_injection_sky_is_bit_identical(sel_batch_size):
+    events, injections = _stores()
+    analysis = _spectral()
+    theta = np.array([67.74])
+    expected = bind_analysis(
+        analysis, events=events, injections=injections, sel_batch_size=sel_batch_size
+    )(theta)
+    bound = bind_analysis(
+        analysis, events=events, injections=_skyless(injections), sel_batch_size=sel_batch_size
+    )
+    for name in ("nx", "ny", "nz"):
+        np.testing.assert_array_equal(np.asarray(getattr(bound.gw_selection, name)), 0.0)
+    actual = bound(theta)
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    assert np.isfinite(float(actual))
+
+
+@pytest.mark.parametrize(
+    "options, use",
+    [
+        (dict(catalog=True), r"a catalog analysis \(IncompleteCatalogRedshift\)"),
+        (dict(catalog=True, completeness="complete"), r"a catalog analysis \(CompleteCatalogRedshift\)"),
+        (
+            dict(catalog=True, catalog_sky_weighting="field"),
+            r"a catalog analysis \(FieldCatalogMixtureRedshift\)",
+        ),
+        (dict(angular="dipole"), r"the angular model 'dipole'"),
+    ],
+)
+def test_analyses_reading_injection_sky_refuse_a_store_without_it(options, use):
+    events, injections = _stores()
+    if options.pop("catalog", False):
+        options["catalog"] = _catalog()
+    analysis = model(
+        cosmology=Cosmology(H0=(60.0, 80.0), Om0=0.3075), population=_fixed_pop(), **options
+    )
+    with pytest.raises(RuntimeError, match=r"\(missing datasets: ra, dec\), but " + use):
+        bind_analysis(analysis, events=events, injections=_skyless(injections))
+    one_missing = replace(
+        injections, columns={k: v for k, v in injections.columns.items() if k != "dec"}
+    )
+    with pytest.raises(RuntimeError, match=r"\(missing datasets: dec\), but " + use):
+        bind_analysis(analysis, events=events, injections=one_missing)
+
+
 def test_binding_rejects_wrong_theta_shape():
     events, injections = _stores()
     analysis = model(

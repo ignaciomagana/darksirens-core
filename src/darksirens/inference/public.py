@@ -16,6 +16,7 @@ import time
 import warnings
 from types import SimpleNamespace
 
+from darksirens.inference.preflight import PREFLIGHT_MAX_DRAWS
 from darksirens.inference.target import InferenceTarget
 
 
@@ -32,6 +33,9 @@ _SAMPLER_DEFAULTS = {
     "seed": 0,
     "show_progress": True,
     "sampler_preflight": "on",
+    # The nested preflight's ceiling on prior draws when its first 32 are all
+    # -inf (32 is the frozen legacy probe, which refuses there).
+    "sampler_preflight_max_draws": PREFLIGHT_MAX_DRAWS,
     "prior_transform_dispatch": "auto",
     # Shared checkpoint planning consumes these already-resolved mirrors.
     # Public inference does not invent a run directory or persistence policy.

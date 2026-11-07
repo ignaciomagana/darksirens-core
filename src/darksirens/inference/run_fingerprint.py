@@ -659,6 +659,7 @@ _NON_SEMANTIC_SAMPLER_OPTIONS = frozenset({
     "dynesty_diagnostics",
     "preflight_only",
     "sampler_preflight",
+    "sampler_preflight_max_draws",
     "tinyns_resolved_config",
     "run_fingerprint_digest",
     "resume_forced_mismatch",
