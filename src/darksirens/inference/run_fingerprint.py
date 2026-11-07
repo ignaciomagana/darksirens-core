@@ -373,7 +373,7 @@ def likelihood_options_semantic(source) -> dict:
     it has always had.
     """
 
-    from darksirens.selection.gw import (
+    from darksirens._selection_forms import (
         DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         DEFAULT_SELECTION_MC_CORRECTION,
         FARR_SELECTION_MC_CORRECTION,
@@ -439,7 +439,7 @@ def stated_likelihood_options(source) -> dict:
     it; it never enters a fingerprint.
     """
 
-    from darksirens.selection.gw import (
+    from darksirens._selection_forms import (
         DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         DEFAULT_SELECTION_MC_CORRECTION,
         check_selection_mc_correction,
