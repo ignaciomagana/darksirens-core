@@ -7,6 +7,7 @@ import os
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 from jax.scipy.special import logsumexp
@@ -15,6 +16,14 @@ from ..cosmology._grid import zMax as _ZMAX_GRID
 from .base import ParamSpec, pack_specs
 
 _FIELD_CLIP = 10.0
+
+# Default log prior bounds of the GP amplitude and length scales. They are
+# evaluated with jnp.log (the historical values) under ensure_compile_time_eval,
+# so importing this module inside a jit trace still gives plain floats.
+with jax.ensure_compile_time_eval():
+    _LOG_AMP_BOUNDS = (float(jnp.log(0.1)), float(jnp.log(3.0)))
+    _LOG_LS_SPHERE_BOUNDS = (float(jnp.log(0.15)), float(jnp.log(2.0)))
+    _LOG_LS_Z_BOUNDS = (float(jnp.log(0.05)), float(jnp.log(2.0)))
 _JITTER_REL = 1e-4
 _JITTER_ABS = 1e-9
 _SPHERE_NQ = 1536
@@ -76,14 +85,8 @@ class SphereGPAngular:
         self,
         n_inducing: int = 48,
         n_quad: int = _SPHERE_NQ,
-        log_amp_bounds: tuple[float, float] = (
-            float(jnp.log(0.1)),
-            float(jnp.log(3.0)),
-        ),
-        log_ls_bounds: tuple[float, float] = (
-            float(jnp.log(0.15)),
-            float(jnp.log(2.0)),
-        ),
+        log_amp_bounds: tuple[float, float] = _LOG_AMP_BOUNDS,
+        log_ls_bounds: tuple[float, float] = _LOG_LS_SPHERE_BOUNDS,
     ):
         self._M = int(n_inducing)
         self._Z = _fibonacci_sphere(self._M)
@@ -153,18 +156,9 @@ class _SphereZGPAngularBase:
         n_inducing_z: int = 6,
         n_quad: int = _SPHERE_NQ,
         z_node_hi: float | None = None,
-        log_amp_bounds: tuple[float, float] = (
-            float(jnp.log(0.1)),
-            float(jnp.log(3.0)),
-        ),
-        log_ls_sphere_bounds: tuple[float, float] = (
-            float(jnp.log(0.15)),
-            float(jnp.log(2.0)),
-        ),
-        log_ls_z_bounds: tuple[float, float] = (
-            float(jnp.log(0.05)),
-            float(jnp.log(2.0)),
-        ),
+        log_amp_bounds: tuple[float, float] = _LOG_AMP_BOUNDS,
+        log_ls_sphere_bounds: tuple[float, float] = _LOG_LS_SPHERE_BOUNDS,
+        log_ls_z_bounds: tuple[float, float] = _LOG_LS_Z_BOUNDS,
         znorm_per_ls: float | None = None,
     ):
         # None: the import-latched defaults (_Z_NODE_HI, _ZNORM_PER_LS), which

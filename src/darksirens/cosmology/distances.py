@@ -52,10 +52,14 @@ waPriorUpper = _support.WA_PRIOR_UPPER
 _ZGRID_NODES = max(500, int(round(500 * np.log(zMax + 1.0) / np.log(6.0))))
 _zgrid_numpy = np.expm1(np.linspace(np.log(1), np.log(zMax + 1), _ZGRID_NODES))
 
-Om0grid = jnp.linspace(_support.OM0_GRID_LOWER, _support.OM0_GRID_UPPER, 21)
-w0grid = jnp.linspace(_support.W0_GRID_LOWER, _support.W0_GRID_UPPER, 41)
-wagrid = jnp.linspace(_support.WA_GRID_LOWER, _support.WA_GRID_UPPER, 31)
-zgrid = jnp.array(_zgrid_numpy)
+# Every module-level JAX array here is built under ensure_compile_time_eval, so
+# a first import inside a jit trace yields concrete arrays, not leaked tracers
+# (same values as plain eager construction).
+with jax.ensure_compile_time_eval():
+    Om0grid = jnp.linspace(_support.OM0_GRID_LOWER, _support.OM0_GRID_UPPER, 21)
+    w0grid = jnp.linspace(_support.W0_GRID_LOWER, _support.W0_GRID_UPPER, 41)
+    wagrid = jnp.linspace(_support.WA_GRID_LOWER, _support.WA_GRID_UPPER, 31)
+    zgrid = jnp.array(_zgrid_numpy)
 
 
 def _check_support_constants():
@@ -71,6 +75,8 @@ def _check_support_constants():
     ), "_cosmology_support fiducials drifted from cosmology.parameters"
     for name, grid in (("Om0", Om0grid), ("w0", w0grid), ("wa", wagrid)):
         lower, upper = _support.GRID_SUPPORT[name]
+        # Read through numpy: jnp indexing would be staged inside a jit trace.
+        grid = np.asarray(grid)
         assert float(grid[0]) == lower and float(grid[-1]) == upper, (
             f"{name} grid endpoints drifted from _cosmology_support"
         )
@@ -144,7 +150,8 @@ def _low_z_hermite_correction(r_lin, z):
     return jnp.where((z > 0.0) & (z < _Z_FIRST_NODE), corrected, r_lin)
 
 
-rs = jnp.asarray(_build_cpl_distance_grid())
+with jax.ensure_compile_time_eval():
+    rs = jnp.asarray(_build_cpl_distance_grid())
 
 _ACTIVE_DISTANCE_TABLE = contextvars.ContextVar(
     "darksirens_active_distance_table", default=None

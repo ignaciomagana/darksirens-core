@@ -90,7 +90,10 @@ def _build_smoothing_operator() -> jnp.ndarray:
     mass = np.maximum(_truncated_kernel_mass_np(z, SIGMA_SMOOTH), 1.0e-300)
     pdf = np.exp(-0.5 * ((z[:, None] - z[None, :]) / SIGMA_SMOOTH) ** 2)
     pdf /= _SQRT2PI * SIGMA_SMOOTH
-    return jnp.asarray((pdf / mass[None, :]) * _TRAPW_NP[None, :])
+    # Concrete even when this module is first imported inside a jit trace (a
+    # staged jnp.asarray would leave a leaked tracer in _S_EXP).
+    with jax.ensure_compile_time_eval():
+        return jnp.asarray((pdf / mass[None, :]) * _TRAPW_NP[None, :])
 
 
 _S_EXP = _build_smoothing_operator()
