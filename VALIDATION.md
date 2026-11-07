@@ -286,7 +286,10 @@ What each gate now checks:
   branches are not covered by this probe.
 - The nested-preflight comparison is word for word except for a documented
   table (`LEGACY_REMEDY_MAP` in `tools/probe_nested_sampler_preflight.py`) that
-  maps the old command-line advice to the `infer` keywords.
+  maps the old command-line advice to the `infer` keywords. Since the probe
+  draws past its first 32 draws by default (MIGRATION.md, "Nested-sampler
+  preflight draws past 32 before refusing"), the candidate runs at the legacy
+  setting `max_draws == n_probe`; the probe without that setting fails it.
 - The fingerprint parity check in `phase6-inference-io.yml` allows exactly the
   schema change from 3 to 4 and the reworded schema-mismatch line; every other
   part of the probe output, including the plain-JSON digests, must match.

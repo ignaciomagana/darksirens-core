@@ -517,9 +517,12 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   fingerprinted: it warns, when no `run_fingerprint.json` lies beside the
   checkpoint, that nothing checked its settings, and goes ahead.
 - `infer(..., sampler_preflight="on"|"off")` is a sampler option (default
-  `"on"`). On a fresh TinyNS or Dynesty run it draws a few prior samples and
-  raises when none has a finite likelihood (and warns when very few do);
-  `"off"` skips it. When the check fails or warns, its advice names `infer`
+  `"on"`). On a fresh TinyNS or Dynesty run it draws 32 prior samples and,
+  when none has a finite likelihood, draws on in doubling batches up to
+  `sampler_preflight_max_draws` (default 4096; 32 is the frozen legacy check).
+  It raises only when none of them is finite, giving the number drawn, and
+  warns when few are finite, with the draws needed to seed `nlive`; `"off"`
+  skips it. When the check fails or warns, its advice names `infer`
   keywords, not command-line flags.
 - Ordinary `infer` results carry `log_prior_volume_fraction` and, for a finite
   `logZ`, `logZ_corrected = logZ - log_prior_volume_fraction`. The raw `logZ`

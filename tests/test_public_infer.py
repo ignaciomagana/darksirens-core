@@ -118,6 +118,7 @@ def test_infer_delegates_exact_parameter_plan_and_sampler_options(monkeypatch):
     assert opts.seed == 12
     assert opts.show_progress is True
     assert opts.sampler_preflight == "on"
+    assert opts.sampler_preflight_max_draws == 4096
     assert opts.prior_transform_dispatch == "auto"
     assert opts.checkpoint_interval_seconds == 0.0
     assert opts.checkpoint_file_resolved is None
@@ -212,6 +213,7 @@ def test_sampler_keywords_override_only_their_existing_option_fields(monkeypatch
         max_samples=400,
         show_progress=False,
         sampler_preflight="off",
+        sampler_preflight_max_draws=32,
         prior_transform_dispatch="python",
         tinyns_walks=9,
         checkpoint_interval_seconds=15.0,
@@ -226,6 +228,7 @@ def test_sampler_keywords_override_only_their_existing_option_fields(monkeypatch
     assert opts.max_samples == 400
     assert opts.show_progress is False
     assert opts.sampler_preflight == "off"
+    assert opts.sampler_preflight_max_draws == 32
     assert opts.prior_transform_dispatch == "python"
     assert opts.tinyns_walks == 9
     assert opts.checkpoint_interval_seconds == 15.0
