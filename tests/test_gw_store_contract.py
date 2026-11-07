@@ -178,6 +178,86 @@ def test_singleton_column_cannot_broadcast(tmp_path):
         load_gw_store(pe)
 
 
+def _drop_sky(path, *names, available=None):
+    with h5py.File(path, "a") as f:
+        for name in names:
+            del f[name]
+        if available is not None:
+            f.attrs["sky_position_available"] = np.array(available)
+
+
+def test_selection_without_sky_positions_loads(tmp_path):
+    # LVK publishes the O1 and O2 injections of its cumulative mixture without
+    # sky positions; gwcat then exports neither ra nor dec, and says so.
+    path = tmp_path / "skyless.h5"
+    write_sel(path, basis="chieff_reference")
+    _drop_sky(path, "ra", "dec", available=[False])
+    store = load_selection_store(path)
+    assert "ra" not in store.columns and "dec" not in store.columns
+    for name in ("m1det", "m2det", "dL", "chieff", "m1src", "m2src"):
+        np.testing.assert_array_equal(store.columns[name], SEL[name])
+    np.testing.assert_array_equal(store.prior_wt, SEL["pdraw"])
+    assert store.n_injections == NSEL
+
+
+def test_selection_with_sky_positions_loads_them(tmp_path):
+    path = tmp_path / "sky.h5"
+    write_sel(path)
+    _drop_sky(path, available=[True])
+    store = load_selection_store(path)
+    for name, values in SEL.items():
+        np.testing.assert_array_equal(store.columns[name], values)
+
+
+def test_selection_sky_positions_are_both_or_neither(tmp_path):
+    half = tmp_path / "half.h5"
+    write_sel(half)
+    _drop_sky(half, "dec")
+    with pytest.raises(RuntimeError, match=r"missing datasets: dec\."):
+        load_selection_store(half)
+
+    declared = tmp_path / "declared.h5"
+    write_sel(declared)
+    _drop_sky(declared, "ra", "dec", available=[True])
+    with pytest.raises(RuntimeError, match=r"sky_position_available=\[True\] but carries neither ra nor dec"):
+        load_selection_store(declared)
+
+
+def test_selection_sky_checks_still_apply_to_stored_positions(tmp_path):
+    placeholders = tmp_path / "placeholders.h5"
+    write_sel(placeholders)
+    with h5py.File(placeholders, "a") as f:
+        f["ra"][0] = np.nan
+        f["dec"][0] = np.nan
+        f.attrs["sky_position_available"] = np.array([True, False])
+    with pytest.raises(RuntimeError, match="non-finite") as excinfo:
+        load_selection_store(placeholders)
+    assert "sky_position_available=[True, False]" in str(excinfo.value)
+
+    out_of_range = tmp_path / "range.h5"
+    write_sel(out_of_range)
+    with h5py.File(out_of_range, "a") as f:
+        f["dec"][0] = 2.0
+    with pytest.raises(RuntimeError, match="'dec' contains 1 values outside"):
+        load_selection_store(out_of_range)
+
+
+def test_pe_store_still_requires_sky_positions(tmp_path):
+    path = tmp_path / "pe_skyless.h5"
+    write_pe(path)
+    _drop_sky(path, "ra", "dec")
+    with pytest.raises(RuntimeError, match="missing datasets: ra, dec"):
+        load_gw_store(path)
+
+
+def test_tuple_loader_refuses_a_skyless_selection_store(tmp_path):
+    path = tmp_path / "skyless_tuple.h5"
+    write_sel(path)
+    _drop_sky(path, "ra", "dec", available=[False])
+    with pytest.raises(RuntimeError, match=r"missing datasets: ra, dec\), but load_selection_samples"):
+        gw_samples.load_selection_samples(path)
+
+
 def test_ndraw_must_cover_detected_rows(tmp_path):
     path = tmp_path / "ndraw.h5"
     write_sel(path)

@@ -121,6 +121,9 @@ def _load(implementation):
 
     from darksirens.inference.preflight import nested_sampler_preflight
 
+    # The frozen probe stops at n_probe draws. Core's default draws on, up to
+    # max_draws, when those are all -inf, so the candidate runs at the legacy
+    # setting max_draws == n_probe (infer's sampler_preflight_max_draws=32).
     def invoke(likelihood, prior_transform, ndims, *, seed, nlive, enabled, n_probe):
         return nested_sampler_preflight(
             likelihood,
@@ -130,6 +133,7 @@ def _load(implementation):
             nlive=nlive,
             enabled=enabled,
             n_probe=n_probe,
+            max_draws=n_probe,
         )
 
     return invoke

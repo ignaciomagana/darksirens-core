@@ -52,8 +52,12 @@ from darksirens.catalog.types import (
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
 from darksirens.gw.runtime import make_gw_event
-from darksirens.gw.samples import require_matching_contract, warn_pair_cosmology
-from darksirens.gw.store import COMPONENT_SPIN_DATASETS
+from darksirens.gw.samples import (
+    require_matching_contract,
+    require_selection_sky,
+    warn_pair_cosmology,
+)
+from darksirens.gw.store import COMPONENT_SPIN_DATASETS, SKY_DATASETS
 from darksirens.gw.types import GWEvent, GWStore, SelectionStore
 from darksirens.likelihood.hierarchical import (
     bright_siren_log_likelihood,
@@ -193,8 +197,25 @@ def _bright_pixel_view(nside: int, global_pe):
     return _jax_catalog(catalog, nside=nside), np.asarray(sample_to_row, dtype=np.int32)
 
 
-def _make_runtime_event(store, pixels, required: tuple[str, ...]) -> GWEvent:
-    nx, ny, nz = _sky_vectors(store.columns)
+def _injection_sky_use(analysis: Analysis) -> str | None:
+    """What in ``analysis`` reads the injections' sky positions, or ``None``.
+
+    A catalog analysis places every injection in a catalog pixel, and an
+    anisotropic angular model weights it by its direction. A spectral or
+    bright-siren analysis with an isotropic angular model reads neither (its
+    injections all sit in pixel 0).
+    """
+    if not isinstance(analysis.redshift, (SpectralRedshift, BrightRedshift)):
+        return f"a catalog analysis ({type(analysis.redshift).__name__})"
+    if analysis.angular_model != "isotropic":
+        return f"the angular model {analysis.angular_model!r}"
+    return None
+
+
+def _make_runtime_event(store, pixels, required: tuple[str, ...], *, sky: bool = True) -> GWEvent:
+    # sky=False only for a selection store without sky positions, which binds
+    # only where nothing reads them: make_gw_event's zeros placeholder.
+    nx, ny, nz = _sky_vectors(store.columns) if sky else (None, None, None)
     return make_gw_event(
         m1det=store.columns["m1det"],
         m2det=store.columns["m2det"],
@@ -1659,6 +1680,11 @@ def bind_analysis(
     )
     _require_store_basis(events, required, kind="PE")
     _require_store_basis(injections, required, kind="selection")
+    # A selection store may carry no sky positions; only an analysis that never
+    # reads them binds it.
+    sky_use = _injection_sky_use(analysis)
+    if sky_use is not None:
+        require_selection_sky(injections, sky_use)
     # Per-store gates only compare each file against the model. The pairing
     # contract is what makes numerator and denominator the same estimand.
     require_matching_contract(events, injections)
@@ -1784,7 +1810,12 @@ def bind_analysis(
     if model_operands is not None:
         lowp["model_operands"] = model_operands
     gw_pe = _make_runtime_event(events, pe_pixels, required)
-    gw_selection = _make_runtime_event(injections, sel_pixels, required)
+    gw_selection = _make_runtime_event(
+        injections,
+        sel_pixels,
+        required,
+        sky=all(name in injections.columns for name in SKY_DATASETS),
+    )
     if compute_dtype is not None:
         from darksirens.likelihood.mixed_precision import cast_event
 
