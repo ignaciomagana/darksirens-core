@@ -685,9 +685,20 @@ class GWTC5FiducialBPL2PeaksPairing(PairingModel):
 
 
 class GWTC5FiducialBPL2PeaksPopulationModel:
-    """GWTC-5 fiducial DefaultBBH Broken Power Law + 2 Peaks model."""
+    """GWTC-5 fiducial DefaultBBH Broken Power Law + 2 Peaks model.
 
-    def __init__(self):
+    ``spin_component`` may be overridden with any :class:`SpinModel`.  The
+    default is a truncated Gaussian in chi_eff (the ``gwtc5_fiducial_bpl2peaks``
+    preset), which is not GWTC-5.0's spin model.  GWTC-5.0's Default BBH spin
+    model is in the component spins (arXiv:2605.27226 Eqs. B15-B16, Table 6):
+    :class:`~darksirens.population.component_spin.GWTC5DefaultSpinModel`, which
+    the ``gwtc5_bpl2peaks_component_spin`` preset passes in.  A spin component
+    with ``consumes_spin_block`` takes the event's ``(a1, a2, cost1, cost2)``
+    block (``spin=``) in place of chi_eff, so it needs a component-basis gwcat
+    pair; the mass, pairing and rate factors are the same objects either way.
+    """
+
+    def __init__(self, spin_component=None):
         self.mass_component = GWTC5FiducialBPL2PeaksMass(
             ParamSpec(r"$\alpha_1$", -4.0, 12.0),
             ParamSpec(r"$\alpha_2$", -4.0, 12.0),
@@ -706,7 +717,7 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
             ParamSpec(r"$m_{2,{\rm low}}$", 3.0, 10.0),
             ParamSpec(r"$\delta m_2$", 0.0, 10.0),
         )
-        self.spin_component = TruncatedGaussianSpin(
+        self.spin_component = spin_component if spin_component is not None else TruncatedGaussianSpin(
             ParamSpec(r"$\mu_\chi$", 0.0, 1.0),
             ParamSpec(r"$\sigma_\chi$", 0.005, 1.0),
         )
@@ -768,7 +779,7 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         tp = theta[n_m : n_m + self.pairing_component.n_params]
         return self.pairing_component.prepare(tp[1], tp[2], tp, dtype)
 
-    def log_p_pop(self, m1, q, z, chieff, theta, prepared=None):
+    def log_p_pop(self, m1, q, z, chieff, theta, spin=None, prepared=None):
         idx = 0
         tm = theta[idx : idx + self.mass_component.n_params]
         idx += self.mass_component.n_params
@@ -781,6 +792,25 @@ class GWTC5FiducialBPL2PeaksPopulationModel:
         lambda0, lambda1 = tm[9], tm[10]
         m2_low = tp[1]
         valid = (lambda0 + lambda1 <= 1.0) & (m2_low <= m1_low)
+
+        if getattr(self.spin_component, "consumes_spin_block", False):
+            # A component-spin block (chosen in Python, so the chi_eff program
+            # below is unchanged): the mass and pairing product as below, the
+            # spin density added in log space, where its closed form lives.
+            if spin is None:
+                raise TypeError(
+                    f"{type(self.spin_component).__name__} requires the event "
+                    "spin block (a1, a2, cost1, cost2): the paired gwcat store "
+                    "must be exported in the component spin basis."
+                )
+            mass_norm = self.mass_component._norm(tm)
+            p = (
+                self.mass_component(m1, tm, norm=mass_norm)
+                * self.pairing_component(m1, q, m2_low, tp[2], tp, prepared=prepared)
+            )
+            p = jnp.where(valid, p, 0.0)
+            log_p = jnp.where(p > 0.0, jnp.log(jnp.maximum(p, jnp.finfo(p.dtype).tiny)), -jnp.inf)
+            return log_p + self.spin_component.log_prob(spin, ts) + (gamma - 1.0) * jnp.log1p(z)
 
         mass_norm = self.mass_component._norm(tm)
         spin_norm = self.spin_component._norm(ts)

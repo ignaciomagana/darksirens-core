@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -125,8 +126,8 @@ def test_total_variance_guard_rejects_one_hot_pe():
     assert np.isfinite(float(relaxed.log_likelihood))
 
 
-def test_component_spin_population_uses_runtime_spin_block():
-    model = "gwtc3_plpeak_component_spin"
+@pytest.mark.parametrize("model", ["gwtc3_plpeak_component_spin", "gwtc5_bpl2peaks_component_spin"])
+def test_component_spin_population_uses_runtime_spin_block(model):
     pop = get_fixed_population_params(model)
     diag = spectral_siren_log_likelihood(
         _cosmo(), pop,
