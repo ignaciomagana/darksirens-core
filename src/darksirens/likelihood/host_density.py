@@ -7,10 +7,13 @@ InferenceTarget used by every sampler backend.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping
 from typing import Any, NamedTuple, Protocol
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from darksirens.analysis import Analysis, ParameterPlan, SpectralRedshift
 from darksirens.cosmology.distances import threads_distance_table
@@ -73,6 +76,57 @@ def _parameter_spec(redshift_model) -> ParameterPlan:
     # scientifically meaningful target.
     combine_parameter_plans(plan)
     return plan
+
+
+def _jit_with_state_operands(fn, *, states):
+    """``jax.jit(fn)`` with the arrays of ``states`` as operands, not constants.
+
+    ``fn`` is traced as ``jax.jit`` traces it (``jax.make_jaxpr`` is that
+    trace), once per argument structure, shapes and trace context, with its
+    closure concrete, so every check a redshift model or core makes on the
+    host at trace time runs as before. The arrays the trace captured that
+    are leaves of ``states`` (of one or more dimensions) are then arguments
+    of the compiled program, placed once; every other constant stays one, so
+    the program is the jit's own with those inputs moved. As HLO constants
+    XLA constant-folds them at compile time: on lss's 405,746-galaxy catalog
+    state that compile peaked at 19.6 GiB.
+    """
+
+    from jax._src.config import trace_context  # jax is pinned (pyproject)
+
+    state_arrays = {
+        id(leaf): leaf for leaf in jax.tree_util.tree_leaves(states) if np.ndim(leaf) > 0
+    }
+    programs = {}
+
+    def call(*args, **kwargs):
+        leaves, tree = jax.tree_util.tree_flatten((args, kwargs))
+        key = (tree, tuple(map(jax.api_util.shaped_abstractify, leaves)), trace_context())
+        entry = programs.get(key)
+        if entry is None:
+            closed, out_shape = jax.make_jaxpr(fn, return_shape=True)(*args, **kwargs)
+            out_tree = jax.tree_util.tree_structure(out_shape)
+            consts = closed.consts
+            if any(isinstance(c, jax.core.Tracer) for c in consts):
+                # Values of an enclosing trace: evaluated in it, never cached.
+                return jax.tree_util.tree_unflatten(
+                    out_tree, jax.core.eval_jaxpr(closed.jaxpr, consts, *leaves)
+                )
+            hoist = tuple(state_arrays.get(id(c)) is c for c in consts)
+            with jax.ensure_compile_time_eval():  # concrete under an enclosing trace too
+                operands = tuple(jnp.asarray(c) for c, h in zip(consts, hoist) if h)
+            kept = tuple(None if h else c for c, h in zip(consts, hoist))
+
+            def program(operands, leaves, jaxpr=closed.jaxpr):
+                values = iter(operands)
+                filled = [next(values) if h else c for c, h in zip(kept, hoist)]
+                return jax.core.eval_jaxpr(jaxpr, filled, *leaves)
+
+            entry = programs[key] = (jax.jit(program), operands, out_tree)
+        run, operands, out_tree = entry
+        return jax.tree_util.tree_unflatten(out_tree, run(operands, leaves))
+
+    return call
 
 
 def host_density_log_likelihood(
@@ -213,8 +267,10 @@ def make_host_density_target(
     result carries ``logZ_corrected`` as an ordinary one does.
 
     The target's likelihood is one ``jax.jit``, built here and reused by every
-    call, over the coordinate, the GW samples and the distance table; the
-    opaque states are constants of its program. ``redshift_model``'s methods
+    call, over the coordinate, the GW samples and the distance table. The
+    opaque states are closed over, and concrete when it is traced; their
+    arrays are operands of the compiled program, not constants
+    (:func:`_jit_with_state_operands`). ``redshift_model``'s methods
     are therefore traced, as they already were under ``sel_batch_size`` or
     ``pe_event_block``. Evaluated eagerly, every call re-traced the
     likelihood, and with either option re-compiled its scans.
@@ -256,7 +312,11 @@ def make_host_density_target(
 
     from darksirens.runtime_binding import _decode_theta
 
-    @threads_distance_table()
+    @threads_distance_table(
+        jit=functools.partial(
+            _jit_with_state_operands, states=(pe_state, selection_state, auxiliary_state)
+        )
+    )
     def evaluate(theta, gw_pe, gw_selection, distance_table=None):
         cosmology, population, _catalog, angular = _decode_theta(
             base_analysis,

@@ -488,3 +488,70 @@ def test_target_likelihood_is_jitted_once():
     np.testing.assert_allclose(np.asarray(grad), [1.0], rtol=1e-12)
     with pytest.raises(ValueError, match=r"theta must have shape \(1,\)"):
         target.log_likelihood(np.array([0.1, 0.2]))
+
+
+class PixelOffsetModel(VolumeRedshiftModel):
+    """The volume prior plus a per-pixel offset read from the state, times the
+    model's own per-pixel table."""
+
+    def __init__(self, own):
+        super().__init__(_plan(("eta",)))
+        self.own = own
+
+    def log_density(self, z, pixel, cosmology, parameters, state):
+        import jax.numpy as jnp
+
+        (offsets,) = state
+        return (
+            log_comoving_volume_prior(z, cosmology)
+            + jnp.asarray(offsets)[pixel] * jnp.asarray(self.own)[pixel]
+        )
+
+
+def test_target_compiles_the_state_arrays_as_operands():
+    """The states' arrays are arguments of the target's compiled program, not
+    constants: XLA constant-folds constants at compile time, and on lss's
+    405,746-galaxy catalog state that compile peaked at 19.6 GiB. The trace
+    still sees them concrete, and the model's own arrays stay constants."""
+    import jax
+
+    pe, selection, nsamp, nsel = _runtime_events()
+    offsets = np.linspace(-0.01, 0.01, 4096)
+    own = np.ones(3072)
+    target = make_host_density_target(
+        _base_analysis(),
+        redshift_model=PixelOffsetModel(own),
+        gw_pe=pe,
+        gw_selection=selection,
+        pe_state=(offsets,),
+        selection_state=(offsets,),
+        n_events=1,
+        nsamp=nsamp,
+        n_draw=float(nsel),
+        max_likelihood_variance=MAX_VAR,
+    )
+    theta = jax.numpy.asarray([0.1])
+    closed = jax.make_jaxpr(target.log_likelihood)(theta)
+    (program,) = [e for e in closed.jaxpr.eqns if e.params.get("name") == "program"]
+    shapes = [tuple(np.shape(c)) for c in program.params["jaxpr"].consts]
+    assert (3072,) in shapes and (4096,) not in shapes, shapes
+    assert (4096,) in [tuple(v.aval.shape) for v in program.invars]
+
+    expected = host_density_log_likelihood(
+        CosmologyParameters(67.74, 0.3075, -1.0, 0.0),
+        np.asarray(_base_analysis().parameters.fixed_population),
+        np.array([0.1]),
+        pe,
+        (offsets,),
+        selection,
+        (offsets,),
+        1,
+        nsamp,
+        float(nsel),
+        redshift_model=PixelOffsetModel(own),
+        pop_model=_base_analysis().population.model_name,
+        max_likelihood_variance=MAX_VAR,
+    )
+    np.testing.assert_allclose(
+        float(target.log_likelihood(theta)), float(expected), rtol=1e-13
+    )
