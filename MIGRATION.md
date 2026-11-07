@@ -745,7 +745,7 @@ changes in two entries: `mu_chi` 0.0633 to 0.04 and `sigma_chi` 0.3654 to
   effective spin, so the distribution was about 3.7 times too wide. On the
   259 GWTC-5 BBH events the spectral H0 likelihood peaks 107 to 110 lower in
   log with the old pair than with a width near 0.10, and the
-  fixed-population H0 is about 1.7 km/s/Mpc lower.
+  fixed-population H0 posterior sits lower with the old pair.
 - **The new pair is a fit, not a published number:** the best point of a
   30-point spectral grid over the pair with every other parameter at the
   release medians, to two decimals.
