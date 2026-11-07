@@ -953,6 +953,10 @@ def gate_and_stamp_resume_fingerprint(
     resume is upgraded by publishing the current fingerprint.  A forced genuine
     mismatch preserves the checkpoint creator's canonical fingerprint and writes
     the current configuration beside it as ``run_fingerprint.forced-*.json``.
+    A matching resume writes nothing: this is the frozen legacy gate (its
+    behaviour probe compares it with the reference), so unlike
+    :func:`gate_and_stamp_checkpoint_fingerprint` it records no
+    ``run_fingerprint.resume-*.json``; its callers own that record.
     """
 
     # Set after fingerprint construction so provenance cannot feed back into

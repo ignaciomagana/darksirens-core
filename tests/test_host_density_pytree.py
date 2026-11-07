@@ -95,19 +95,83 @@ def test_an_enclosing_jit_given_the_pytree_has_no_state_constant(form):
         np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-12)
 
 
-def test_the_samplers_pick_the_pytree_form():
+def test_which_samplers_take_the_pytree_form():
     from darksirens.inference.dynesty_batched import batched_log_likelihood
     from darksirens.inference.numpyro_adapter import _pytree_likelihood
+    from darksirens.inference.tinyns_adapter import tinyns_loglike
+    from darksirens.runtime_binding import BoundAnalysis
 
     target = _target()
-    single = target.log_likelihood
-    batched = batched_log_likelihood(single, single, 4)
-    assert batched.form == "pytree"
+    likelihood = target.log_likelihood
+
+    # Dynesty's batched pool: point by point, each point the target's own
+    # program with the states as operands, bit for bit as before.
+    def single(theta):
+        return float(np.asarray(likelihood(jnp.asarray(theta))))
+
+    batched = batched_log_likelihood(likelihood, single, 4)
+    assert batched.form == "rows"
     rows = np.array([[0.1], [0.5], [0.9], [0.3]])
-    np.testing.assert_allclose(
-        np.asarray(batched(rows)), [float(single(r)) for r in rows], rtol=1e-12
-    )
-    assert isinstance(_pytree_likelihood(single), jax.tree_util.Partial)
+    assert list(batched(rows)) == [single(r) for r in rows]
+
+    # NumPyro and TinyNS (>= 0.2) take it as an argument of their programs.
+    assert isinstance(_pytree_likelihood(likelihood), jax.tree_util.Partial)
+
+    class Recent:
+        __version__ = "1.0.0"
+
+    loglike, form = tinyns_loglike(likelihood, Recent)
+    assert form == "pytree" and isinstance(loglike, jax.tree_util.Partial)
+
+    # Core's NumPyro adapter closes over every other likelihood, as before:
+    # an ordinary binding, a plain Partial, anything with a pytree hook that
+    # does not opt in.
+    class Hooked:
+        def __call__(self, theta):
+            return jnp.sum(theta)
+
+        def as_pytree_callable(self):
+            raise AssertionError("not asked for")
+
+    assert getattr(BoundAnalysis, "numpyro_model_argument", False) is False
+    assert _pytree_likelihood(Hooked()) is None
+    assert _pytree_likelihood(jax.tree_util.Partial(jnp.sum)) is None
+
+
+def test_core_numpyro_runs_an_ordinary_likelihood_as_before(monkeypatch):
+    """No jit_model_args and no model argument for a likelihood that does not opt in."""
+    pytest.importorskip("numpyro")
+    import numpyro.infer
+
+    import darksirens as ds
+    from darksirens.analysis import ParameterPlan
+    from darksirens.inference.target import InferenceTarget
+
+    created, ran = [], []
+    real_mcmc = numpyro.infer.MCMC
+
+    class Recording(real_mcmc):
+        def __init__(self, *args, **kwargs):
+            created.append(kwargs)
+            super().__init__(*args, **kwargs)
+
+        def run(self, rng_key, *args, **kwargs):
+            ran.append(args)
+            return super().run(rng_key, *args, **kwargs)
+
+    monkeypatch.setattr(numpyro.infer, "MCMC", Recording)
+
+    def quadratic(theta):
+        return -0.5 * jnp.sum(theta ** 2)
+
+    for likelihood in (quadratic, jax.tree_util.Partial(quadratic)):
+        plan = ParameterPlan(labels=("x",), lower=(-1.0,), upper=(1.0,),
+                             prior_kinds=(("uniform", None, None),), joint_constraints=())
+        target = InferenceTarget(likelihood, plan)
+        ds.infer(target, sampler="numpyro", nuts_warmup=5, nuts_samples=5,
+                 show_progress=False, guard_report=False, seed=1)
+        assert "jit_model_args" not in created[-1]
+        assert ran[-1] == ()
 
 
 def test_core_numpyro_passes_the_target_as_an_argument(monkeypatch):

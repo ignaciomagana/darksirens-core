@@ -389,28 +389,13 @@ def _log_prior_volume_fraction(analysis):
 def _target_likelihood_options(target):
     """The likelihood options a target states, for its result, or ``None``.
 
-    ``target.likelihood_options`` when the target sets it (core's own target
-    builders do); otherwise ``{"selection_mc_correction": ...}`` when the
-    target states that attribute (``"unreadable (<error>)"`` when reading it
-    raises: the run is not stopped for a record); otherwise ``None``, and the
-    result is as before.
+    :func:`darksirens.inference.guard_report.target_likelihood_options`: the
+    guard report's own rule for the form, so the result and the report never
+    name different forms.
     """
-    import inspect
-    from collections.abc import Mapping
+    from darksirens.inference.guard_report import target_likelihood_options
 
-    options = getattr(target, "likelihood_options", None)
-    if isinstance(options, Mapping):
-        return dict(options)
-    name = "selection_mc_correction"
-    if inspect.getattr_static(target, name, _MISSING) is _MISSING:
-        return None
-    try:
-        value = getattr(target, name)
-    except Exception as exc:
-        value = f"unreadable ({type(exc).__name__})"
-    from darksirens.inference.guard_report import UNSTATED_SELECTION_MC_CORRECTION
-
-    return {name: UNSTATED_SELECTION_MC_CORRECTION if value is None else str(value)}
+    return target_likelihood_options(target)
 
 
 def _apply_prior_volume_correction(result, fraction):
@@ -726,7 +711,11 @@ def infer(
     whether or not the guard report runs. A target result carries it when the
     target states it: its ``InferenceTarget.likelihood_options`` (core's own
     target builders set it), or else ``{"selection_mc_correction": ...}`` when
-    the target has that attribute. A target that states neither gets none.
+    the target states a form. The form is read by the guard report's rule
+    (:func:`~darksirens.inference.guard_report.target_likelihood_options`), so
+    the two never disagree. A target that states neither gets none. This
+    record states defaults too, unlike the fingerprint's
+    ``semantic.core_numerics.likelihood_options`` block, and is never hashed.
 
     ``guard_report`` (default ``True``) evaluates the likelihood diagnostics
     at 32 prior draws before sampling (an integer sets the number of draws,

@@ -35,24 +35,26 @@ def _numpyro_diagnostics(extra, max_tree_depth: int, target_accept: float):
     return diagnostics, diverging
 
 
+#: The attribute a likelihood sets to ``True`` to be passed to NumPyro's model
+#: as an argument (its ``as_pytree_callable()``) instead of closed over. A
+#: host-density target's likelihood sets it; an ordinary binding, a plain
+#: ``jax.tree_util.Partial`` and any other likelihood do not, and run exactly
+#: as before (closed over, ``jit_model_args`` off).
+NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE = "numpyro_model_argument"
+
+
 def _pytree_likelihood(likelihood):
-    """``likelihood`` as a pytree callable, or ``None`` when it offers none.
+    """``likelihood.as_pytree_callable()`` to pass to the model, or ``None``.
 
-    ``likelihood.as_pytree_callable()`` (a
-    :class:`~darksirens.runtime_binding.BoundAnalysis`, a host-density
-    target's likelihood), or a likelihood that already is a
-    ``jax.tree_util.Partial``.
+    Only a likelihood that opts in (:data:`NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE`
+    is ``True``, as on a host-density target's likelihood) and offers
+    ``as_pytree_callable``; ``None`` keeps the closure every other likelihood
+    has always run with.
     """
-    import sys
-
+    if getattr(likelihood, NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE, False) is not True:
+        return None
     hook = getattr(likelihood, "as_pytree_callable", None)
-    if callable(hook):
-        return hook()
-    jax = sys.modules.get("jax")
-    partial = getattr(getattr(jax, "tree_util", None), "Partial", None)
-    if isinstance(partial, type) and isinstance(likelihood, partial):
-        return likelihood
-    return None
+    return hook() if callable(hook) else None
 
 
 def run_numpyro(
@@ -66,15 +68,19 @@ def run_numpyro(
 ) -> dict[str, Any]:
     """Run the frozen NumPyro/NUTS backend from accepted 6Q/6R state.
 
-    A likelihood that offers a pytree form (:func:`_pytree_likelihood`) is
+    A host-density target's likelihood (:func:`_pytree_likelihood`) is
     passed to the model as its argument, with ``jit_model_args=True``, and to
     the post-run evaluation of the samples' log-likelihoods as an argument of
     that program, so its data are operands of the compiled programs, not
-    constants XLA folds at compile time. NumPyro 0.17 still closes over the
-    model's arguments in its compiled sampling loop when it runs without a
-    progress bar (``show_progress=False``) or with several chains, so there
-    the data are constants of that loop. Any other likelihood is closed over,
-    as always.
+    constants XLA folds at compile time. NumPyro 0.17 runs its sampling loop
+    step by step from Python with a progress bar for ``"sequential"`` (the
+    default, any number of chains) and ``"vectorized"`` chains, where the
+    data stay operands; it compiles the whole loop as one program, closing
+    over the model's arguments, without a progress bar
+    (``show_progress=False``) or with ``chain_method="parallel"`` (``pmap``)
+    or a callable chain method, and there the data are constants of that
+    loop. Every other likelihood, an ordinary binding included, is closed
+    over and run with NumPyro's defaults, exactly as before.
     """
     import jax
     import jax.numpy as jnp
@@ -250,4 +256,4 @@ def run_numpyro(
     }
 
 
-__all__ = ["run_numpyro"]
+__all__ = ["NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE", "run_numpyro"]

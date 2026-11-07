@@ -331,7 +331,11 @@ def make_host_density_target(
     is the same likelihood with the states, GW samples and distance table as
     pytree leaves: passed as an argument of the enclosing program
     (``jax.jit(lambda f, x: f(x))(f, x)``), they stay arguments. Core's
-    TinyNS adapter, dynesty's batched form and NumPyro adapter use it.
+    TinyNS and NumPyro adapters use it. Dynesty's batched pool
+    (``dynesty_batch``) evaluates this likelihood point by point, as it always
+    did: each point is this program with the states as operands, so it never
+    compiled them as constants, and a ``jit(vmap)`` over a batch would hold
+    the batch's per-galaxy intermediates at once.
     ``redshift_model``'s methods are traced, as they already were under
     ``sel_batch_size`` or ``pe_event_block``. Evaluated eagerly, every call
     re-traced the likelihood, and with either option re-compiled its scans.
@@ -507,10 +511,20 @@ class _HostDensityLogLikelihood:
     :class:`jax.tree_util.Partial` whose leaves are those arrays, the GW
     samples, the distance table and the ambient jit channels, so a caller
     that traces it inside its own program and receives it as an argument
-    (TinyNS's and dynesty's batched forms, core's NumPyro adapter, or
+    (core's TinyNS and NumPyro adapters, or
     ``jax.jit(lambda f, x: f(x))(target.log_likelihood.as_pytree_callable(),
     x)``) compiles them as arguments, not constants.
     """
+
+    #: Core's NumPyro adapter passes :meth:`as_pytree_callable` to the model
+    #: as its argument (``jit_model_args=True``); it closes over every other
+    #: likelihood, as before
+    #: (:data:`darksirens.inference.numpyro_adapter.NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE`).
+    numpyro_model_argument = True
+    #: Dynesty's batched pool evaluates this likelihood point by point (its
+    #: ``"rows"`` form), not as ``jit(vmap)`` of :meth:`as_pytree_callable`
+    #: (:data:`darksirens.inference.dynesty_batched.POINT_BY_POINT_ATTRIBUTE`).
+    dynesty_batch_point_by_point = True
 
     def __init__(self, call, evaluate_operands, state_operands, gw_pe, gw_selection):
         self._call = call

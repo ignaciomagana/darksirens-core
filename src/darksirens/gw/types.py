@@ -28,8 +28,9 @@ _SKY_COLUMNS = ("ra", "dec")
 
 def skyless_selection_message(path, missing, use) -> str:
     """Why a selection store without sky positions cannot serve ``use``."""
+    where = "A selection store" if path is None else f"Selection file {path!r}"
     return (
-        f"Selection file {path!r} carries no injection sky positions (missing "
+        f"{where} carries no injection sky positions (missing "
         f"datasets: {', '.join(missing)}), but {use} needs them. Only a spectral "
         "or bright-siren analysis with an isotropic angular model runs without "
         "them; use an injection set with ra and dec."
@@ -58,10 +59,13 @@ class _SelectionColumns(dict):
 
     A plain ``dict`` of its columns, except that reading a missing ``ra`` or
     ``dec`` raises :class:`MissingSkyPositionsError` with the reason. ``in``,
-    ``get`` and iteration behave as for the plain dict.
+    ``get`` and iteration behave as for the plain dict. It is built as a dict
+    is (``dataclasses.asdict`` rebuilds it from its items alone, so ``path``
+    is optional), and JAX's tree utilities flatten it as they flatten a dict
+    (registered below), not as one leaf.
     """
 
-    def __init__(self, columns, path):
+    def __init__(self, columns=(), path=None):
         super().__init__(columns)
         self.path = path
 
@@ -78,6 +82,32 @@ class _SelectionColumns(dict):
                 ),
             )
         raise KeyError(key)
+
+
+def _register_selection_columns_pytree():
+    # As a dict: leaves in sorted key order, DictKey paths. darksirens.gw
+    # imports JAX already (darksirens.gw.samples), so this adds no import.
+    import jax
+
+    def flatten_with_keys(columns):
+        keys = tuple(sorted(columns))
+        children = [(jax.tree_util.DictKey(key), columns[key]) for key in keys]
+        return children, (keys, columns.path)
+
+    def flatten(columns):
+        keys = tuple(sorted(columns))
+        return [columns[key] for key in keys], (keys, columns.path)
+
+    def unflatten(aux, children):
+        keys, path = aux
+        return _SelectionColumns(zip(keys, children), path)
+
+    jax.tree_util.register_pytree_with_keys(
+        _SelectionColumns, flatten_with_keys, unflatten, flatten
+    )
+
+
+_register_selection_columns_pytree()
 
 
 @dataclass(frozen=True)

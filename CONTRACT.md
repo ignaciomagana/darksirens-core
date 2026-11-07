@@ -419,8 +419,11 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `fraction` and the `ranges` `{label: [min, max]}` of the draws where it
   fired), `probed_ranges`, `selection_mc_correction` unless the likelihood
   states `"farr"` (the form it states, or `"unstated"` for a target that
-  states none; a report without the key is a `"farr"` binding's or one from
-  before the form existed), and, when some draw is non-finite with no
+  states none; a report without the key is a `"farr"` binding's or target's,
+  one from before the form existed, or one core wrote from 2026-10-31, when
+  its default became `"none"`, to 2026-11-07 for a target that stated no
+  form, which may come from a run of `"none"`), and, when some draw is
+  non-finite with no
   guard firing, `non_finite_other`. One `UserWarning` is emitted when more than 5%
   of the draws are guarded. The bound likelihood, its program and the
   sampler's RNG streams are unchanged; `guard_report` never enters the
@@ -536,6 +539,26 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   says). An `InferenceTarget` may declare `log_prior_volume_fraction` (a
   finite number <= 0), and its result then carries both keys; the targets
   core builds from an analysis declare their analysis's.
+- Every ordinary `infer` result carries `likelihood_options` (since
+  2026-11-07), whatever `guard_report` is: `selection_mc_correction`,
+  `compute_dtype`, `max_likelihood_variance` and `selection_neff_soft_guard`,
+  each stated with the value the binding ran under, defaults included
+  (`stated_likelihood_options` in `darksirens.inference.run_fingerprint`).
+  It is a record only: unlike the fingerprint's
+  `semantic.core_numerics.likelihood_options` block, which leaves defaults
+  out so old digests hold, it states every value, and it is never hashed. A
+  target result carries it when the target states something: the target's
+  `InferenceTarget.likelihood_options` mapping (core's host-density and
+  catalog-mixture targets set it) with its `selection_mc_correction` set to
+  the stated form, or `{"selection_mc_correction": <form>}` for a target
+  with only the attribute; a target that states neither gets no key. The form
+  is read by one rule for the result and the guard report
+  (`stated_selection_mc_correction` and `target_likelihood_options` in
+  `darksirens.inference.guard_report`): an attribute served by `__getattr__`
+  counts, `None` states nothing, and a form that cannot be read, or an
+  attribute and a mapping that name different forms, is recorded as
+  `"unreadable (<error type>)"` while the advisory report is skipped with a
+  warning.
 - Every `infer` result carries the sampler-termination fields `dlogz_final`,
   `stop_reason`, `ncall` and `niter`
   (`darksirens.inference.nested_output.TERMINATION_FIELDS`); a backend that
@@ -615,8 +638,9 @@ as before (same sampler call, same result, no report). A target may also state
 `selection_mc_correction` (or `likelihood_options`, an optional field of
 `InferenceTarget` that `ds.infer` copies into `result["likelihood_options"]`),
 which is not part of that list; the report of a target that states neither
-records `"unstated"`, and a form that cannot be read skips the advisory report
-with a warning. With all four,
+records `"unstated"`, and a form that cannot be read, or two stated forms that
+differ, skips the advisory report with a warning (the rule is the result's
+too; see the result fields above). With all four,
 `ds.infer(target, guard_report=...)` calls
 `guard_report(target, prior_transform, plan.labels, n_draws=, seed=,
 for_target=True)` with the plan's prior transform (the one the sampler then

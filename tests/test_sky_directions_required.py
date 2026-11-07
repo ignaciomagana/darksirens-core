@@ -273,6 +273,41 @@ def test_reading_the_positions_of_a_skyless_store_names_the_file_and_reason():
         require_selection_sky(skyless, "a test")
 
 
+def test_the_skyless_columns_still_behave_as_a_dict_for_asdict_and_jax():
+    """``dataclasses.asdict``, copies and JAX's tree utilities treat them as the dict they were."""
+    import copy
+    from dataclasses import asdict
+
+    import jax
+
+    from darksirens.gw import MissingSkyPositionsError
+
+    _, injections = _stores()
+    skyless = _skyless(injections)
+    plain = dict(skyless.columns)
+
+    # asdict rebuilds a dict subclass from its items alone (it used to raise
+    # TypeError: missing 'path'); the rebuilt columns keep the clear error.
+    as_dict = asdict(skyless)
+    assert set(as_dict["columns"]) == set(plain)
+    with pytest.raises(MissingSkyPositionsError, match="A selection store carries no"):
+        as_dict["columns"]["ra"]
+    for other in (copy.copy(skyless.columns), copy.deepcopy(skyless.columns)):
+        with pytest.raises(MissingSkyPositionsError, match="selection-fixture.h5"):
+            other["ra"]
+
+    # Flattened as a dict, not as one leaf.
+    leaves = jax.tree_util.tree_leaves(skyless.columns)
+    assert len(leaves) == len(plain)
+    assert all(a is b for a, b in zip(leaves, jax.tree_util.tree_leaves(plain)))
+    paths = [path for path, _ in jax.tree_util.tree_flatten_with_path(skyless.columns)[0]]
+    assert paths == [path for path, _ in jax.tree_util.tree_flatten_with_path(plain)[0]]
+    mapped = jax.tree_util.tree_map(lambda x: x, skyless.columns)
+    assert dict(mapped).keys() == plain.keys()
+    with pytest.raises(MissingSkyPositionsError, match="selection-fixture.h5"):
+        mapped["dec"]
+
+
 def test_a_loaded_skyless_store_raises_the_clear_error(tmp_path):
     from test_gw_store_contract import write_sel
 

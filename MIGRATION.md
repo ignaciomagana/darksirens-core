@@ -1838,9 +1838,13 @@ one validation run that way.
 ## Review fixes (2026-11-07)
 
 A review of the selection-term, sky-optional, compile-memory, preflight and
-component-spin changes found these. No default likelihood value changes: every
-fix is a refusal of a wrong value, a record, an error message or a compile
-layout.
+component-spin changes found these. No likelihood formula and no default value
+changes: every fix is a refusal of a wrong value, a record, an error message or
+a compile layout. One compile layout can move values at the rounding level: a
+host-density target run under TinyNS or NumPyro now receives its states as
+arguments of the sampler's compiled program (below). Every other run, every
+ordinary analysis under every sampler included, compiles and evaluates as
+before.
 
 ### Saved results state the form of the selection term
 
@@ -1853,7 +1857,16 @@ layout.
   its metadata lacks the form) now makes `ds.infer` skip the advisory report
   with a warning; the error was swallowed and the report read as `"farr"`.
   `stated_selection_mc_correction` in `darksirens.inference.guard_report`
-  is the rule.
+  is the rule, for the report and for the result (below), so the two never
+  name different forms: an attribute served by `__getattr__` counts, `None`
+  states nothing, and an attribute and a `likelihood_options` entry that name
+  different forms are refused as unreadable.
+- **Reading an older report.** A report without the key is a `"farr"`
+  binding's or target's, or one from before the form existed (core ran only
+  `"farr"` then), or one that core wrote from 2026-10-31 (the switch to the
+  `"none"` default) to this change for a target that stated no form. That
+  last kind may come from a run of `"none"`; only the run's own record (its
+  provenance, or the target's code at the time) can say.
 - **Results.** Every ordinary `ds.infer` result carries
   `likelihood_options`: `selection_mc_correction` (`"farr"` included),
   `compute_dtype` (`"float64"` by default), `max_likelihood_variance` and
@@ -1861,11 +1874,20 @@ layout.
   `darksirens.inference.run_fingerprint`), whether or not the guard report
   runs. `InferenceTarget` gains an optional `likelihood_options` field, copied
   into the result; `make_host_density_target` and `make_catalog_mixture_target`
-  set it. A target with only a `selection_mc_correction` attribute gets
+  set it; the result's copy has `selection_mc_correction` set to the form the
+  rule above reads (`"unstated"` when the mapping names none). A target with
+  only a `selection_mc_correction` attribute gets
   `{"selection_mc_correction": ...}`; a target that states neither gets no key,
   so a companion target's result is unchanged. `ds.save_result` writes it into
   `result_json`. Fingerprints and digests are unchanged: the record is never
-  hashed.
+  hashed. The field states every value, defaults included, unlike the
+  fingerprint's `semantic.core_numerics.likelihood_options` block of the same
+  name, which leaves defaults out so old digests hold. It names the other
+  value-changing options besides the form so that a saved result says which
+  likelihood made it, not only which selection term.
+- **Skyless columns.** The columns of a selection store without sky positions
+  (next section) are rebuilt by `dataclasses.asdict` (`path` is optional) and
+  flatten under JAX's tree utilities as a dict does.
 - **Not changed here.** darksirens-lss's own member report copies the old
   "record unless farr" rule, and darksirens-lensing states no form at all (see
   the point-estimate section); both are changes in those repositories.
@@ -1925,14 +1947,27 @@ galaxies against 0.9 GiB direct, so about 18 GiB at full size).
   likelihood. A closed-over `jax.jit(target.log_likelihood)` still compiles
   them as constants (JAX folds what a jitted function closes over); the
   docstring says so.
-- TinyNS (pytree form) and dynesty's batched pool (`dynesty_batch`, now the
-  `"pytree"` form, `jit(vmap)`, for these targets instead of point by point;
-  the values agree to rounding) pick it up. Core's NumPyro adapter passes any
-  pytree likelihood (this one, a binding's, a `Partial`) to the model as its
-  argument with `jit_model_args=True`, and to the post-run evaluation as an
-  argument. NumPyro 0.17 still closes over model arguments in its compiled
-  loop without a progress bar (`show_progress=False`) or with several chains;
-  there the states remain constants of that loop.
+- TinyNS (>= 0.2, its pytree form) picks it up, as it does a binding's. Core's
+  NumPyro adapter passes it to the model as its argument with
+  `jit_model_args=True`, and to the post-run evaluation as an argument, for
+  this likelihood only (it opts in with `numpyro_model_argument = True`;
+  `NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE`): an ordinary binding, a plain `Partial`
+  and every other likelihood are closed over with NumPyro's defaults, as
+  before. For these two samplers a host-density target's values may differ
+  from earlier runs at the rounding level (the same program with its states
+  as arguments, not folded constants).
+- NumPyro 0.17 runs its sampling loop step by step from Python, with the data
+  as operands, for `"sequential"` chains (core's default, any number) and
+  `"vectorized"` ones with a progress bar. It compiles the whole loop as one
+  program closed over the model's arguments without a progress bar
+  (`show_progress=False`) or with `chain_method="parallel"` (`pmap`) or a
+  callable chain method; there the states remain constants of that loop.
+- Dynesty's batched pool (`dynesty_batch`) keeps evaluating these targets point
+  by point (`"rows"`; `dynesty_batch_point_by_point = True`,
+  `POINT_BY_POINT_ATTRIBUTE`), bit for bit as before: each point is the
+  target's own program with the states as operands, which never folded them,
+  and a `jit(vmap)` over a batch would hold the batch's per-galaxy
+  intermediates at once.
 - No stage-3 or production path uses a host-density target (the DESI target
   calls `host_density_log_likelihood` inside its own jit, with the data as
   arguments), so no value or run changes there.
@@ -1958,7 +1993,12 @@ that resumed the chain.
   write it (the docstring said otherwise).
 - A matching resume through `gate_and_stamp_checkpoint_fingerprint` (every
   `ds.infer` target resume) writes `run_fingerprint.resume-<timestamp>.json`
-  with the resuming process's fingerprint beside the kept one.
+  with the resuming process's fingerprint beside the kept one, which stays byte
+  for byte as it was (one new file per resume). This function is core's own
+  (`ds.infer`'s gate); the frozen reference has no counterpart. The
+  single-directory `gate_and_stamp_resume_fingerprint`, which the fingerprint-gate
+  legacy probe compares with the frozen reference, is unchanged and writes no
+  such record: its callers own their records.
 - The legacy probe's cases (same commit, another commit) give the same
   warnings, word for word.
 
@@ -1983,7 +2023,10 @@ unchanged.
 `tests/test_host_density_pytree.py`, `tests/test_code_identity_resume.py`, and
 the updated `tests/test_nested_sampler_preflight.py` and the multipole fixture
 of `tests/test_infer_options.py` (its events now carry unit directions). Each
-new test fails on the tree before these fixes.
+new test that checks a fix fails on the tree before these fixes; the controls
+among them (behaviour that must hold either way, such as a store with positions
+keeping a plain dict, or an ordinary NumPyro analysis running as before) pass
+on both.
 
 ## Review fixes (2026-10-20)
 

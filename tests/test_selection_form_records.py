@@ -94,6 +94,70 @@ def test_the_report_reads_a_targets_likelihood_options(sampler):
     assert result["likelihood_options"] == {"selection_mc_correction": "none"}
 
 
+@dataclass(frozen=True)
+class DelegatingTarget(DiagnosedTarget):
+    """A target that serves its form through ``__getattr__`` (a wrapper)."""
+
+    def __getattr__(self, name):
+        if name == "selection_mc_correction":
+            return "none"
+        raise AttributeError(name)
+
+
+@dataclass(frozen=True)
+class NoneTarget(DiagnosedTarget):
+    selection_mc_correction: object = field(default=None, kw_only=True)
+
+
+@pytest.mark.parametrize("case", ["delegated", "attribute None", "two forms", "both farr"])
+def test_the_result_and_the_report_name_the_same_form(sampler, case):
+    """One rule decides the form for both records (a review found three cases that differed)."""
+    from darksirens.inference.guard_report import (
+        stated_selection_mc_correction,
+        target_likelihood_options,
+    )
+
+    options = {"selection_mc_correction": "none"}
+    target = {
+        "delegated": lambda: DelegatingTarget(_log_likelihood, _plan()),
+        "attribute None": lambda: NoneTarget(_log_likelihood, _plan(),
+                                             likelihood_options=options),
+        "two forms": lambda: StatingTarget(_log_likelihood, _plan(),
+                                           selection_mc_correction="farr",
+                                           likelihood_options=options),
+        "both farr": lambda: StatingTarget(_log_likelihood, _plan(),
+                                           selection_mc_correction="farr",
+                                           likelihood_options={"selection_mc_correction": "farr"}),
+    }[case]()
+    if case == "two forms":
+        with pytest.raises(ValueError, match="states two forms"):
+            stated_selection_mc_correction(target)
+        with pytest.warns(RuntimeWarning, match=r"guard report skipped \(ValueError"):
+            result = _report(target)
+        assert "guard_report" not in result
+        assert result["likelihood_options"] == {
+            "selection_mc_correction": "unreadable (ValueError)"
+        }
+        return
+    result = _report(target)
+    form = stated_selection_mc_correction(target)
+    assert result["likelihood_options"] == target_likelihood_options(target)
+    assert result["likelihood_options"]["selection_mc_correction"] == form
+    expected = {"delegated": "none", "attribute None": "none", "both farr": "farr"}[case]
+    assert form == expected
+    # The report records the same form ("farr" as its absent key).
+    assert result["guard_report"].get("selection_mc_correction", "farr") == form
+
+
+def test_a_target_with_options_but_no_form_records_unstated_in_both(sampler):
+    target = DiagnosedTarget(_log_likelihood, _plan(),
+                             likelihood_options={"compute_dtype": "float64"})
+    result = _report(target)
+    assert result["guard_report"]["selection_mc_correction"] == "unstated"
+    assert result["likelihood_options"] == {"compute_dtype": "float64",
+                                            "selection_mc_correction": "unstated"}
+
+
 def test_likelihood_options_must_be_a_mapping():
     with pytest.raises(TypeError, match="likelihood_options must be a mapping"):
         InferenceTarget(_log_likelihood, _plan(), likelihood_options=["none"])

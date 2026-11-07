@@ -99,33 +99,89 @@ UNSTATED_SELECTION_MC_CORRECTION = "unstated"
 _ABSENT = object()
 
 
+def _stated_attribute(source, name):
+    """``source.<name>``, or ``None`` when ``source`` has no such attribute.
+
+    An attribute the class or instance defines (a property included) is read
+    as it is, and an error reading it propagates, ``AttributeError``
+    included. One served by ``__getattr__`` (a delegating target) is read
+    too; an ``AttributeError`` from there means it is absent.
+    """
+    import inspect
+
+    if inspect.getattr_static(source, name, _ABSENT) is not _ABSENT:
+        return getattr(source, name)
+    try:
+        return getattr(source, name)
+    except AttributeError:
+        return None
+
+
 def stated_selection_mc_correction(source):
     """The selection Monte-Carlo form ``source`` states, or ``"unstated"``.
 
-    ``source`` is a binding, a target or anything the report reads. An
-    attribute ``selection_mc_correction`` is read as it is; reading it may
-    raise, and the error propagates (``ds.infer`` then skips the advisory
-    report with a warning instead of writing a form nobody stated). Without
-    one, a target's ``likelihood_options`` mapping
-    (:class:`~darksirens.InferenceTarget`) is read. A source that states
-    neither, or states ``None``, gives :data:`UNSTATED_SELECTION_MC_CORRECTION`.
+    The one rule for both the guard report and a target's
+    ``result["likelihood_options"]`` (:func:`target_likelihood_options`), so
+    the two never name different forms. ``source`` is a binding, a target or
+    anything the report reads. Two places may state the form: an attribute
+    ``selection_mc_correction`` and the entry of that name in a
+    ``likelihood_options`` mapping (:class:`~darksirens.InferenceTarget`),
+    each read with :func:`_stated_attribute`; ``None`` states nothing. One
+    stated form is the answer; two that agree are; two that differ raise
+    ``ValueError``, as does an error reading either (``ds.infer`` then skips
+    the advisory report with a warning instead of writing a form nobody
+    stated, and the result records the form as unreadable). A source that
+    states neither gives :data:`UNSTATED_SELECTION_MC_CORRECTION`.
     """
-    import inspect
     from collections.abc import Mapping
 
     name = "selection_mc_correction"
-    if inspect.getattr_static(source, name, _ABSENT) is not _ABSENT:
-        value = getattr(source, name)
-    else:
-        try:  # an attribute served by __getattr__
-            value = getattr(source, name)
-        except AttributeError:
-            value = None
-        if value is None:
-            options = inspect.getattr_static(source, "likelihood_options", None)
-            if isinstance(options, Mapping):
-                value = options.get(name)
-    return UNSTATED_SELECTION_MC_CORRECTION if value is None else str(value)
+    attribute = _stated_attribute(source, name)
+    options = _stated_attribute(source, "likelihood_options")
+    listed = options.get(name) if isinstance(options, Mapping) else None
+    attribute = None if attribute is None else str(attribute)
+    listed = None if listed is None else str(listed)
+    if attribute is not None and listed is not None and attribute != listed:
+        raise ValueError(
+            f"this target states two forms of the selection term: "
+            f"selection_mc_correction={attribute!r} and "
+            f"likelihood_options['selection_mc_correction']={listed!r}"
+        )
+    form = attribute if attribute is not None else listed
+    return UNSTATED_SELECTION_MC_CORRECTION if form is None else form
+
+
+def target_likelihood_options(target):
+    """What a target's ``ds.infer`` result records as ``likelihood_options``.
+
+    The target's ``likelihood_options`` mapping, when it has one, with its
+    ``selection_mc_correction`` set to :func:`stated_selection_mc_correction`
+    (``"unstated"`` when the target states no form); otherwise
+    ``{"selection_mc_correction": <form>}`` when the target states a form;
+    otherwise ``None`` (no key: a target that states nothing has the result it
+    always had). A form that cannot be read, or two that differ, is recorded
+    as ``"unreadable (<error type>)"``: the run is not stopped for a record.
+    The form recorded is the one the guard report records (``"farr"`` is a
+    report's absent key), or the report is skipped.
+    """
+    from collections.abc import Mapping
+
+    name = "selection_mc_correction"
+    try:
+        options = _stated_attribute(target, "likelihood_options")
+    except Exception:
+        options = None
+    try:
+        form = stated_selection_mc_correction(target)
+    except Exception as exc:
+        form = f"unreadable ({type(exc).__name__})"
+    if isinstance(options, Mapping):
+        out = dict(options)
+        out[name] = form
+        return out
+    if form == UNSTATED_SELECTION_MC_CORRECTION:
+        return None
+    return {name: form}
 
 
 def classify_guard(diagnostics, n_events, max_likelihood_variance):
@@ -286,8 +342,12 @@ def guard_report(
       form it states, or ``"unstated"`` when it states none
       (:func:`stated_selection_mc_correction`; a target need not name its
       form, and its likelihood need not run ``"farr"``). A report without
-      the key is therefore a ``"farr"`` binding's or one written before the
-      form existed (every earlier run was ``"farr"``);
+      the key is a ``"farr"`` binding's or target's, or one written before
+      the form existed (core ran only ``"farr"`` then), or one that core
+      wrote from 2026-10-31 (its default became ``"none"``) to 2026-11-07
+      (this rule) for a target that stated no form: that report may come
+      from a run of ``"none"``, and only the run's own record (its
+      provenance, or the target's code) can say;
     - ``guarded`` and ``guarded_fraction``: the draws where a guard fired;
     - ``fired``: for each guard that fired (``"selection_neff"``,
       ``"pe_mc_variance"``, see :func:`classify_guard`), its ``count``,
@@ -434,4 +494,5 @@ __all__ = [
     "guard_report",
     "selection_coverage",
     "stated_selection_mc_correction",
+    "target_likelihood_options",
 ]
