@@ -265,8 +265,13 @@ class _OneRecordPerDraw:
     @property
     def selection_mc_correction(self):
         # Optional, unlike the attributes above: not part of the capability
-        # marker, so a target that does not state it keeps its report.
-        return _optional_target_value(self._target, "selection_mc_correction")
+        # marker, so a target that does not state it keeps its report, which
+        # records "unstated" rather than reading as a "farr" one. A form that
+        # cannot be read raises here, so ds.infer skips the advisory report
+        # with a warning instead of recording a form nobody stated.
+        from darksirens.inference.guard_report import stated_selection_mc_correction
+
+        return stated_selection_mc_correction(self._target)
 
     def diagnostics(self, theta):
         import numpy as np
@@ -379,6 +384,33 @@ def _log_prior_volume_fraction(analysis):
     return angular + float(
         getattr(analysis.parameters, "fixed_constraint_log_fraction", 0.0)
     )
+
+
+def _target_likelihood_options(target):
+    """The likelihood options a target states, for its result, or ``None``.
+
+    ``target.likelihood_options`` when the target sets it (core's own target
+    builders do); otherwise ``{"selection_mc_correction": ...}`` when the
+    target states that attribute (``"unreadable (<error>)"`` when reading it
+    raises: the run is not stopped for a record); otherwise ``None``, and the
+    result is as before.
+    """
+    import inspect
+    from collections.abc import Mapping
+
+    options = getattr(target, "likelihood_options", None)
+    if isinstance(options, Mapping):
+        return dict(options)
+    name = "selection_mc_correction"
+    if inspect.getattr_static(target, name, _MISSING) is _MISSING:
+        return None
+    try:
+        value = getattr(target, name)
+    except Exception as exc:
+        value = f"unreadable ({type(exc).__name__})"
+    from darksirens.inference.guard_report import UNSTATED_SELECTION_MC_CORRECTION
+
+    return {name: UNSTATED_SELECTION_MC_CORRECTION if value is None else str(value)}
 
 
 def _apply_prior_volume_correction(result, fraction):
@@ -686,6 +718,16 @@ def infer(
     (:func:`~darksirens.likelihood.mixture.make_catalog_mixture_target`,
     :func:`~darksirens.likelihood.host_density.make_host_density_target`).
 
+    Every ordinary result also carries ``likelihood_options``: the
+    value-changing likelihood options the binding ran under, each stated,
+    defaults included (``selection_mc_correction``, ``compute_dtype``,
+    ``max_likelihood_variance``, ``selection_neff_soft_guard``;
+    :func:`~darksirens.inference.run_fingerprint.stated_likelihood_options`),
+    whether or not the guard report runs. A target result carries it when the
+    target states it: its ``InferenceTarget.likelihood_options`` (core's own
+    target builders set it), or else ``{"selection_mc_correction": ...}`` when
+    the target has that attribute. A target that states neither gets none.
+
     ``guard_report`` (default ``True``) evaluates the likelihood diagnostics
     at 32 prior draws before sampling (an integer sets the number of draws,
     ``False`` skips it) and records in ``result["guard_report"]`` which
@@ -775,6 +817,8 @@ def infer(
         sampler = _resolve_sampler(sampler, plan)
         if len(plan.labels):
             _warn_built_for_another_sampler(analysis, sampler)
+        # Read before sampling: the result states the form the target ran.
+        stated_options = _target_likelihood_options(analysis)
 
         prior_transform = None
         report = None
@@ -830,6 +874,8 @@ def infer(
         )
         if report is not None:
             result["guard_report"] = report
+        if stated_options is not None:
+            result["likelihood_options"] = stated_options
         # Core's own target builders declare the offset of their analysis; a
         # companion's target may declare its own.
         if analysis.log_prior_volume_fraction is None:
@@ -898,6 +944,11 @@ def infer(
     )
     if report is not None:
         result["guard_report"] = report
+    # Every ordinary result states the value-changing options it ran under,
+    # the selection Monte-Carlo form always included, whatever guard_report is.
+    from darksirens.inference.run_fingerprint import stated_likelihood_options
+
+    result["likelihood_options"] = stated_likelihood_options(likelihood)
     return _apply_prior_volume_correction(result, _log_prior_volume_fraction(analysis))
 
 

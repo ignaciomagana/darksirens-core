@@ -417,8 +417,10 @@ likelihood options; `selection_neff_guard="auto"` is the hard guard there.
   `guard_mode`, `max_likelihood_variance`, `guarded`, `guarded_fraction`,
   `fired` (per guard, `"selection_neff"` or `"pe_mc_variance"`: `count`,
   `fraction` and the `ranges` `{label: [min, max]}` of the draws where it
-  fired), `probed_ranges`, `selection_mc_correction` when the likelihood
-  states a form other than `"farr"`, and, when some draw is non-finite with no
+  fired), `probed_ranges`, `selection_mc_correction` unless the likelihood
+  states `"farr"` (the form it states, or `"unstated"` for a target that
+  states none; a report without the key is a `"farr"` binding's or one from
+  before the form existed), and, when some draw is non-finite with no
   guard firing, `non_finite_other`. One `UserWarning` is emitted when more than 5%
   of the draws are guarded. The bound likelihood, its program and the
   sampler's RNG streams are unchanged; `guard_report` never enters the
@@ -610,7 +612,11 @@ A target may expose what the guard report reads from a binding:
 `n_events`, `max_likelihood_variance` and `selection_neff_soft_guard`. They are
 looked up without being evaluated; a target missing any of them runs exactly
 as before (same sampler call, same result, no report). A target may also state
-`selection_mc_correction`, which is not part of that list. With all four,
+`selection_mc_correction` (or `likelihood_options`, an optional field of
+`InferenceTarget` that `ds.infer` copies into `result["likelihood_options"]`),
+which is not part of that list; the report of a target that states neither
+records `"unstated"`, and a form that cannot be read skips the advisory report
+with a warning. With all four,
 `ds.infer(target, guard_report=...)` calls
 `guard_report(target, prior_transform, plan.labels, n_draws=, seed=,
 for_target=True)` with the plan's prior transform (the one the sampler then

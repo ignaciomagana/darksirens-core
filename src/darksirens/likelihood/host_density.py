@@ -17,11 +17,13 @@ import numpy as np
 
 from darksirens.analysis import Analysis, ParameterPlan, SpectralRedshift
 from darksirens.cosmology.distances import threads_distance_table
+from darksirens.gw.runtime import require_unit_directions
 from darksirens.gw.types import GWEvent
 from darksirens.inference.run_fingerprint import (
     canonical_semantic,
     likelihood_options_semantic,
     parameter_plan_semantic,
+    stated_likelihood_options,
 )
 from darksirens.inference.target import InferenceTarget, combine_parameter_plans
 from darksirens.selection.gw import (
@@ -85,21 +87,46 @@ def _jit_with_state_operands(fn, *, states):
     trace), once per argument structure, shapes and trace context, with its
     closure concrete, so every check a redshift model or core makes on the
     host at trace time runs as before. The arrays the trace captured that
-    are leaves of ``states`` (of one or more dimensions) are then arguments
-    of the compiled program, placed once; every other constant stays one, so
+    are leaves of ``states`` (numeric, of one or more dimensions) are then
+    arguments of the compiled program; every other constant stays one, so
     the program is the jit's own with those inputs moved. As HLO constants
     XLA constant-folds them at compile time: on lss's 405,746-galaxy catalog
     state that compile peaked at 19.6 GiB.
+
+    The returned ``call`` takes the arguments of ``fn`` and, optionally,
+    ``_state_operands``: the state arrays to pass, in the order of
+    ``call.state_operands()`` (the states' arrays on the device, made once).
+    By default those are passed. Inside an enclosing ``jax.jit`` (or
+    ``vmap``, ``grad``, a sampler's loop) only arrays the enclosing program
+    receives as arguments stay operands: values ``call`` itself holds become
+    constants of that program again. A caller that traces the likelihood
+    therefore passes the states in (``_state_operands``, which
+    :func:`make_host_density_target`'s ``as_pytree_callable`` does), so that
+    they are arguments of its program too.
     """
 
     from jax._src.config import trace_context  # jax is pinned (pyproject)
 
-    state_arrays = {
-        id(leaf): leaf for leaf in jax.tree_util.tree_leaves(states) if np.ndim(leaf) > 0
-    }
-    programs = {}
+    def numeric_array(leaf):
+        kind = getattr(getattr(leaf, "dtype", None), "kind", None)
+        return np.ndim(leaf) > 0 and isinstance(kind, str) and kind in ("b", "i", "u", "f", "c")
 
-    def call(*args, **kwargs):
+    state_leaves = tuple(
+        leaf for leaf in jax.tree_util.tree_leaves(states) if numeric_array(leaf)
+    )
+    index_of = {}
+    for i, leaf in enumerate(state_leaves):
+        index_of.setdefault(id(leaf), i)
+    programs = {}
+    device = []
+
+    def state_operands():
+        if not device:
+            with jax.ensure_compile_time_eval():  # concrete under an enclosing trace too
+                device.append(tuple(jnp.asarray(leaf) for leaf in state_leaves))
+        return device[0]
+
+    def call(*args, _state_operands=None, **kwargs):
         leaves, tree = jax.tree_util.tree_flatten((args, kwargs))
         key = (tree, tuple(map(jax.api_util.shaped_abstractify, leaves)), trace_context())
         entry = programs.get(key)
@@ -112,20 +139,31 @@ def _jit_with_state_operands(fn, *, states):
                 return jax.tree_util.tree_unflatten(
                     out_tree, jax.core.eval_jaxpr(closed.jaxpr, consts, *leaves)
                 )
-            hoist = tuple(state_arrays.get(id(c)) is c for c in consts)
-            with jax.ensure_compile_time_eval():  # concrete under an enclosing trace too
-                operands = tuple(jnp.asarray(c) for c, h in zip(consts, hoist) if h)
-            kept = tuple(None if h else c for c, h in zip(consts, hoist))
+            slots = []
+            for c in consts:
+                i = index_of.get(id(c))
+                slots.append(i if i is not None and state_leaves[i] is c else None)
+            slots = tuple(slots)
+            kept = tuple(c if i is None else None for c, i in zip(consts, slots))
+            hoisted = tuple(i for i in slots if i is not None)
 
             def program(operands, leaves, jaxpr=closed.jaxpr):
                 values = iter(operands)
-                filled = [next(values) if h else c for c, h in zip(kept, hoist)]
+                filled = [c if i is None else next(values) for c, i in zip(kept, slots)]
                 return jax.core.eval_jaxpr(jaxpr, filled, *leaves)
 
-            entry = programs[key] = (jax.jit(program), operands, out_tree)
-        run, operands, out_tree = entry
+            entry = programs[key] = (jax.jit(program), hoisted, out_tree)
+        run, hoisted, out_tree = entry
+        given = state_operands() if _state_operands is None else tuple(_state_operands)
+        if len(given) != len(state_leaves):
+            raise ValueError(
+                f"_state_operands has {len(given)} arrays, the states have "
+                f"{len(state_leaves)}"
+            )
+        operands = tuple(given[i] for i in hoisted)
         return jax.tree_util.tree_unflatten(out_tree, run(operands, leaves))
 
+    call.state_operands = state_operands
     return call
 
 
@@ -162,6 +200,12 @@ def host_density_log_likelihood(
     core. The first two are passed only to the corresponding redshift-density
     evaluation. The auxiliary likelihood is evaluated exactly once after the
     ordinary PE/selection reduction.
+
+    With an anisotropic ``angular_model`` the events must carry a unit sky
+    direction on every valid sample. This function may be traced, so it
+    cannot check that; its caller owns the check
+    (:func:`darksirens.gw.runtime.require_unit_directions`, which
+    :func:`make_host_density_target` runs on its concrete events).
     """
 
     plan = _parameter_spec(redshift_model)
@@ -260,20 +304,37 @@ def make_host_density_target(
     """Build a sampler target from a catalog-free core analysis plus an extension.
 
     The supplied GWEvent objects must already carry pixel ids in the external
-    model's state frame. Core decodes only its accepted cosmology/population/
-    angular block and treats all extension state as opaque. The target
-    declares the base analysis's ``log_prior_volume_fraction`` (its angular
-    model's and a partially fixed population pair's), so its ``ds.infer``
-    result carries ``logZ_corrected`` as an ordinary one does.
+    model's state frame, and, for an anisotropic angular model of
+    ``base_analysis``, a unit sky direction on every valid sample: events
+    without directions (``make_gw_event``'s zeros placeholder, which an
+    isotropic binding of a selection store without ``ra`` and ``dec``
+    carries) are refused here, since the model would weight every injection
+    as if it lay at ``n = (0, 0, 0)``. Core decodes only its accepted
+    cosmology/population/angular block and treats all extension state as
+    opaque. The target declares the base analysis's
+    ``log_prior_volume_fraction`` (its angular model's and a partially fixed
+    population pair's), so its ``ds.infer`` result carries
+    ``logZ_corrected`` as an ordinary one does, and its
+    ``likelihood_options`` (the form of the selection term included), which
+    ``ds.infer`` records in ``result["likelihood_options"]``.
 
     The target's likelihood is one ``jax.jit``, built here and reused by every
     call, over the coordinate, the GW samples and the distance table. The
     opaque states are closed over, and concrete when it is traced; their
-    arrays are operands of the compiled program, not constants
-    (:func:`_jit_with_state_operands`). ``redshift_model``'s methods
-    are therefore traced, as they already were under ``sel_batch_size`` or
-    ``pe_event_block``. Evaluated eagerly, every call re-traced the
-    likelihood, and with either option re-compiled its scans.
+    arrays are operands of that program, not constants
+    (:func:`_jit_with_state_operands`), when the likelihood is called
+    directly or under an eager ``jax.vmap`` or ``jax.grad``. Inside an
+    enclosing jit (a user's ``jax.jit(target.log_likelihood)``, a sampler's
+    compiled loop) the arrays that program closes over become its constants
+    again, and XLA folds them at compile time (on lss's 350k-galaxy mock,
+    about 18 GiB of host memory). ``target.log_likelihood.as_pytree_callable()``
+    is the same likelihood with the states, GW samples and distance table as
+    pytree leaves: passed as an argument of the enclosing program
+    (``jax.jit(lambda f, x: f(x))(f, x)``), they stay arguments. Core's
+    TinyNS adapter, dynesty's batched form and NumPyro adapter use it.
+    ``redshift_model``'s methods are traced, as they already were under
+    ``sel_batch_size`` or ``pe_event_block``. Evaluated eagerly, every call
+    re-traced the likelihood, and with either option re-compiled its scans.
 
     The run fingerprint of the target (``ds.infer`` with a checkpoint)
     records the base analysis's own plan semantic (fixed values included),
@@ -294,6 +355,17 @@ def make_host_density_target(
     # The target's jit traces the injections, where the reducer cannot count
     # them; they are concrete here.
     _require_ndraw_covers_injections(gw_selection, n_draw)
+    if base_analysis.angular_model != "isotropic":
+        # An anisotropic model reads every sample's direction. Events built
+        # without one (make_gw_event's zeros placeholder: a selection store
+        # without ra and dec, bound for an isotropic analysis) would weight
+        # every injection as if it lay at n = (0, 0, 0), silently.
+        for name, event in (("gw_pe", gw_pe), ("gw_selection", gw_selection)):
+            require_unit_directions(
+                event,
+                what=f"make_host_density_target's {name}",
+                angular_model=base_analysis.angular_model,
+            )
 
     extension_plan = _parameter_spec(redshift_model)
     combined_plan = combine_parameter_plans(
@@ -351,14 +423,35 @@ def make_host_density_target(
             return_diagnostics=False,
         )
 
-    def log_likelihood(theta):
+    n_theta = len(combined_plan.labels)
+
+    def checked(theta):
         theta = jnp.asarray(theta)
-        if theta.ndim != 1 or int(theta.shape[0]) != len(combined_plan.labels):
+        if theta.ndim != 1 or int(theta.shape[0]) != n_theta:
             raise ValueError(
-                f"theta must have shape ({len(combined_plan.labels)},), got "
-                f"{tuple(theta.shape)}"
+                f"theta must have shape ({n_theta},), got {tuple(theta.shape)}"
             )
-        return evaluate(theta, gw_pe, gw_selection)
+        return theta
+
+    def evaluate_operands(
+        state_operands, gw_pe, gw_selection, distance_table, ambient_extras, theta
+    ):
+        return evaluate.jitted(
+            checked(theta),
+            gw_pe,
+            gw_selection,
+            distance_table=distance_table,
+            _ambient_extras=ambient_extras,
+            _state_operands=state_operands,
+        )
+
+    log_likelihood = _HostDensityLogLikelihood(
+        lambda theta: evaluate(checked(theta), gw_pe, gw_selection),
+        evaluate_operands,
+        evaluate.jitted.state_operands,
+        gw_pe,
+        gw_selection,
+    )
 
     def target_provenance():
         block = {
@@ -395,7 +488,61 @@ def make_host_density_target(
         identity=identity,
         provenance=target_provenance,
         log_prior_volume_fraction=_log_prior_volume_fraction(base_analysis),
+        # Recorded in the ds.infer result: the form of the selection term
+        # this likelihood runs, stated whatever it is.
+        likelihood_options=stated_likelihood_options({
+            "selection_neff_soft_guard": selection_neff_soft_guard,
+            "max_likelihood_variance": max_likelihood_variance,
+            "selection_mc_correction": selection_mc_correction,
+        }),
     )
+
+
+class _HostDensityLogLikelihood:
+    """A host-density target's log-likelihood: ``theta -> log L``.
+
+    Calling it is the target's one jitted program, its opaque states'
+    arrays passed as operands (:func:`_jit_with_state_operands`).
+    :meth:`as_pytree_callable` is the same likelihood as a
+    :class:`jax.tree_util.Partial` whose leaves are those arrays, the GW
+    samples, the distance table and the ambient jit channels, so a caller
+    that traces it inside its own program and receives it as an argument
+    (TinyNS's and dynesty's batched forms, core's NumPyro adapter, or
+    ``jax.jit(lambda f, x: f(x))(target.log_likelihood.as_pytree_callable(),
+    x)``) compiles them as arguments, not constants.
+    """
+
+    def __init__(self, call, evaluate_operands, state_operands, gw_pe, gw_selection):
+        self._call = call
+        self._evaluate_operands = evaluate_operands
+        self._state_operands = state_operands
+        self._gw_pe = gw_pe
+        self._gw_selection = gw_selection
+
+    def __call__(self, theta):
+        return self._call(theta)
+
+    def as_pytree_callable(self):
+        """This likelihood as a pytree callable whose data are leaves, not constants.
+
+        Calling the returned :class:`jax.tree_util.Partial` with ``theta``
+        returns exactly ``self(theta)``. The distance table and the ambient
+        channels are snapshots taken here: build it again after changing them.
+        """
+        from darksirens.cosmology.distances import (
+            _AMBIENT_JIT_CHANNELS,
+            resolve_distance_table,
+        )
+
+        return jax.tree_util.Partial(
+            self._evaluate_operands,
+            self._state_operands(),
+            self._gw_pe,
+            self._gw_selection,
+            resolve_distance_table(None),
+            tuple(resolve() for resolve, _ in _AMBIENT_JIT_CHANNELS),
+        )
+
 
 __all__ = [
     "HostDensityLikelihoodDiagnostics",

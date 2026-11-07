@@ -456,7 +456,10 @@ def test_target_resume_is_gated(tmp_path, fake_sampler):
     # Same configuration: resumes; operational options may differ.
     again = infer(target, nlive=50, show_progress=False, **resume)
     assert again["run_fingerprint_digest"] == first["run_fingerprint_digest"]
-    assert sorted(p.name for p in run.iterdir()) == [FINGERPRINT_BASENAME]
+    # The creator's fingerprint is kept; the resuming run's is recorded beside it.
+    names = sorted(p.name for p in run.iterdir())
+    assert names[0] == FINGERPRINT_BASENAME and len(names) == 2
+    assert names[1].startswith("run_fingerprint.resume-")
 
     # A sampler setting, the identity or the plan differ: refused, clearly.
     with pytest.raises(ResumeFingerprintError) as excinfo:

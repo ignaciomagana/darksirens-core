@@ -246,6 +246,18 @@ class InferenceTarget:
     ordinary analysis; ``None`` (the default) records neither. Core's own
     target builders set it from their analysis.
 
+    ``likelihood_options`` (optional, a mapping) states the value-changing
+    options the likelihood was built with, for example
+    ``{"selection_mc_correction": "none", ...}``
+    (:func:`darksirens.inference.run_fingerprint.stated_likelihood_options`).
+    ``ds.infer`` copies it into ``result["likelihood_options"]``, so a saved
+    result says which form of the selection term made it, and the guard report
+    reads the form from it when the target has no ``selection_mc_correction``
+    attribute. Core's own target builders set it. It is a record only: it is
+    not hashed into the run fingerprint (``provenance`` is how a likelihood
+    option enters the digest), and core never configures the likelihood
+    from it.
+
     A subclass may also expose what ``ds.infer``'s guard report reads from a
     binding (:data:`darksirens.inference.guard_report.TARGET_GUARD_REPORT_ATTRIBUTES`:
     a ``diagnostics(theta)`` method returning the likelihood's diagnostics
@@ -257,8 +269,10 @@ class InferenceTarget:
     built for as ``built_for_sampler``. See
     :func:`darksirens.inference.public.infer`. A target may state its
     ``selection_mc_correction`` too, which the report records when it is not
-    ``"farr"``. None of these is a field of this class; a target without them
-    runs as before.
+    ``"farr"``; a target that states no form (neither that attribute nor
+    ``likelihood_options``) has its report record ``"unstated"``, never read
+    as ``"farr"``. None of these is a field of this class; a target without
+    them runs as before.
     """
 
     log_likelihood: Callable
@@ -266,6 +280,7 @@ class InferenceTarget:
     identity: Any = field(default=None, kw_only=True, hash=False)
     provenance: Any = field(default=None, kw_only=True, hash=False)
     log_prior_volume_fraction: float | None = field(default=None, kw_only=True, hash=False)
+    likelihood_options: Mapping | None = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         if not callable(self.log_likelihood):
@@ -286,6 +301,19 @@ class InferenceTarget:
             object.__setattr__(self, "log_prior_volume_fraction", float(fraction))
         from .run_fingerprint import canonical_semantic
 
+        if self.likelihood_options is not None:
+            if not isinstance(self.likelihood_options, Mapping):
+                raise TypeError(
+                    "InferenceTarget.likelihood_options must be a mapping or None, "
+                    f"got {type(self.likelihood_options).__name__}"
+                )
+            object.__setattr__(
+                self,
+                "likelihood_options",
+                canonical_semantic(
+                    dict(self.likelihood_options), "InferenceTarget.likelihood_options"
+                ),
+            )
         # Fail at construction, not at the first checkpoint.
         if self.identity is not None:
             canonical_semantic(self.identity, "InferenceTarget.identity")

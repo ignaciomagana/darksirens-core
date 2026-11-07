@@ -58,7 +58,8 @@ GUARD_WARN_FRACTION = 0.05
 #: it in ``result["guard_report"]``. A companion that runs its own report when
 #: it builds a target can skip that report when this name exists. A target may
 #: also state ``selection_mc_correction``, which the report records; it is not
-#: part of the marker, so a target that omits it keeps its report.
+#: part of the marker, so a target that omits it keeps its report, which then
+#: records the form as ``"unstated"`` (:data:`UNSTATED_SELECTION_MC_CORRECTION`).
 TARGET_GUARD_REPORT_ATTRIBUTES = (
     "diagnostics",
     "n_events",
@@ -89,6 +90,42 @@ COVERAGE_SHELL = 0.1
 # the log-likelihood bias of a campaign that stops there) exceeds this.
 COVERAGE_WARN_NATS = 0.1
 _COSMOLOGY_LABELS = ("H0", "Om0", "w0", "wa")
+
+#: The form a report records for a bound object or target that states no
+#: ``selection_mc_correction``. Such an object's likelihood need not run
+#: ``"farr"`` (core's default has been ``"none"`` since 2026-10-31), so its
+#: report must not read as a ``"farr"`` one, which records no form.
+UNSTATED_SELECTION_MC_CORRECTION = "unstated"
+_ABSENT = object()
+
+
+def stated_selection_mc_correction(source):
+    """The selection Monte-Carlo form ``source`` states, or ``"unstated"``.
+
+    ``source`` is a binding, a target or anything the report reads. An
+    attribute ``selection_mc_correction`` is read as it is; reading it may
+    raise, and the error propagates (``ds.infer`` then skips the advisory
+    report with a warning instead of writing a form nobody stated). Without
+    one, a target's ``likelihood_options`` mapping
+    (:class:`~darksirens.InferenceTarget`) is read. A source that states
+    neither, or states ``None``, gives :data:`UNSTATED_SELECTION_MC_CORRECTION`.
+    """
+    import inspect
+    from collections.abc import Mapping
+
+    name = "selection_mc_correction"
+    if inspect.getattr_static(source, name, _ABSENT) is not _ABSENT:
+        value = getattr(source, name)
+    else:
+        try:  # an attribute served by __getattr__
+            value = getattr(source, name)
+        except AttributeError:
+            value = None
+        if value is None:
+            options = inspect.getattr_static(source, "likelihood_options", None)
+            if isinstance(options, Mapping):
+                value = options.get(name)
+    return UNSTATED_SELECTION_MC_CORRECTION if value is None else str(value)
 
 
 def classify_guard(diagnostics, n_events, max_likelihood_variance):
@@ -245,8 +282,12 @@ def guard_report(
 
     - ``n_draws``, ``guard_mode`` (``"hard"``: ``-inf``; ``"soft"``:
       penalised), ``max_likelihood_variance``, and
-      ``selection_mc_correction`` when ``bound`` states a form other than
-      ``"farr"``, so that a report without it is an earlier ``"farr"`` run;
+      ``selection_mc_correction`` unless ``bound`` states ``"farr"``: the
+      form it states, or ``"unstated"`` when it states none
+      (:func:`stated_selection_mc_correction`; a target need not name its
+      form, and its likelihood need not run ``"farr"``). A report without
+      the key is therefore a ``"farr"`` binding's or one written before the
+      form existed (every earlier run was ``"farr"``);
     - ``guarded`` and ``guarded_fraction``: the draws where a guard fired;
     - ``fired``: for each guard that fired (``"selection_neff"``,
       ``"pe_mc_variance"``, see :func:`classify_guard`), its ``count``,
@@ -314,8 +355,8 @@ def guard_report(
         "fired": fired,
         "probed_ranges": _ranges(points, labels),
     }
-    correction = getattr(bound, "selection_mc_correction", None)
-    if correction is not None and correction != FARR_SELECTION_MC_CORRECTION:
+    correction = stated_selection_mc_correction(bound)
+    if correction != FARR_SELECTION_MC_CORRECTION:
         report["selection_mc_correction"] = correction
     if other is not None:
         report["non_finite_other"] = other
@@ -388,7 +429,9 @@ __all__ = [
     "GUARD_REPORT_DRAWS",
     "GUARD_WARN_FRACTION",
     "TARGET_GUARD_REPORT_ATTRIBUTES",
+    "UNSTATED_SELECTION_MC_CORRECTION",
     "classify_guard",
     "guard_report",
     "selection_coverage",
+    "stated_selection_mc_correction",
 ]

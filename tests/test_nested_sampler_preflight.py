@@ -173,7 +173,20 @@ def test_one_finite_draw_warns_and_estimates_initialization(monkeypatch, capsys)
     assert state["calls"] == 5
     assert "preflight: 1/5 prior draws have finite logL (finite logL in [3.5, 3.5])" in out
     assert "finite fraction 20.0%" in out
-    assert "about ~500 draws to seed 100 live points" in out
+    # dynesty draws batches of nlive until min(nlive, max(ndim + 1,
+    # min(nlive - 20, 100))) = 80 are finite, not all 100: 4 batches.
+    assert (
+        "dynesty draws batches of 100 prior points until 80 have a finite logL "
+        "(its other live points start at its floor value): about ~400 draws, so "
+        "initialization will be SLOW." in out
+    )
+    assert "to seed 100 live points" not in out
+
+    # The legacy setting (max_draws == n_probe) keeps the frozen text.
+    _fixed_clock(monkeypatch)
+    like, _ = _counter_likelihood({1}, {1: 3.5})
+    nested_sampler_preflight(like, lambda u: u, 2, seed=9, nlive=100, n_probe=5, max_draws=5)
+    assert "about ~500 draws to seed 100 live points" in capsys.readouterr().out
 
 
 def test_three_finite_draws_warn_but_fourth_finite_stops_early(monkeypatch, capsys):
@@ -202,7 +215,7 @@ def test_nlive_zero_warning_uses_many(monkeypatch, capsys):
     _fixed_clock(monkeypatch)
     like, _ = _counter_likelihood({2})
     nested_sampler_preflight(like, lambda u: u, 2, seed=2, nlive=0, n_probe=4)
-    assert "reject-sample about many draws to seed 0 live points" in capsys.readouterr().out
+    assert "reject-sample about many draws to seed its live points" in capsys.readouterr().out
 
 
 def test_seed_xor_sequence_and_global_rng_independence(monkeypatch):
@@ -287,7 +300,11 @@ def test_likelihood_finite_on_one_percent_of_the_prior_now_passes(monkeypatch, c
     assert f"[*] preflight: 4/{n} prior draws have finite logL (finite logL in [-1.5, -1.5])" in out
     # The slow-initialization warning, with the draws to seed nlive.
     assert f"only 4/{n} prior draws are finite" in out
-    assert f"about ~{int(np.ceil(nlive * n / 4)):,} draws to seed {nlive} live points" in out
+    # dynesty needs 100 finite live points at nlive 1000, in batches of 1000.
+    est = nlive * int(np.ceil(100 / (nlive * 4 / n)))
+    assert "until 100 have a finite logL" in out
+    assert f"about ~{est:,} draws" in out
+    assert f"~{int(np.ceil(nlive * n / 4)):,} draws" not in out  # the tenfold estimate
     assert out.rstrip("\n").endswith("If it stalls, consider: " + CORE_REMEDIES)
 
     # The legacy setting refuses the same likelihood after 32 draws.
@@ -309,12 +326,14 @@ def test_always_minus_inf_raises_with_the_number_of_draws_probed(monkeypatch, ca
         "Nested-sampler preflight: the likelihood is -inf on ALL 4096 probed "
         "prior draws (32 first, then batches doubling the number drawn, up to "
         "max_draws=4096). The finite fraction of the prior is then likely "
-        "below 3/4096 (0.073%), so dynesty/tinyns would likely need more than "
-        "~1,365,334 draws to seed 1000 live points, and would reject-sample "
-        "forever if the likelihood is -inf on the whole prior. "
+        "below 3/4096 (0.073%), so dynesty would likely need more than "
+        "~136,534 draws to find the 100 finite live points it starts from (it "
+        "raises after 1,000,000 draws with none finite); no sampler starts if "
+        "the likelihood is -inf on the whole prior. "
         "infer(..., sampler_preflight_max_draws=<n>) probes more draws before "
         "refusing. The most common cause is the selection variance guard"
     )
+    assert "1,365,334" not in message  # nlive / bound, ten times too many
     # "forever" only as the condition the evidence cannot exclude.
     assert "reject-sample forever without ever finding" not in message
     assert message.endswith(CORE_REMEDIES)
@@ -346,7 +365,10 @@ def test_a_finite_draw_past_n_probe_warns_with_its_fraction(monkeypatch, capsys)
     assert state["calls"] == 4096
     assert "[*] preflight: 1/4096 prior draws have finite logL (finite logL in [-2, -2])" in out
     assert "finite fraction 0.024%" in out
-    assert "about ~2,048,000 draws to seed 500 live points" in out
+    # 100 finite live points at nlive 500: 820 batches of 500, not 500 x 4096.
+    assert "until 100 have a finite logL" in out
+    assert "about ~410,000 draws" in out
+    assert "2,048,000" not in out
 
 
 def test_max_draws_below_n_probe_is_refused():
@@ -402,3 +424,59 @@ def test_max_draws_is_an_infer_sampler_option_threaded_to_the_probe(monkeypatch)
     assert default.sampler_preflight_max_draws == preflight.PREFLIGHT_MAX_DRAWS
     # A start-time check, not a sampler setting: a resume may change it.
     assert sampler_semantic("dynesty", legacy) == sampler_semantic("dynesty", default)
+
+
+def test_tinyns_gets_its_own_start_up_sentence(monkeypatch, capsys):
+    # TinyNS draws its nlive live points once and keeps the -inf ones; it
+    # never reject-samples for them.
+    _fixed_clock(monkeypatch)
+    like, _ = _counter_likelihood({1}, {1: 3.5})
+    nested_sampler_preflight(like, lambda u: u, 2, seed=9, nlive=100, n_probe=5,
+                             sampler="tinyns")
+    out = capsys.readouterr().out
+    assert "TinyNS draws its 100 live points once from the prior and keeps the -inf" in out
+    assert "about 20 of them start finite" in out
+    assert "dynesty draws" not in out
+
+    _running_clock(monkeypatch)
+    like, _ = _counter_likelihood(set())
+    with pytest.raises(RuntimeError, match="TinyNS, which draws its 1000 live points once"):
+        nested_sampler_preflight(like, lambda u: u, 2, seed=7, nlive=1000, sampler="tinyns")
+
+
+def test_the_dynesty_estimate_is_dynestys_own_start_up_cost(monkeypatch, capsys):
+    """The review's measurement: dynesty seeds 100 finite live points, not nlive."""
+    import re
+
+    dynesty = pytest.importorskip("dynesty")
+    nlive, ndims, frac = 1000, 3, 0.01
+
+    def loglike(theta):
+        return -1.0 if float(theta[0]) < frac else -np.inf
+
+    calls = {"n": 0}
+
+    def counted(theta):
+        calls["n"] += 1
+        return loglike(theta)
+
+    dynesty.NestedSampler(counted, lambda u: u, ndims, nlive=nlive, bound="multi",
+                          sample="rwalk", rstate=np.random.default_rng(3))
+    actual = calls["n"]  # its start-up: batches of nlive until 100 are finite
+    assert actual == nlive * int(np.ceil(actual / nlive))
+
+    # The probe's estimate from a long stream of draws (4 finite stop it).
+    _running_clock(monkeypatch)
+    nested_sampler_preflight(lambda t: loglike(np.asarray(t)), lambda u: u, ndims,
+                             seed=5, nlive=nlive, sampler="dynesty")
+    out = capsys.readouterr().out
+    found = re.search(r"only 4/(\d+) prior draws are finite", out)
+    assert found, out
+    est = int(re.search(r"about ~([\d,]+) draws", out).group(1).replace(",", ""))
+    n = int(found.group(1))
+    assert est == nlive * int(np.ceil(100 / (nlive * 4 / n)))
+    # The same count from the true fraction is dynesty's own, to its batches;
+    # the old nlive / fraction estimate was ten times it.
+    expected = nlive * int(np.ceil(100 / (nlive * frac)))
+    assert abs(actual - expected) <= 4 * nlive, (actual, expected)
+    assert nlive / frac >= 5 * actual

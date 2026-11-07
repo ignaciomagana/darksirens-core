@@ -34,6 +34,9 @@ def _nested_preflight(likelihood, prior_transform, ndims, opts):
         max_draws=int(
             getattr(opts, "sampler_preflight_max_draws", PREFLIGHT_MAX_DRAWS)
         ),
+        # The start-up estimate is the backend's own (dynesty seeds with a
+        # minimum of finite live points, TinyNS keeps its -inf draws).
+        sampler=getattr(opts, "sampler", None),
     )
 
 

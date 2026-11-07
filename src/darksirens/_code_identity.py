@@ -87,6 +87,37 @@ def _package_commit(name):
     return sha, dirty
 
 
+def package_source_sha256(directory):
+    """SHA-256 of every ``.py`` file under ``directory``, or ``None``.
+
+    The digest covers each file's path relative to ``directory`` and its
+    bytes, in sorted order (``__pycache__`` is skipped). It tells two trees of
+    the package apart whatever git knows about them: a copy without
+    ``.git``, an install from a wheel or a plain directory, uncommitted edits
+    and new untracked modules.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    try:
+        paths = []
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            paths.extend(
+                os.path.join(root, name) for name in files if name.endswith(".py")
+            )
+        for path in sorted(paths, key=lambda p: os.path.relpath(p, directory)):
+            relative = os.path.relpath(path, directory).replace(os.sep, "/")
+            with open(path, "rb") as handle:
+                content = handle.read()
+            digest.update(relative.encode("utf-8") + b"\0")
+            digest.update(str(len(content)).encode("ascii") + b"\0")
+            digest.update(content)
+    except OSError:
+        return None
+    return digest.hexdigest() if paths else None
+
+
 @functools.lru_cache(maxsize=None)
 def _code_identity_items():
     import darksirens
@@ -97,6 +128,9 @@ def _code_identity_items():
         items.append(("git_sha", sha))
         if dirty is not None:
             items.append(("git_dirty", dirty))
+    source = package_source_sha256(os.path.dirname(os.path.abspath(darksirens.__file__)))
+    if source is not None:
+        items.append(("source_sha256", source))
     tinyns_sha, _ = _package_commit("tinyns")
     if tinyns_sha is not None:
         items.append(("tinyns_commit", tinyns_sha))
@@ -107,12 +141,19 @@ def code_identity() -> dict:
     """The code identity of this process, read once.
 
     ``darksirens_version``; ``git_sha`` (and ``git_dirty``, whether a tracked
-    file of the package differs from that commit) when the commit of the
-    imported darksirens can be read; ``tinyns_commit`` likewise for an
-    installed TinyNS. These are the keys the run fingerprint's code-identity
-    drift warning compares.
+    file of the package differs from that commit; untracked files are not
+    counted) when the commit of the imported darksirens can be read;
+    ``source_sha256``, the digest of the imported package's ``.py`` sources
+    (:func:`package_source_sha256`), which needs no git; and
+    ``tinyns_commit`` for an installed TinyNS. The run fingerprint's
+    code-identity check on a resume compares ``darksirens_version``,
+    ``git_sha``, ``source_sha256`` and ``tinyns_commit`` (and a
+    ``gwcat_commit`` an older fingerprint may carry; core does not run gwcat
+    and does not write it), and warns when it cannot verify the code: no
+    ``source_sha256`` on both sides and either no ``git_sha`` on one of them
+    or ``git_dirty`` on either (``darksirens.inference.run_fingerprint``).
     """
     return dict(_code_identity_items())
 
 
-__all__ = ["checkout_commit", "code_identity"]
+__all__ = ["checkout_commit", "code_identity", "package_source_sha256"]

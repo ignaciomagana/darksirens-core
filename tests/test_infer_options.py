@@ -321,9 +321,12 @@ def _gw_event():
     from darksirens.gw.types import GWEvent
 
     ones = np.ones(4)
+    # Unit directions: a multipole base analysis reads them (a target refuses
+    # events without them).
     return GWEvent(m1det=30.0 * ones, m2det=25.0 * ones, dL=500.0 * ones,
                    chieff=0.0 * ones, prior_wt=ones, pixels=np.zeros(4, dtype=int),
-                   q=ones, valid=ones.astype(bool))
+                   q=ones, valid=ones.astype(bool),
+                   nx=ones, ny=0.0 * ones, nz=0.0 * ones)
 
 
 @pytest.mark.parametrize("angular", ["isotropic", "multipole", "multipole_l3"])

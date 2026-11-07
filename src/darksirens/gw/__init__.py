@@ -8,12 +8,14 @@ from .samples import (
     load_injections,
     load_selection_samples,
     load_selection_store,
+    require_selection_sky,
 )
-from .types import GWEvent, GWStore, SelectionStore
+from .types import GWEvent, GWStore, MissingSkyPositionsError, SelectionStore
 
 __all__ = [
     "GWEvent",
     "GWStore",
+    "MissingSkyPositionsError",
     "SelectionStore",
     "make_gw_event",
     "pad_gw_event_to_multiple",
@@ -23,4 +25,5 @@ __all__ = [
     "load_selection_store",
     "load_gw_samples",
     "load_selection_samples",
+    "require_selection_sky",
 ]

@@ -92,6 +92,9 @@ def test_infer_delegates_exact_parameter_plan_and_sampler_options(monkeypatch):
         tinyns_preset="prior",
     )
 
+    # Every ordinary result states the likelihood options it ran under.
+    stated = result.pop("likelihood_options")
+    assert stated["selection_mc_correction"] == "none"
     assert result == {"sentinel": 17, "log_prior_volume_fraction": 0.0}
     assert calls["bind"] == (analysis, events, injections)
     assert calls["prior"] == (
