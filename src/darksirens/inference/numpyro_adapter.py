@@ -35,6 +35,28 @@ def _numpyro_diagnostics(extra, max_tree_depth: int, target_accept: float):
     return diagnostics, diverging
 
 
+#: The attribute a likelihood sets to ``True`` to be passed to NumPyro's model
+#: as an argument (its ``as_pytree_callable()``) instead of closed over. A
+#: host-density target's likelihood sets it; an ordinary binding, a plain
+#: ``jax.tree_util.Partial`` and any other likelihood do not, and run exactly
+#: as before (closed over, ``jit_model_args`` off).
+NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE = "numpyro_model_argument"
+
+
+def _pytree_likelihood(likelihood):
+    """``likelihood.as_pytree_callable()`` to pass to the model, or ``None``.
+
+    Only a likelihood that opts in (:data:`NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE`
+    is ``True``, as on a host-density target's likelihood) and offers
+    ``as_pytree_callable``; ``None`` keeps the closure every other likelihood
+    has always run with.
+    """
+    if getattr(likelihood, NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE, False) is not True:
+        return None
+    hook = getattr(likelihood, "as_pytree_callable", None)
+    return hook() if callable(hook) else None
+
+
 def run_numpyro(
     likelihood,
     labels,
@@ -44,7 +66,22 @@ def run_numpyro(
     *,
     prior_kinds=None,
 ) -> dict[str, Any]:
-    """Run the frozen NumPyro/NUTS backend from accepted 6Q/6R state."""
+    """Run the frozen NumPyro/NUTS backend from accepted 6Q/6R state.
+
+    A host-density target's likelihood (:func:`_pytree_likelihood`) is
+    passed to the model as its argument, with ``jit_model_args=True``, and to
+    the post-run evaluation of the samples' log-likelihoods as an argument of
+    that program, so its data are operands of the compiled programs, not
+    constants XLA folds at compile time. NumPyro 0.17 runs its sampling loop
+    step by step from Python with a progress bar for ``"sequential"`` (the
+    default, any number of chains) and ``"vectorized"`` chains, where the
+    data stay operands; it compiles the whole loop as one program, closing
+    over the model's arguments, without a progress bar
+    (``show_progress=False``) or with ``chain_method="parallel"`` (``pmap``)
+    or a callable chain method, and there the data are constants of that
+    loop. Every other likelihood, an ordinary binding included, is closed
+    over and run with NumPyro's defaults, exactly as before.
+    """
     import jax
     import jax.numpy as jnp
     import numpyro
@@ -116,7 +153,9 @@ def run_numpyro(
             dist.Uniform(low=lower[i], high=sites[j]),
         )
 
-    def model():
+    pytree = _pytree_likelihood(likelihood)
+
+    def model(evaluate=None):
         sites = {
             i: _site(i, name)
             for i, name in enumerate(labels)
@@ -126,7 +165,7 @@ def run_numpyro(
             sites[i] = _conditional_site(i, j, sites)
         theta_parts = [sites[i] for i in range(len(labels))]
         theta = jnp.stack(theta_parts) if theta_parts else jnp.array([])
-        log_l = likelihood(theta)
+        log_l = (likelihood if evaluate is None else evaluate)(theta)
         numpyro.factor("likelihood", log_l)
         if rejected:
             # The rejection the static plan announces. An ordinary analysis's
@@ -143,6 +182,9 @@ def run_numpyro(
         max_tree_depth=plan.max_tree_depth,
         init_strategy=init_to_value(values=init_values),
     )
+    # The data of a pytree likelihood are arguments of NumPyro's programs
+    # (jit_model_args), not constants; a closure is run as it always was.
+    extra_mcmc = {} if pytree is None else {"jit_model_args": True}
     mcmc = MCMC(
         kernel,
         num_warmup=plan.num_warmup,
@@ -150,6 +192,7 @@ def run_numpyro(
         num_chains=plan.num_chains,
         chain_method=plan.chain_method,
         progress_bar=opts.show_progress,
+        **extra_mcmc,
     )
     key = jax.random.PRNGKey(opts.seed)
     print(
@@ -158,7 +201,8 @@ def run_numpyro(
         f"chains={plan.num_chains}",
         flush=True,
     )
-    mcmc.run(key, extra_fields=("diverging", "num_steps", "accept_prob"))
+    model_args = () if pytree is None else (pytree,)
+    mcmc.run(key, *model_args, extra_fields=("diverging", "num_steps", "accept_prob"))
     posterior = mcmc.get_samples(group_by_chain=False)
     samples = (
         jnp.column_stack([posterior[name] for name in labels])
@@ -167,11 +211,19 @@ def run_numpyro(
     )
     log_likelihood = posterior.get("log_likelihood")
     if log_likelihood is None and labels:
-        log_likelihood = jax.jit(
-            lambda thetas: jax.lax.map(
-                lambda theta: jnp.asarray(likelihood(theta)), thetas
-            )
-        )(samples)
+        if pytree is None:
+            log_likelihood = jax.jit(
+                lambda thetas: jax.lax.map(
+                    lambda theta: jnp.asarray(likelihood(theta)), thetas
+                )
+            )(samples)
+        else:
+            # The likelihood is an argument of this program, so its data are too.
+            log_likelihood = jax.jit(
+                lambda evaluate, thetas: jax.lax.map(
+                    lambda theta: jnp.asarray(evaluate(theta)), thetas
+                )
+            )(pytree, samples)
 
     extra = mcmc.get_extra_fields(group_by_chain=False)
     numpyro_diagnostics, diverging = _numpyro_diagnostics(
@@ -204,4 +256,4 @@ def run_numpyro(
     }
 
 
-__all__ = ["run_numpyro"]
+__all__ = ["NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE", "run_numpyro"]

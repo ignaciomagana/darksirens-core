@@ -51,7 +51,7 @@ from darksirens.catalog.types import (
 )
 from darksirens.cosmology.distances import threads_distance_table
 from darksirens.cosmology.parameters import CosmologyParameters
-from darksirens.gw.runtime import make_gw_event
+from darksirens.gw.runtime import make_gw_event, require_unit_directions
 from darksirens.gw.samples import (
     require_matching_contract,
     require_selection_sky,
@@ -215,6 +215,15 @@ def _injection_sky_use(analysis: Analysis) -> str | None:
 def _make_runtime_event(store, pixels, required: tuple[str, ...], *, sky: bool = True) -> GWEvent:
     # sky=False only for a selection store without sky positions, which binds
     # only where nothing reads them: make_gw_event's zeros placeholder.
+    if sky:
+        # A clear refusal instead of a bare KeyError: 'ra' (a PE store always
+        # carries ra and dec, so this never fires for one).
+        require_selection_sky(
+            store,
+            "_make_runtime_event's sky directions (sky=True; pass sky=False only "
+            "for a spectral or bright-siren analysis with an isotropic angular "
+            "model, which never reads them)",
+        )
     nx, ny, nz = _sky_vectors(store.columns) if sky else (None, None, None)
     return make_gw_event(
         m1det=store.columns["m1det"],
@@ -593,6 +602,19 @@ class BoundAnalysis:
                     spin_block=self.gw_pe.spin is not None,
                 ),
             )
+        if self.analysis.angular_model != "isotropic":
+            # After the dtype check, so a float32 binding gets its own refusal.
+            # bind_analysis refuses a selection store without sky positions for
+            # an anisotropic model; a binding rebuilt with dataclasses.replace
+            # (another analysis, or another binding's selection event) does not
+            # pass through it, and would evaluate the model at the zeros
+            # placeholder of a store without ra and dec.
+            for name in ("gw_pe", "gw_selection"):
+                require_unit_directions(
+                    getattr(self, name),
+                    what=f"this BoundAnalysis's {name}",
+                    angular_model=self.analysis.angular_model,
+                )
         _require_column_dtype(self)
         # One jitted evaluation per binding, built here and reused by every
         # call. Evaluated eagerly, each call rebuilt the likelihood's Python

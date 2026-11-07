@@ -1666,6 +1666,13 @@ stays available, unchanged, as `selection_mc_correction="farr"`.
   its targets take the new default, and its fingerprint hook does not record the
   form: a checkpoint of such a target is **not** refused. Recording it, and
   stating the form, is a separate change in that repository.
+  `darksirens-lensing` (at 43c4507) is affected the same way: its three calls
+  of `selection_log_correction` (`selection.py`, `spectral.py`,
+  `hierarchical.py`) pass no form and take none, so its likelihoods run
+  `"none"` where they ran `"farr"`, its legacy-parity pins fail on the new
+  core, and its bare `InferenceTarget`s record nothing, so a lensing
+  checkpoint written before the change resumes unrefused. Stating the form
+  there is a separate change in that repository.
 - **Getting the old behaviour.** Pass `selection_mc_correction="farr"`. It
   reproduces the program of 7457025 bit for bit: the traced program and the
   values, the run fingerprint (a binding under `"farr"` records nothing, as
@@ -1756,7 +1763,10 @@ never reads them.
   (`require_selection_sky` in `darksirens.gw.samples`). The tuple loader
   `load_selection_samples`, which returns `ra` and `dec`, refuses it too.
   `make_host_density_target` takes GW events its caller builds; a caller that
-  pixelises injections calls `require_selection_sky` first.
+  pixelises injections calls `require_selection_sky` first (exported from
+  `darksirens.gw` since 2026-11-07), and an anisotropic angular model needs
+  injections with `ra` and `dec` too, not only a caller that pixelises: the
+  target refuses events without unit directions for one (below).
 - **Checks kept.** A PE store still requires `ra` and `dec`. A selection
   store carries both or neither: one alone is refused at load, naming the
   other, and so is a store that declares `sky_position_available` true for
@@ -1824,6 +1834,199 @@ one validation run that way.
   alone, the option threaded from `infer` to the probe and out of the
   fingerprint; `tests/test_public_infer.py` (the default and an explicit value
   reach the sampler options).
+
+## Review fixes (2026-11-07)
+
+A review of the selection-term, sky-optional, compile-memory, preflight and
+component-spin changes found these. No likelihood formula and no default value
+changes: every fix is a refusal of a wrong value, a record, an error message or
+a compile layout. One compile layout can move values at the rounding level: a
+host-density target run under TinyNS or NumPyro now receives its states as
+arguments of the sampler's compiled program (below). Every other run, every
+ordinary analysis under every sampler included, compiles and evaluates as
+before.
+
+### Saved results state the form of the selection term
+
+- **Guard report.** The report records `selection_mc_correction` unless the
+  bound object states `"farr"`, as before, and now records `"unstated"` for a
+  target that states no form (no `selection_mc_correction` attribute and no
+  `likelihood_options`). Such a report used to have no key, which the report's
+  own rule reads as `"farr"`, although the target need not run `"farr"`.
+  A target whose form property raises (darksirens-lss raises on purpose when
+  its metadata lacks the form) now makes `ds.infer` skip the advisory report
+  with a warning; the error was swallowed and the report read as `"farr"`.
+  `stated_selection_mc_correction` in `darksirens.inference.guard_report`
+  is the rule, for the report and for the result (below), so the two never
+  name different forms: an attribute served by `__getattr__` counts, `None`
+  states nothing, and an attribute and a `likelihood_options` entry that name
+  different forms are refused as unreadable.
+- **Reading an older report.** A report without the key is a `"farr"`
+  binding's or target's, or one from before the form existed (core ran only
+  `"farr"` then), or one that core wrote from 2026-10-31 (the switch to the
+  `"none"` default) to this change for a target that stated no form. That
+  last kind may come from a run of `"none"`; only the run's own record (its
+  provenance, or the target's code at the time) can say.
+- **Results.** Every ordinary `ds.infer` result carries
+  `likelihood_options`: `selection_mc_correction` (`"farr"` included),
+  `compute_dtype` (`"float64"` by default), `max_likelihood_variance` and
+  `selection_neff_soft_guard` (`stated_likelihood_options` in
+  `darksirens.inference.run_fingerprint`), whether or not the guard report
+  runs. `InferenceTarget` gains an optional `likelihood_options` field, copied
+  into the result; `make_host_density_target` and `make_catalog_mixture_target`
+  set it; the result's copy has `selection_mc_correction` set to the form the
+  rule above reads (`"unstated"` when the mapping names none). A target with
+  only a `selection_mc_correction` attribute gets
+  `{"selection_mc_correction": ...}`; a target that states neither gets no key,
+  so a companion target's result is unchanged. `ds.save_result` writes it into
+  `result_json`. Fingerprints and digests are unchanged: the record is never
+  hashed. The field states every value, defaults included, unlike the
+  fingerprint's `semantic.core_numerics.likelihood_options` block of the same
+  name, which leaves defaults out so old digests hold. It names the other
+  value-changing options besides the form so that a saved result says which
+  likelihood made it, not only which selection term.
+- **Skyless columns.** The columns of a selection store without sky positions
+  (next section) are rebuilt by `dataclasses.asdict` (`path` is optional) and
+  flatten under JAX's tree utilities as a dict does.
+- **Not changed here.** darksirens-lss's own member report copies the old
+  "record unless farr" rule, and darksirens-lensing states no form at all (see
+  the point-estimate section); both are changes in those repositories.
+
+### An anisotropic sky model refuses events without directions everywhere
+
+`bind_analysis` refuses a selection store without `ra` and `dec` for an
+anisotropic angular model, but two routes reached such a model with
+`make_gw_event`'s zeros placeholder and returned a wrong value without any
+error: a binding rebuilt with `dataclasses.replace` (another analysis on an
+isotropic binding of the store, or that binding's selection event on an
+anisotropic one), and `make_host_density_target` given such events. At
+`n = (0, 0, 0)` the dipole weight is 1 for every injection, so the selection
+integral ignores the dipole while the PE side keeps it (mock: +3.8e-2 in ln L
+at d = (0, 0, 0.6), times the number of events); the multipole and the sphere
+GPs add a term that depends on their parameters.
+
+- `BoundAnalysis.__post_init__` (every binding, rebuilt or unpickled) and
+  `make_host_density_target` now refuse, for an anisotropic angular model,
+  PE or selection events whose live samples (`valid` and `prior_wt > 0`;
+  padding is never read) lack a unit direction (`|n|^2` within 1e-5 of 1, or
+  no direction at all), naming the operand
+  (`darksirens.gw.runtime.require_unit_directions`). The check runs after the
+  float32 check, so a float32 binding keeps its own refusal. Every binding
+  `bind_analysis` makes passes; isotropic analyses are not checked.
+- `host_density_log_likelihood` may be traced and cannot check; its docstring
+  now says its caller owns the check.
+
+### Reading the positions of a store without them names the file
+
+`ds.load_injections` accepts a store without sky positions, and a caller that
+read `injections.columns["ra"]` itself got a bare `KeyError: 'ra'`. The columns
+of such a store now raise `darksirens.gw.MissingSkyPositionsError`, a
+`KeyError` (so `except KeyError` still catches it) whose message names the file,
+the missing datasets and what to use instead; `in`, `get` and iteration are the
+plain dict's, and a store with positions keeps a plain dict. Core's
+`_make_runtime_event` refuses a store without positions with the same message
+when asked for directions (`sky=True`, the default). `require_selection_sky`
+is exported from `darksirens.gw`.
+
+### A host-density target's states stay operands inside an enclosing program
+
+#77 made the opaque states' arrays operands of the target's own jitted
+program. Inside an enclosing `jax.jit` (a user's, NumPyro's sampling loop,
+core's post-run `jit(lax.map)`, TinyNS's closure form), arrays that program
+holds become constants of the enclosing program again and XLA folds them at
+compile time (on lss's over-complete mock, about 3.1 GiB at 10% of the
+galaxies against 0.9 GiB direct, so about 18 GiB at full size).
+
+- The target's likelihood now offers `as_pytree_callable()`: the same
+  likelihood as a `jax.tree_util.Partial` whose leaves are the states' arrays,
+  the GW samples, the distance table and the ambient jit channels (snapshots),
+  as `BoundAnalysis.as_pytree_callable` does. An enclosing program that
+  receives it as an argument (`jax.jit(lambda f, x: f(x))(f, x)`, also under
+  `value_and_grad`, `vmap` or `lax.map`) receives them as arguments: no
+  constant of a state's shape is left. Calling it equals calling the
+  likelihood. A closed-over `jax.jit(target.log_likelihood)` still compiles
+  them as constants (JAX folds what a jitted function closes over); the
+  docstring says so.
+- TinyNS (>= 0.2, its pytree form) picks it up, as it does a binding's. Core's
+  NumPyro adapter passes it to the model as its argument with
+  `jit_model_args=True`, and to the post-run evaluation as an argument, for
+  this likelihood only (it opts in with `numpyro_model_argument = True`;
+  `NUMPYRO_MODEL_ARGUMENT_ATTRIBUTE`): an ordinary binding, a plain `Partial`
+  and every other likelihood are closed over with NumPyro's defaults, as
+  before. For these two samplers a host-density target's values may differ
+  from earlier runs at the rounding level (the same program with its states
+  as arguments, not folded constants).
+- NumPyro 0.17 runs its sampling loop step by step from Python, with the data
+  as operands, for `"sequential"` chains (core's default, any number) and
+  `"vectorized"` ones with a progress bar. It compiles the whole loop as one
+  program closed over the model's arguments without a progress bar
+  (`show_progress=False`) or with `chain_method="parallel"` (`pmap`) or a
+  callable chain method; there the states remain constants of that loop.
+- Dynesty's batched pool (`dynesty_batch`) keeps evaluating these targets point
+  by point (`"rows"`; `dynesty_batch_point_by_point = True`,
+  `POINT_BY_POINT_ATTRIBUTE`), bit for bit as before: each point is the
+  target's own program with the states as operands, which never folded them,
+  and a `jit(vmap)` over a batch would hold the batch's per-galaxy
+  intermediates at once.
+- No stage-3 or production path uses a host-density target (the DESI target
+  calls `host_density_log_likelihood` inside its own jit, with the data as
+  arguments), so no value or run changes there.
+
+### A resume under code that cannot be verified says so
+
+The run fingerprint hashes the configuration, not the likelihood code; the
+code-identity check of a matching resume compared only commits, skipping a key
+missing on either side. A resume from a copy without `.git` (or a wheel or
+plain-directory install, or git missing) or from a checkout with uncommitted
+edits at the same commit went ahead silently, and nothing recorded the code
+that resumed the chain.
+
+- `code_identity()` records `source_sha256`, a digest of the imported
+  package's `.py` files (paths and bytes, `__pycache__` skipped), which needs
+  no git and sees edits and new untracked modules.
+- The check compares `source_sha256` too, and, when no key differs but the
+  two runs do not both record a source digest, warns that the code cannot be
+  verified if a side records no commit or either side records `git_dirty`.
+  It stays advisory (a warning, never a refusal). Fingerprints built without a
+  code block are not checked, as before. `gwcat_commit` stays among the
+  compared keys for older fingerprints; core does not run gwcat and does not
+  write it (the docstring said otherwise).
+- A matching resume through `gate_and_stamp_checkpoint_fingerprint` (every
+  `ds.infer` target resume) writes `run_fingerprint.resume-<timestamp>.json`
+  with the resuming process's fingerprint beside the kept one, which stays byte
+  for byte as it was (one new file per resume). This function is core's own
+  (`ds.infer`'s gate); the frozen reference has no counterpart. The
+  single-directory `gate_and_stamp_resume_fingerprint`, which the fingerprint-gate
+  legacy probe compares with the frozen reference, is unchanged and writes no
+  such record: its callers own their records.
+- The legacy probe's cases (same commit, another commit) give the same
+  warnings, word for word.
+
+### The preflight's start-up estimate is the backend's
+
+The slow-start warning and the escalated refusal (new in #78) estimated the
+start-up as `nlive / (finite fraction)` draws. dynesty 2.x draws batches of
+`nlive` until `min(nlive, max(ndim + 1, min(nlive - 20, 100)))` points are
+finite (100 at `nlive = 1000`) and starts the others at its floor value, so the
+figure was about ten times too large; TinyNS draws its live points once and
+keeps the `-inf` ones. Both messages now give the backend's own figure
+(`dynesty_min_finite_live_points`; the sampler name reaches the probe from
+`infer`), and the refusal says dynesty raises after `1000 x nlive` draws with
+none finite. At the legacy setting (`sampler_preflight_max_draws` equal to the
+first 32 draws) the frozen text is unchanged, word for word, so the Phase 6G
+probe still compares equal. The probe's draws and its refusal rule are
+unchanged.
+
+### Tests
+
+`tests/test_selection_form_records.py`, `tests/test_sky_directions_required.py`,
+`tests/test_host_density_pytree.py`, `tests/test_code_identity_resume.py`, and
+the updated `tests/test_nested_sampler_preflight.py` and the multipole fixture
+of `tests/test_infer_options.py` (its events now carry unit directions). Each
+new test that checks a fix fails on the tree before these fixes; the controls
+among them (behaviour that must hold either way, such as a store with positions
+keeping a plain dict, or an ordinary NumPyro analysis running as before) pass
+on both.
 
 ## Review fixes (2026-10-20)
 

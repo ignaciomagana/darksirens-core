@@ -92,6 +92,9 @@ def test_infer_delegates_exact_parameter_plan_and_sampler_options(monkeypatch):
         tinyns_preset="prior",
     )
 
+    # Every ordinary result states the likelihood options it ran under.
+    stated = result.pop("likelihood_options")
+    assert stated["selection_mc_correction"] == "none"
     assert result == {"sentinel": 17, "log_prior_volume_fraction": 0.0}
     assert calls["bind"] == (analysis, events, injections)
     assert calls["prior"] == (
@@ -785,3 +788,35 @@ def test_every_option_a_backend_reads_is_a_known_sampler_option():
     assert names, "the scan found no option reads"
     names -= _NOT_INFER_OPTIONS
     assert names <= _known_sampler_options(), sorted(names - _known_sampler_options())
+
+
+def test_the_stated_form_is_read_without_hdf5_or_jax():
+    """Every ordinary result states its likelihood options, so reading them must
+    work where only the minimal dependencies are installed (no h5py, no JAX)."""
+    import subprocess
+
+    code = (
+        "import sys; sys.modules['h5py'] = None; "
+        "from darksirens.inference.run_fingerprint import stated_likelihood_options; "
+        "opts = stated_likelihood_options({}); "
+        "assert opts['selection_mc_correction'] == 'none', opts; "
+        "raise SystemExit(1 if 'jax' in sys.modules else 0)"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], check=False)
+    assert proc.returncode == 0
+
+
+def test_the_selection_forms_keep_their_historical_home():
+    pytest.importorskip("h5py")
+    pytest.importorskip("jax")
+    import darksirens._selection_forms as forms
+    import darksirens.selection.gw as gw
+
+    for name in (
+        "DEFAULT_MAX_LIKELIHOOD_VARIANCE",
+        "DEFAULT_SELECTION_MC_CORRECTION",
+        "FARR_SELECTION_MC_CORRECTION",
+        "SELECTION_MC_CORRECTIONS",
+        "check_selection_mc_correction",
+    ):
+        assert getattr(gw, name) is getattr(forms, name)

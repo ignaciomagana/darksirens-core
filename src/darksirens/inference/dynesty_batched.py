@@ -146,6 +146,11 @@ def _is_jax_partial(obj) -> bool:
     return isinstance(partial, type) and isinstance(obj, partial)
 
 
+#: The attribute a likelihood sets to ``True`` to be evaluated point by point
+#: by the batched pool although it offers ``as_pytree_callable``.
+POINT_BY_POINT_ATTRIBUTE = "dynesty_batch_point_by_point"
+
+
 def batched_log_likelihood(likelihood, single, size):
     """The batched form of ``likelihood`` the pool evaluates, as a ``_Batched``.
 
@@ -162,7 +167,11 @@ def batched_log_likelihood(likelihood, single, size):
       ``jax.jit(jax.vmap(f))`` with the pytree as an argument, so the data are
       arguments of the compiled program, not constants.
     * ``"rows"``: anything else is evaluated point by point with ``single``
-      (no speedup; the chain is still dynesty's ``queue_size=Q`` chain).
+      (no speedup; the chain is still dynesty's ``queue_size=Q`` chain), and
+      so is a likelihood that sets :data:`POINT_BY_POINT_ATTRIBUTE` to
+      ``True`` even when it offers ``as_pytree_callable`` (a host-density
+      target's likelihood: each point is its own program with its states as
+      operands, as before it offered the pytree form).
     """
     hook = getattr(likelihood, "as_batched_callable", None)
     if callable(hook):
@@ -174,7 +183,9 @@ def batched_log_likelihood(likelihood, single, size):
         return _Batched(fn, size, form="hook", kind="likelihood")
 
     pytree = None
-    if callable(getattr(likelihood, "as_pytree_callable", None)):
+    if getattr(likelihood, POINT_BY_POINT_ATTRIBUTE, False) is True:
+        pass  # its own program, point by point ("rows")
+    elif callable(getattr(likelihood, "as_pytree_callable", None)):
         pytree = likelihood.as_pytree_callable()
     elif _is_jax_partial(likelihood):
         pytree = likelihood
@@ -518,6 +529,7 @@ def attach_batched_pool(sampler, pool):
 __all__ = [
     "BatchedRwalkPool",
     "DYNESTY_BATCH_PROBE_RTOL",
+    "POINT_BY_POINT_ATTRIBUTE",
     "attach_batched_pool",
     "batch_buckets",
     "batched_log_likelihood",
