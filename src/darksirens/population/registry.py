@@ -493,8 +493,9 @@ register_model(
     # the effective-spin distribution more than three times too wide: on the 259
     # GWTC-5 BBH events a spectral H0 grid peaks 107 to 110 lower in log
     # likelihood than at the values below, and the fixed-population H0
-    # posterior moves down.  (0.04, 0.10) is the best point of a
-    # 30-point spectral grid over mu_chi 0 to 0.10 and sigma_chi 0.06 to 0.17
+    # posterior sits lower with the old pair.  (0.04, 0.10) is the best
+    # point of a 30-point spectral grid over mu_chi 0 to 0.10 and sigma_chi
+    # 0.06 to 0.17
     # with every other parameter at the medians above; it is a fit made here,
     # to two decimals, not a published number.  To reproduce results made with
     # the old pair, pass the full vector as an explicit fixed={...} mapping
