@@ -147,7 +147,7 @@ from darksirens._selection_forms import (
     DEFAULT_MAX_LIKELIHOOD_VARIANCE,
     DEFAULT_SELECTION_MC_CORRECTION,
     FARR_SELECTION_MC_CORRECTION,
-    SELECTION_MC_CORRECTIONS,
+    SELECTION_MC_CORRECTIONS,  # noqa: F401  (re-exported)
     check_selection_mc_correction,
 )
 
