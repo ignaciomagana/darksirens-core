@@ -52,8 +52,11 @@ _HALF_LOG_2PI: float = float(0.5 * np.log(2.0 * np.pi))
 SIGMA_EFF_FLOOR: float = 1.0e-4
 _GL_NODES: int = 24
 _gl_x, _gl_w = np.polynomial.legendre.leggauss(_GL_NODES)
-_GL_X = jnp.asarray(0.5 * (_gl_x + 1.0))
-_GL_W = jnp.asarray(0.5 * _gl_w)
+# Concrete even when this module is first imported inside a jit trace (staged
+# jnp.asarray calls would leave leaked tracers in the module).
+with jax.ensure_compile_time_eval():
+    _GL_X = jnp.asarray(0.5 * (_gl_x + 1.0))
+    _GL_W = jnp.asarray(0.5 * _gl_w)
 
 # The mature legacy state sanitizes padding to -1e30 and treats anything below
 # this cut as padding when constructing the fused one-pass evaluator leaves.

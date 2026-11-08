@@ -13,10 +13,17 @@ jax.config.update("jax_enable_x64", True)
 
 zMax: float = float(os.environ.get("DARKSIRENS_ZMAX", 5.0))
 _ZGRID_NODES = max(1000, int(round(1000 * math.log(zMax + 1.0) / math.log(6.0))))
-zgrid = jnp.expm1(jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), _ZGRID_NODES))
-zgrid = zgrid.at[-1].set(
-    jnp.minimum(zgrid[-1], float(np.expm1(np.log(zMax + 1.0))))
-)
+# Module constants are built under ensure_compile_time_eval: if this module is
+# first imported inside a jit trace (a companion package importing core inside
+# its likelihood), plain jnp ops would be staged and the module would keep a
+# leaked tracer. Evaluated eagerly they are the same concrete arrays as before.
+with jax.ensure_compile_time_eval():
+    zgrid = jnp.expm1(
+        jnp.linspace(jnp.log(1.0), jnp.log(zMax + 1.0), _ZGRID_NODES)
+    )
+    zgrid = zgrid.at[-1].set(
+        jnp.minimum(zgrid[-1], float(np.expm1(np.log(zMax + 1.0))))
+    )
 
 _DLOG = math.log(zMax + 1.0) / (_ZGRID_NODES - 1)
 _INTERP_DX0_EPS = float(np.spacing(np.finfo(np.dtype(zgrid.dtype)).eps))
