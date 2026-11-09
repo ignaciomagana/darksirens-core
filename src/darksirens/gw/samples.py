@@ -613,16 +613,18 @@ def require_selection_sky(injections: SelectionStore, use: str) -> None:
     A selection store may carry neither ``ra`` nor ``dec``
     (:func:`darksirens.gw.store.skyless_variant`). Only an analysis that never
     reads where an injection lies on the sky (a spectral or bright-siren
-    analysis with an isotropic angular model) can use it.
+    analysis with an isotropic angular model) can use it. A caller that reads
+    the injections' positions itself (pixelises them, or builds directions)
+    calls this first; ``darksirens.gw`` exports it. Reading
+    ``injections.columns['ra']`` of such a store raises
+    :class:`~darksirens.gw.types.MissingSkyPositionsError` (a ``KeyError``)
+    with the same reason.
     """
+    from .types import skyless_selection_message
+
     missing = [name for name in store_contract.SKY_DATASETS if name not in injections.columns]
     if missing:
-        raise RuntimeError(
-            f"Selection file {injections.path!r} carries no injection sky positions "
-            f"(missing datasets: {', '.join(missing)}), but {use} needs them. Only a "
-            "spectral or bright-siren analysis with an isotropic angular model runs "
-            "without them; use an injection set with ra and dec."
-        )
+        raise RuntimeError(skyless_selection_message(injections.path, missing, use))
 
 
 def load_selection_samples(file, allow_invalid_spin_swap=False, fit_columns=None):

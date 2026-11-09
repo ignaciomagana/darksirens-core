@@ -139,12 +139,17 @@ from darksirens.gw.types import GWEvent
 from typing import Any
 from darksirens.gw.runtime import pad_gw_event_to_multiple
 
-# Single source of truth for the guard's default budget (the GWTC-4.0/5.0
-# threshold): argparse defaults and getattr fallbacks all reference this, so
-# CLI and programmatic callers cannot silently diverge.  Defined in
-# core.constants (re-exported here under its historical home) so JAX-free
-# tooling like io.results can read it without importing this JAX module.
-DEFAULT_MAX_LIKELIHOOD_VARIANCE = 1.0
+# The guard's default budget and the Monte-Carlo term's forms are defined in
+# darksirens._selection_forms (re-exported here under their historical home) so
+# JAX-free tooling such as the run records can read them without importing this
+# JAX module.
+from darksirens._selection_forms import (
+    DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+    DEFAULT_SELECTION_MC_CORRECTION,
+    FARR_SELECTION_MC_CORRECTION,
+    SELECTION_MC_CORRECTIONS,  # noqa: F401  (re-exported)
+    check_selection_mc_correction,
+)
 
 # Numerical floor for the remaining variance budget once the per-event
 # Monte-Carlo variances are subtracted: keeps the traced threshold finite
@@ -164,15 +169,6 @@ _MIN_VARIANCE_BUDGET = 1e-12
 # to it leaves those values bit-identical and keeps the wall at full depth
 # when Neff is +inf or larger still.
 _EXHAUSTED_GATE_X = 1e-3
-
-# The forms of the Monte-Carlo term (module docstring, "The Monte-Carlo term").
-FARR_SELECTION_MC_CORRECTION = "farr"
-DEFAULT_SELECTION_MC_CORRECTION = "none"
-SELECTION_MC_CORRECTIONS = (
-    DEFAULT_SELECTION_MC_CORRECTION,
-    FARR_SELECTION_MC_CORRECTION,
-    "heinzel_vitale",
-)
 
 
 # ============================================================
@@ -317,16 +313,6 @@ def log_evidence_and_mc_variance(
         0.0,
     )
     return -jnp.log(nsamp) + lse, variance
-
-
-def check_selection_mc_correction(value) -> str:
-    """``selection_mc_correction`` as given; an unknown value raises ``ValueError``."""
-    if not isinstance(value, str) or value not in SELECTION_MC_CORRECTIONS:
-        raise ValueError(
-            f"selection_mc_correction must be one of {list(SELECTION_MC_CORRECTIONS)}, "
-            f"got {value!r}"
-        )
-    return value
 
 
 def _opt_in_mc_term(n: float, Neff: jnp.ndarray, selection_mc_correction: str):

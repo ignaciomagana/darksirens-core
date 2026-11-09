@@ -85,9 +85,10 @@ def make_gw_event(
         them without relying on physical sentinel values.
     nx, ny, nz : array-like, optional
         Sky-direction unit-vector components per sample (the angular analog of
-        ``dL``).  Default to zeros when unspecified — harmless, because they are
-        only read by an anisotropic sky model; an isotropic run never touches
-        them.
+        ``dL``).  Default to zeros when unspecified — harmless for an isotropic
+        analysis, which never reads them. An anisotropic sky model reads them,
+        and needs real unit directions: core's builders refuse events without
+        them there (:func:`require_unit_directions`).
     spin : array-like of shape (N, d), optional
         Extra spin coordinates beyond ``chieff`` (e.g. the component basis's
         ``(a1, a2, cost1, cost2)``).  ``None`` — the chi_eff default — keeps
@@ -146,6 +147,56 @@ def make_gw_event(
         nz       = _sky(nz),
         spin     = spin_b,
     )
+
+
+#: How far ``|n|^2`` of a live sample may be from 1 (float32-rounded directions
+#: miss by about 1e-7; the zeros placeholder misses by 1).
+UNIT_DIRECTION_TOLERANCE = 1e-5
+
+
+def require_unit_directions(event: GWEvent, *, what: str, angular_model: str) -> None:
+    """Refuse ``event`` when a live sample has no unit sky direction.
+
+    An anisotropic angular model reads every sample's direction ``(nx, ny,
+    nz)``. :func:`make_gw_event` fills a direction it is not given with
+    zeros, and a binding of a selection store without ``ra`` and ``dec`` (an
+    isotropic analysis may bind one) carries that placeholder: evaluated
+    there, the model weights every injection as if it lay at ``n = (0, 0,
+    0)``, a wrong value without any error. The live samples (``valid`` and
+    ``prior_wt > 0``; padding is never read) must each have finite
+    components with ``|n|^2`` within :data:`UNIT_DIRECTION_TOLERANCE` of 1.
+    Raises ``ValueError`` naming ``what`` and ``angular_model``. An event
+    whose arrays are traced cannot be read here and is not checked.
+    """
+    import jax
+
+    fields = (event.valid, event.prior_wt, event.nx, event.ny, event.nz)
+    if any(isinstance(value, jax.core.Tracer) for value in fields):
+        return
+    live = np.asarray(event.valid, dtype=bool) & (
+        np.asarray(event.prior_wt, dtype=np.float64) > 0.0
+    )
+    if event.nx is None or event.ny is None or event.nz is None:
+        bad = live
+    else:
+        with np.errstate(invalid="ignore", over="ignore"):
+            n2 = (
+                np.asarray(event.nx, dtype=np.float64) ** 2
+                + np.asarray(event.ny, dtype=np.float64) ** 2
+                + np.asarray(event.nz, dtype=np.float64) ** 2
+            )
+            bad = live & ~(np.abs(n2 - 1.0) <= UNIT_DIRECTION_TOLERANCE)
+    n_bad = int(np.count_nonzero(bad))
+    if n_bad:
+        raise ValueError(
+            f"{what} carries no sky direction on {n_bad} of its "
+            f"{int(np.count_nonzero(live))} live samples (|n| is not 1 there), but "
+            f"the angular model {angular_model!r} reads every sample's direction. "
+            "Events built without directions (make_gw_event's zeros placeholder, "
+            "which a binding of a selection store without ra and dec carries) "
+            "serve an isotropic analysis only; use an injection set with ra and "
+            "dec, bound for this analysis with bind_analysis."
+        )
 
 
 def pad_gw_event_to_multiple(

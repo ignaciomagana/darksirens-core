@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import warnings
 
 import numpy as np
@@ -454,9 +455,18 @@ def test_target_resume_is_gated(tmp_path, fake_sampler):
     resume = dict(_dynesty(run), resume_from_resolved=str(run / "checkpoint.dynesty.pkl"))
 
     # Same configuration: resumes; operational options may differ.
+    canonical = (run / FINGERPRINT_BASENAME).read_bytes()
     again = infer(target, nlive=50, show_progress=False, **resume)
     assert again["run_fingerprint_digest"] == first["run_fingerprint_digest"]
-    assert sorted(p.name for p in run.iterdir()) == [FINGERPRINT_BASENAME]
+    # The creator's fingerprint is kept byte for byte; the one new file is the
+    # resuming run's fingerprint, recorded beside it.
+    names = sorted(p.name for p in run.iterdir())
+    assert len(names) == 2 and names[0] == FINGERPRINT_BASENAME
+    assert re.fullmatch(r"run_fingerprint\.resume-.+\.json", names[1]), names
+    assert (run / FINGERPRINT_BASENAME).read_bytes() == canonical
+    recorded = json.loads((run / names[1]).read_text())
+    assert recorded["digest"] == again["run_fingerprint_digest"]
+    assert recorded["advisory"]["code"]["darksirens_version"] == ds.__version__
 
     # A sampler setting, the identity or the plan differ: refused, clearly.
     with pytest.raises(ResumeFingerprintError) as excinfo:

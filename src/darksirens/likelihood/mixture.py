@@ -768,6 +768,7 @@ def make_catalog_mixture_target(
     from darksirens.inference.run_fingerprint import (
         likelihood_options_semantic,
         parameter_plan_semantic,
+        stated_likelihood_options,
     )
     from darksirens.inference.target import InferenceTarget, combine_parameter_plans
     from darksirens.runtime_binding import bind_analysis, decode_parameters
@@ -874,6 +875,9 @@ def make_catalog_mixture_target(
         identity=identity,
         provenance=provenance,
         log_prior_volume_fraction=_log_prior_volume_fraction(analysis),
+        # Recorded in the ds.infer result: the form of the selection term
+        # this likelihood runs, stated whatever it is.
+        likelihood_options=stated_likelihood_options(bound),
     )
 
 

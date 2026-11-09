@@ -28,6 +28,42 @@ def _percent(frac: float) -> str:
     return f"{pct:.1f}%" if pct >= 0.1 else f"{pct:.2g}%"
 
 
+def dynesty_min_finite_live_points(nlive: int, ndims: int) -> int:
+    """The finite live points dynesty 2.x draws for before it starts sampling.
+
+    dynesty's ``_initialize_live_points`` draws batches of ``nlive`` prior
+    points until ``min(nlive, max(ndims + 1, min(nlive - 20, 100)))`` of them
+    have a finite log-likelihood (100 at ``nlive = 1000``), and starts its
+    other live points at its floor value. It raises when none of ``1000 x
+    nlive`` draws is finite.
+    """
+    nlive, ndims = int(nlive), int(ndims)
+    return min(nlive, max(ndims + 1, min(nlive - 20, 100)))
+
+
+def _startup_estimate(nlive, ndims, frac, sampler):
+    """The slow-start sentence of the warning, for the backend that starts."""
+    if nlive <= 0:
+        return (
+            "The sampler must reject-sample about many draws to seed its live "
+            "points, so initialization will be SLOW."
+        )
+    if sampler == "tinyns":
+        return (
+            f"TinyNS draws its {nlive} live points once from the prior and keeps "
+            f"the -inf ones, so about {frac * nlive:.3g} of them start finite; "
+            "with that few, it may stall."
+        )
+    need = dynesty_min_finite_live_points(nlive, ndims)
+    # Whole batches of nlive draws, until `need` are finite.
+    est = nlive * max(1, int(np.ceil(need / (nlive * frac))))
+    return (
+        f"dynesty draws batches of {nlive} prior points until {need} have a "
+        f"finite logL (its other live points start at its floor value): about "
+        f"~{est:,} draws, so initialization will be SLOW."
+    )
+
+
 def nested_sampler_preflight(
     likelihood,
     prior_transform,
@@ -38,6 +74,7 @@ def nested_sampler_preflight(
     enabled: bool = True,
     n_probe: int = 32,
     max_draws: int = PREFLIGHT_MAX_DRAWS,
+    sampler: str | None = None,
 ):
     """Probe prior draws and fail fast when a nested sampler cannot initialize.
 
@@ -50,7 +87,11 @@ def nested_sampler_preflight(
     the time, and dynesty still seeds its live points; a probe that stopped at
     ``n_probe`` refused such runs. When the probe drew past ``n_probe``, or
     fewer than four of its draws are finite, it warns that initialization will
-    be slow and estimates the draws needed to seed ``nlive`` live points.
+    be slow and estimates its cost for the backend that starts (``sampler``,
+    ``"dynesty"`` when ``None``): dynesty draws batches of ``nlive`` points
+    until :func:`dynesty_min_finite_live_points` are finite (100 at ``nlive =
+    1000``), not all ``nlive``; TinyNS draws its live points once and keeps
+    the ``-inf`` ones.
 
     ``max_draws == n_probe`` is the frozen legacy ``_nested_sampler_preflight``
     contract: the same draws, output and error text, except that the remedies
@@ -151,34 +192,50 @@ def nested_sampler_preflight(
         # bounds the finite fraction (below 3/n with 95% probability under a
         # flat prior on the fraction).
         bound = 3.0 / n_probed
-        need = (
-            f"more than ~{int(np.ceil(nlive / bound)):,} draws to seed {nlive} "
-            "live points"
-            if nlive > 0
-            else "very many draws to seed its live points"
-        )
+        if nlive <= 0:
+            need = "dynesty would likely need very many draws to seed its live points"
+        elif sampler == "tinyns":
+            need = (
+                f"TinyNS, which draws its {nlive} live points once and keeps the "
+                f"-inf ones, would likely start fewer than {bound * nlive:.3g} of "
+                "them finite"
+            )
+        else:
+            finite = dynesty_min_finite_live_points(nlive, ndims)
+            need = (
+                f"dynesty would likely need more than "
+                f"~{int(np.ceil(finite / bound)):,} draws to find the {finite} "
+                f"finite live points it starts from (it raises after "
+                f"{1000 * nlive:,} draws with none finite)"
+            )
         raise RuntimeError(
             f"Nested-sampler preflight: the likelihood is -inf on ALL "
             f"{n_probed} probed prior draws ({n_probe} first, then batches "
             f"doubling the number drawn, up to max_draws={max_draws}). The "
             f"finite fraction of the prior is then likely below 3/{n_probed} "
-            f"({_percent(bound)}), so dynesty/tinyns would likely need {need}, "
-            "and would reject-sample forever if the likelihood is -inf on the "
-            "whole prior. infer(..., sampler_preflight_max_draws=<n>) probes "
+            f"({_percent(bound)}), so {need}; no sampler starts if the "
+            "likelihood is -inf on the whole prior. "
+            "infer(..., sampler_preflight_max_draws=<n>) probes "
             f"more draws before refusing. The most common cause is {criterion}. "
             f"{remedies}"
         )
 
     if k < _ENOUGH_FINITE or escalated:
         frac = k / n_probed
-        est = f"~{int(np.ceil(nlive / frac)):,}" if nlive > 0 else "many"
         pct = _percent(frac) if escalated else f"{100.0 * frac:.1f}%"
+        if max_draws == n_probe:
+            # The frozen legacy text (the Phase 6G probe compares it).
+            est = f"~{int(np.ceil(nlive / frac)):,}" if nlive > 0 else "many"
+            cost = (
+                f"The sampler must reject-sample about {est} draws to seed "
+                f"{nlive} live points, so initialization will be SLOW."
+            )
+        else:
+            cost = _startup_estimate(nlive, ndims, frac, sampler)
         print(
             "  [!] preflight WARNING: only "
             f"{k}/{n_probed} prior draws are finite (finite fraction "
-            f"{pct}). The sampler must reject-sample about {est} "
-            f"draws to seed {nlive} live points, so initialization will be "
-            f"SLOW. If it stalls, consider: {remedies}",
+            f"{pct}). {cost} If it stalls, consider: {remedies}",
             flush=True,
         )
 

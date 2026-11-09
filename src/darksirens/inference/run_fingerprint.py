@@ -373,7 +373,7 @@ def likelihood_options_semantic(source) -> dict:
     it has always had.
     """
 
-    from darksirens.selection.gw import (
+    from darksirens._selection_forms import (
         DEFAULT_MAX_LIKELIHOOD_VARIANCE,
         DEFAULT_SELECTION_MC_CORRECTION,
         FARR_SELECTION_MC_CORRECTION,
@@ -423,6 +423,60 @@ def likelihood_options_semantic(source) -> dict:
         if not isinstance(source, Mapping) and _is_one_catalog_field(source):
             out["one_catalog_field_density"] = "normalised"
     return canonical_semantic(out, "semantic.core_numerics.likelihood_options")
+
+
+def stated_likelihood_options(source) -> dict:
+    """Every value-changing likelihood option of ``source``, defaults included.
+
+    ``source`` is a binding (or any object with its attributes) or a mapping
+    of :func:`~darksirens.runtime_binding.bind_analysis` keyword names, as for
+    :func:`likelihood_options_semantic`. Unlike that block, which leaves out
+    every value a run before the option existed had (so old digests stay the
+    same), this one states each option: ``selection_mc_correction``
+    (``"farr"`` included), ``compute_dtype`` (``"float64"`` for the default
+    program), ``max_likelihood_variance`` and ``selection_neff_soft_guard``.
+    It is what a result records, so a saved result says which likelihood made
+    it; it never enters a fingerprint.
+    """
+
+    from darksirens._selection_forms import (
+        DEFAULT_MAX_LIKELIHOOD_VARIANCE,
+        DEFAULT_SELECTION_MC_CORRECTION,
+        check_selection_mc_correction,
+    )
+
+    if isinstance(source, Mapping):
+        unknown = sorted(
+            str(key)
+            for key in source
+            if key not in _LIKELIHOOD_VALUE_OPTIONS
+            and key not in _LIKELIHOOD_LAYOUT_OPTIONS
+        )
+        if unknown:
+            raise ValueError(
+                f"unknown likelihood option(s) {unknown}; accepted are "
+                f"{sorted(_LIKELIHOOD_VALUE_OPTIONS + tuple(_LIKELIHOOD_LAYOUT_OPTIONS))}"
+            )
+
+        def _get(name, default):
+            value = source.get(name, default)
+            return default if value is None else value
+    else:
+
+        def _get(name, default):
+            value = getattr(source, name, default)
+            return default if value is None else value
+
+    return {
+        "selection_mc_correction": check_selection_mc_correction(
+            _get("selection_mc_correction", DEFAULT_SELECTION_MC_CORRECTION)
+        ),
+        "compute_dtype": np.dtype(_get("compute_dtype", "float64")).name,
+        "max_likelihood_variance": float(
+            _get("max_likelihood_variance", DEFAULT_MAX_LIKELIHOOD_VARIANCE)
+        ),
+        "selection_neff_soft_guard": bool(_get("selection_neff_soft_guard", False)),
+    }
 
 
 def _is_one_catalog_field(bound) -> bool:
@@ -809,7 +863,10 @@ def gate_and_stamp_checkpoint_fingerprint(
     * a fresh run, or a forced resume of a checkpoint with no (readable)
       fingerprint: this run's fingerprint;
     * a matching resume: this run's fingerprint, except in ``resume_dir``
-      itself, whose stored artifact is kept;
+      itself, whose stored artifact is kept and gets this run's beside it as
+      ``run_fingerprint.resume-<timestamp>.json`` (its advisory block records
+      the code that resumed the chain, which a chain finished under other
+      code then shows);
     * a forced mismatching resume: the checkpoint creator's fingerprint as
       ``run_fingerprint.json`` (except in ``resume_dir``, which has it) and
       this run's beside it as ``run_fingerprint.forced-<timestamp>.json``.
@@ -851,6 +908,14 @@ def gate_and_stamp_checkpoint_fingerprint(
             )
         elif stored is None or not in_resume_dir:
             save_run_fingerprint(directory, fingerprint)
+        else:
+            # The creator's fingerprint stays canonical; the resuming code is
+            # recorded beside it, so a chain finished under other code shows it.
+            save_run_fingerprint(
+                directory,
+                fingerprint,
+                basename=f"{FINGERPRINT_BASENAME_STEM}.resume-{run_timestamp}.json",
+            )
     return stored
 
 
@@ -888,6 +953,10 @@ def gate_and_stamp_resume_fingerprint(
     resume is upgraded by publishing the current fingerprint.  A forced genuine
     mismatch preserves the checkpoint creator's canonical fingerprint and writes
     the current configuration beside it as ``run_fingerprint.forced-*.json``.
+    A matching resume writes nothing: this is the frozen legacy gate (its
+    behaviour probe compares it with the reference), so unlike
+    :func:`gate_and_stamp_checkpoint_fingerprint` it records no
+    ``run_fingerprint.resume-*.json``; its callers own that record.
     """
 
     # Set after fingerprint construction so provenance cannot feed back into
@@ -1145,12 +1214,67 @@ def check_resume_fingerprint(run_dir: str, current: dict, *, force: bool = False
     raise ResumeFingerprintError(msg)
 
 
+def _code_identity_unverified(old, new):
+    """Why two code identities with no differing key may still be two codes, or ``None``.
+
+    The configuration digest leaves the code out, so a resume under edited
+    code with the same configuration matches. Equal ``source_sha256`` on both
+    sides settles it (the same package sources). Without that, equal commits
+    settle it only for clean checkouts: a side with no ``git_sha`` (a copy
+    without ``.git``, a wheel or plain-directory install, git missing) or with
+    ``git_dirty`` (uncommitted edits) leaves it open. A fingerprint built
+    without a code block (a caller's own, with no
+    :func:`core_environment_advisory`) opted out of the check.
+    """
+
+    if not old or not new:
+        return None
+    if old.get("source_sha256") is not None and new.get("source_sha256") is not None:
+        return None
+    if old.get("git_sha") is None or new.get("git_sha") is None:
+        side = "the checkpointed run" if old.get("git_sha") is None else "this run"
+        return (
+            f"{side} records no git commit of darksirens (a copy without .git, "
+            "an install from a wheel or a directory, or git unavailable) and the "
+            "two runs do not both record a digest of the package sources"
+        )
+    dirty = [
+        side
+        for side, code in (("the checkpointed run", old), ("this run", new))
+        if code.get("git_dirty") is True
+    ]
+    if dirty:
+        return (
+            f"{' and '.join(dirty)} ran darksirens from a checkout with "
+            "uncommitted edits at the recorded commit, and the two runs do not "
+            "both record a digest of the package sources"
+        )
+    return None
+
+
 def _warn_code_identity_drift(run_dir, stored, current):
-    """Warn, but do not reject, behavior-neutral code identity drift."""
+    """Warn, but do not reject, code identity drift or unverifiable code.
+
+    A matching configuration digest says nothing about the code. The keys
+    compared are ``darksirens_version``, ``git_sha``, ``source_sha256``
+    (the digest of the package's sources, which needs no git), ``gwcat_commit``
+    (core does not write it; an older fingerprint may carry it) and
+    ``tinyns_commit``; a key missing on either side is not compared. When no
+    key differs but the code cannot be verified (:func:`_code_identity_unverified`:
+    no source digest on both sides, and a side with no commit or with
+    uncommitted edits), it warns that too, since the resumed chain may then
+    mix two likelihoods with nothing to show it.
+    """
 
     old = ((stored.get("advisory") or {}).get("code") or {})
     new = ((current.get("advisory") or {}).get("code") or {})
-    keys = ("darksirens_version", "git_sha", "gwcat_commit", "tinyns_commit")
+    keys = (
+        "darksirens_version",
+        "git_sha",
+        "source_sha256",
+        "gwcat_commit",
+        "tinyns_commit",
+    )
     drift = [
         f"{key}: {old.get(key)!r} -> {new.get(key)!r}"
         for key in keys
@@ -1164,6 +1288,17 @@ def _warn_code_identity_drift(run_dir, stored, current):
             "code identity (" + "; ".join(drift) + "). If the code change "
             "altered the likelihood, the resumed chain mixes two targets -- "
             "verify the change was behavior-neutral for this configuration.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return
+    unverified = _code_identity_unverified(old, new)
+    if unverified is not None:
+        warnings.warn(
+            f"Resuming '{run_dir}' with the same configuration, but its code "
+            f"identity cannot be verified: {unverified}. If the code differs "
+            "and the change altered the likelihood, the resumed chain mixes two "
+            "targets -- verify that both runs used the same darksirens code.",
             RuntimeWarning,
             stacklevel=3,
         )
@@ -1189,4 +1324,5 @@ __all__ = [
     "resume_provenance_attrs",
     "sampler_semantic",
     "save_run_fingerprint",
+    "stated_likelihood_options",
 ]
