@@ -79,6 +79,7 @@ from .parametric import (
     GolombSymmetricMassPopulationModel,
     GWTC3PowerLawPeakPopulationModel,
     GWTC5FiducialBPL2PeaksPopulationModel,
+    GWTC5MultiPeakPopulationModel,
     TruncatedGaussianSpin,
 )
 from .utils import M_HI
@@ -552,6 +553,21 @@ register_model(
         1.1, 0.0, 0.1, 2.9,
     ),
 )(GWTC3PowerLawPeakPopulationModel)
+
+
+register_model(
+    "gwtc5_multipeak",
+    latex=r"\text{GWTC-5 MultiPeak}",
+    # Ordering follows GWTC5MultiPeakPopulationModel.param_specs:
+    # alpha, m_min, m_max, delta_m, mu_low, sigma_low, mu_high, sigma_high,
+    # lambda_g, lambda_low, beta, mu_chi, sigma_chi, gamma, kappa, z_peak.
+    #
+    # Model and prior bounds: arXiv:2605.27227 (GWTC-5.0 cosmology) Table 5
+    # (mass, p.30) and Table 8 (Madau-Dickinson rate, p.32).  No fiducial
+    # vector: the paper reports no posterior medians for the MultiPeak
+    # hyperparameters (only H0, Table 11); they would have to come from the
+    # data release (Zenodo 10.5281/zenodo.20378418).
+)(GWTC5MultiPeakPopulationModel)
 
 
 def _component_spin_default():
