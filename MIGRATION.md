@@ -1876,6 +1876,64 @@ prior-volume offset (the public API package's), the partial-fixing warning
 (the public API package's, with the samplers package's wording), and the
 float32 column check of a binding (the likelihood package's).
 
+### Out-of-catalog host weighting from a luminosity function (opt-in, default unchanged)
+
+`marked_dark_siren_log_likelihood(..., out_of_catalog_weight=...)` and
+`build_marked_incomplete_catalog_prior_state(..., out_of_catalog_weight=...)`
+take a `catalog.hosts.SchechterOutOfCatalogWeight(alpha, log_x_min,
+log_x_lim, log_x_ref=0.0)`. With it, the out-of-catalog term of both states
+(PE and selection) is `dN_miss(z) E_miss[h|z]` with
+
+    E_miss[h|z] = int_{x_min}^{x_lim(z)} h(x) phi(x) dx / int_{x_min}^{x_lim(z)} phi(x) dx,
+
+`phi(x) ~ x^alpha exp(-x)`, `x = L/L_*` and `h = exp(eta (ln x - log_x_ref))`:
+the host weighting averaged over the galaxies fainter than the catalog limit.
+Without it the term carries `missing_host_efficiency_grid`, the mean of `h`
+over the catalogued galaxies in each redshift bin (`E_obs[h|z]`). For a
+flux-limited catalog that mean is the weighting of the bright galaxies, so the
+catalogued share of the hosts in the model stays near the number completeness
+`C(z)` for every `eta`, while the share the host weighting implies,
+`Gamma(alpha + eta + 1, x_lim) / Gamma(alpha + eta + 1, x_min)` for one
+luminosity mark, is several times larger where the catalog is incomplete
+(x4.3 at z = 0.1 for `eta = 1`, `alpha = -1.1`, a K-band-like limit).
+
+- **Default.** Nothing changes without the option: `None` runs the
+  previous call of `missing_host_efficiency_grid` unchanged, and
+  `mu_miss_estimator` keeps its meaning. With the option `mu_miss_estimator` is
+  not read.
+- **Integral.** A fixed 96-node Gauss-Legendre rule in `ln x` on
+  `[ln x_min, ln x_lim(z)]` per grid redshift
+  (`OUT_OF_CATALOG_QUADRATURE_ORDER`), in log space, differentiable in `eta`,
+  `alpha` and the limits; `log_h` is clipped to `+-LOG_H_CLIP` as for the
+  catalogued galaxies. Where `x_lim(z) <= x_min` the interval collapses onto
+  `x_min` and the weight is its limit, `h(x_min)`.
+- **Requirements.** One mark, the log luminosity (`ValueError` otherwise).
+  `log_x_lim` is given on `darksirens.cosmology._grid.zgrid`; with
+  h-scaled luminosities a flux limit makes it independent of `H0` at fixed
+  background shape. The marks must be centred by the constant `log_x_ref`, not
+  per redshift bin. A per-bin centring `c(z)` multiplies every host at `z` by
+  `exp(-eta c(z))`. Under the default that is harmless: it makes the catalog
+  mean of `h` about 1 in every bin, so the host density at `z` stays the galaxy
+  density. With `E_miss` it is not: `exp(-eta c(z))` falls with `z` (the
+  catalogued galaxies are brighter at higher `z`) and acts as a change of the
+  merger-rate evolution. The number density `n0` is the caller's: a
+  caller that samples `alpha` and keeps `phi_*` fixed should tie `n0` to
+  `int_{x_min} phi dx`.
+- **Not in `ds.model`.** The option is reachable only through the marked
+  likelihood and the prior-state builder; the plan record and run fingerprint
+  do not see it.
+- **Cost.** One `(N_z, 96)` evaluation per proposal and state, in place of
+  the per-bin mean over the aligned catalog rows.
+- **Checks.** `tests/test_out_of_catalog_weight.py`: weight 1 at `eta = 0`;
+  agreement with `scipy.integrate.quad` to 1e-8 relative for three
+  `(alpha, eta, x_ref)` at three redshifts; the empty-interval limit; finite,
+  non-zero gradients in `eta` and `alpha`; and in the prior state
+  `dN_miss = curves.dN_miss * E_miss` to 1e-12 with `log_Nobs` identical to the
+  default build. `test_catalog_hosts` and `test_catalog_kernel_window` pass
+  unchanged (with the new file: 57 passed, 14 deselected by the default
+  markers).
+- **Legacy parity.** The frozen reference has no such mode.
+
 ### Completeness and the selection budget (default numerics unchanged)
 
 Every default log-likelihood is unchanged bit for bit. This was checked on
