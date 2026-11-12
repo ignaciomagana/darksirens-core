@@ -45,6 +45,7 @@ def marked_dark_siren_log_likelihood(
     selection_mc_correction: str = DEFAULT_SELECTION_MC_CORRECTION,
     return_diagnostics: bool = False,
     mu_miss_estimator: str = "count",
+    out_of_catalog_weight=None,
 ):
     """Evaluate the conditional incomplete-catalog hierarchy with host marks.
 
@@ -57,6 +58,11 @@ def marked_dark_siren_log_likelihood(
     ``mu_miss_estimator`` is the missing-host efficiency estimator of both
     seams: ``"count"`` (the default, legacy) or the opt-in ``"weighted"``
     (:func:`darksirens.catalog.hosts.missing_host_efficiency_grid`).
+
+    ``out_of_catalog_weight`` (a
+    :class:`darksirens.catalog.hosts.SchechterOutOfCatalogWeight`, default
+    ``None``) replaces that estimator in both seams by the host weighting
+    averaged over the luminosity function below the catalog limit.
     """
 
     # The marked host kernel sums every galaxy.  The per-sample evaluator reads
@@ -76,6 +82,7 @@ def marked_dark_siren_log_likelihood(
         host_marks_pe,
         host_params,
         mu_miss_estimator=mu_miss_estimator,
+        out_of_catalog_weight=out_of_catalog_weight,
     )
     state_sel = build_marked_incomplete_catalog_prior_state(
         cosmology,
@@ -86,6 +93,7 @@ def marked_dark_siren_log_likelihood(
         host_marks_sel,
         host_params,
         mu_miss_estimator=mu_miss_estimator,
+        out_of_catalog_weight=out_of_catalog_weight,
     )
 
     def prior_pe(z, pix, catalog):
