@@ -8,6 +8,8 @@ there is no string registry or survey-native column interpretation here.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -615,6 +617,74 @@ def missing_host_efficiency_grid(
     return _mu_miss_from_flat(zs, h, real)
 
 
+class SchechterOutOfCatalogWeight(NamedTuple):
+    """Luminosity function of the galaxies a flux-limited catalog misses.
+
+    With this weight the out-of-catalog hosts carry the host weighting of the
+    galaxies that are actually missing, i.e. those fainter than the catalog
+    limit, instead of the mean over catalogued galaxies (``E_obs[h|z]``).  For
+    one mark ``m = ln(L/L_*) - log_x_ref`` (``h = (L / L_ref)^eta``) and a
+    Schechter function ``phi(x) ~ x^alpha exp(-x)``, ``x = L/L_*``,
+
+        E_miss[h|z] = int_{x_min}^{x_lim(z)} h(x) phi(x) dx
+                      / int_{x_min}^{x_lim(z)} phi(x) dx,
+
+    evaluated with a fixed Gauss-Legendre rule in ``ln x`` (differentiable in
+    ``eta`` and ``alpha``).  ``log_h`` is clipped to ``+-LOG_H_CLIP`` as for
+    the catalogued galaxies.
+
+    Fields (all may be traced):
+
+    ``alpha``: faint-end slope.  ``log_x_min``: ``ln(L_min/L_*)``, the faint
+    end of the host population.  ``log_x_lim``: ``ln(L_lim(z)/L_*)`` on
+    :data:`darksirens.cosmology._grid.zgrid` (for a flux limit, h-scaled
+    luminosities make it independent of H0 at fixed background shape).
+    ``log_x_ref``: the constant mark offset, ``m = ln x - log_x_ref``.
+
+    The marks must then be centred by this constant, not per redshift: a
+    per-redshift centring multiplies every host at ``z`` by
+    ``exp(-eta c(z))``, which is a change of the merger-rate evolution.
+    """
+
+    alpha: object
+    log_x_min: object
+    log_x_lim: object
+    log_x_ref: object = 0.0
+
+
+#: Gauss-Legendre order of the out-of-catalog luminosity integral.
+OUT_OF_CATALOG_QUADRATURE_ORDER: int = 96
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(OUT_OF_CATALOG_QUADRATURE_ORDER)
+
+
+def schechter_out_of_catalog_efficiency(
+    model: LogLinearHostModel,
+    eta,
+    weight: SchechterOutOfCatalogWeight,
+):
+    """Return ``E_miss[h|z]`` on the shared redshift grid (see the class)."""
+
+    if len(model.mark_names) != 1:
+        raise ValueError(
+            "SchechterOutOfCatalogWeight takes one luminosity mark; the host "
+            f"model has {len(model.mark_names)} marks {model.mark_names}"
+        )
+    eta = jnp.asarray(eta)
+    lo = jnp.asarray(weight.log_x_min, dtype=zgrid.dtype)
+    hi = jnp.maximum(jnp.asarray(weight.log_x_lim, dtype=zgrid.dtype), lo)
+    # One rule per redshift on [ln x_min, ln x_lim(z)]; an empty interval
+    # (no missing galaxy brighter than x_min) collapses onto x_min, where the
+    # weight is the limit of the ratio.
+    half = 0.5 * (hi - lo)
+    t = (lo + half)[:, None] + half[:, None] * jnp.asarray(_GL_X)[None, :]
+    log_phi_dlnx = (weight.alpha + 1.0) * t - jnp.exp(t)
+    log_h = jnp.clip(eta[0] * (t - weight.log_x_ref), -LOG_H_CLIP, LOG_H_CLIP)
+    log_gw = jnp.log(jnp.asarray(_GL_W))[None, :]
+    num = logsumexp(log_phi_dlnx + log_h + log_gw, axis=-1)
+    den = logsumexp(log_phi_dlnx + log_gw, axis=-1)
+    return jnp.exp(num - den)
+
+
 def build_marked_incomplete_catalog_prior_state(
     cosmo,
     params: CatalogParameters,
@@ -625,6 +695,7 @@ def build_marked_incomplete_catalog_prior_state(
     eta,
     *,
     mu_miss_estimator: str = "count",
+    out_of_catalog_weight: SchechterOutOfCatalogWeight | None = None,
 ) -> IncompleteCatalogPriorState:
     """Build the ordinary conditional marked-host dark-siren prior state.
 
@@ -632,9 +703,13 @@ def build_marked_incomplete_catalog_prior_state(
     magnitude-selection model on ``params.selection``
     (``completeness="selection"``) is refused, not ignored.
     ``mu_miss_estimator`` is passed to :func:`missing_host_efficiency_grid`
-    (``"count"``, the default, or the opt-in ``"weighted"``).  The kernel
-    window convention is that of :func:`build_marked_catalog_kernel_state`:
-    evaluate the state against the catalog without its window.
+    (``"count"``, the default, or the opt-in ``"weighted"``).  With
+    ``out_of_catalog_weight`` (a :class:`SchechterOutOfCatalogWeight`) the
+    out-of-catalog hosts instead carry the host weighting averaged over the
+    luminosity function below the catalog limit, and ``mu_miss_estimator`` is
+    not used.  The kernel window convention is that of
+    :func:`build_marked_catalog_kernel_state`: evaluate the state against the
+    catalog without its window.
     """
 
     if getattr(params, "selection", None) is not None:
@@ -652,10 +727,15 @@ def build_marked_incomplete_catalog_prior_state(
         cosmo, params, catalog, model, marks, eta
     )
     curves = completion_curves(cosmo, params, catalog, observed_cache)
-    mu_miss = missing_host_efficiency_grid(
-        catalog, model, marks, eta, aligned_log_h=log_h,
-        mu_miss_estimator=mu_miss_estimator,
-    )
+    if out_of_catalog_weight is None:
+        mu_miss = missing_host_efficiency_grid(
+            catalog, model, marks, eta, aligned_log_h=log_h,
+            mu_miss_estimator=mu_miss_estimator,
+        )
+    else:
+        mu_miss = schechter_out_of_catalog_efficiency(
+            model, eta, out_of_catalog_weight
+        )
     dN_miss = curves.dN_miss * mu_miss[None, :]
     N_host_miss = jnp.trapezoid(dN_miss, zgrid, axis=-1)
 
@@ -689,6 +769,9 @@ __all__ = [
     "LogLinearHostModel",
     "MARK_SATURATION_MAX_FRACTION",
     "MU_MISS_ESTIMATORS",
+    "OUT_OF_CATALOG_QUADRATURE_ORDER",
+    "SchechterOutOfCatalogWeight",
+    "schechter_out_of_catalog_efficiency",
     "build_marked_catalog_kernel_state",
     "build_marked_incomplete_catalog_prior_state",
     "check_centered_marks",
